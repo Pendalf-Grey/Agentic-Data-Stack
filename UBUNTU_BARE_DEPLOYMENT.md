@@ -1,55 +1,97 @@
-# Развертывание Agentic Data Stack на голых Ubuntu servers
+# Bare Ubuntu deployment: Agentic Data Stack на 3 серверах
 
-Документ описывает минимальное production-like развертывание на трёх Ubuntu Server через приватную VPN-сеть Tailscale.
+Этот документ описывает минимальное развертывание Agentic Data Stack на трёх чистых Ubuntu Server, связанных приватной VPN-сетью Tailscale.
 
-Цель: поднять только обязательные элементы, без которых стек не работает:
+Документ содержит только обязательные компоненты. JS-код здесь не приводится: `mcp-server` и `agent-proxy` запускаются как готовые container images.
 
-- PostgreSQL или другая source database.
-- Debezium Connect.
-- Kafka-compatible broker для Debezium, в примерах используется Redpanda.
-- ClickHouse.
-- MCP server.
-- LibreChat.
-- LangFuse.
-- LLM runtime.
-- Adminer для просмотра PostgreSQL и ClickHouse.
-- Airflow для orchestration Debezium jobs.
+## Содержание
 
-В документе нет JS-кода приложения. MCP server и LLM proxy предполагаются как готовые контейнеры/образы или уже собранные сервисы. Если в вашей сборке MCP/agent proxy реализованы на Node.js, на сервере всё равно запускаются только контейнеры, без ручного написания JS-кода.
+1. [Итоговая архитектура](#1-итоговая-архитектура)
+2. [Имена, порты и переменные](#2-имена-порты-и-переменные)
+3. [Общая подготовка всех серверов](#3-общая-подготовка-всех-серверов)
+4. [Tailscale VPN](#4-tailscale-vpn)
+5. [Machine 3: source database node](#5-machine-3-source-database-node)
+6. [Machine 1: AI/data node](#6-machine-1-aidata-node)
+7. [Machine 2: pipeline node](#7-machine-2-pipeline-node)
+8. [Debezium migration scenarios](#8-debezium-migration-scenarios)
+9. [Adminer и UI-доступы](#9-adminer-и-ui-доступы)
+10. [End-to-end smoke check](#10-end-to-end-smoke-check)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Production notes](#12-production-notes)
 
-## 0. Схема машин
+## Как читать команды
+
+Каждый шаг оформлен одинаково:
+
+- **Команда** — что выполнить.
+- **Проверка** — чем проверить результат.
+- **Ожидаемо** — что должно получиться.
+
+Команды выполняются на конкретной машине, указанной в заголовке раздела.
+
+---
+
+## 1. Итоговая архитектура
+
+### 1.1. Распределение по машинам
 
 ```text
 Machine 1: ai-data-node
-  Tailscale name/IP: ai-data-node / 100.x.x.1
-  Services:
-    - ClickHouse
-    - MCP server
-    - LibreChat
-    - LibreChat MongoDB
-    - LangFuse
-    - LangFuse PostgreSQL
-    - LLM runtime, например Ollama/vLLM/LM Studio-compatible endpoint
-    - Adminer
+  - ClickHouse
+  - MCP server
+  - LibreChat
+  - LibreChat MongoDB
+  - LangFuse
+  - LangFuse PostgreSQL
+  - LLM runtime, например Ollama
+  - agent-proxy для LangFuse tracing LLM-вызовов
+  - Adminer для просмотра ClickHouse
 
 Machine 2: pipeline-node
-  Tailscale name/IP: pipeline-node / 100.x.x.2
-  Services:
-    - Redpanda
-    - Debezium Connect
-    - Debezium UI
-    - Airflow webserver
-    - Airflow scheduler
-    - Airflow metadata PostgreSQL
+  - Redpanda или Kafka
+  - Debezium Connect
+  - Debezium UI
+  - Airflow webserver
+  - Airflow scheduler
+  - Airflow metadata PostgreSQL
 
 Machine 3: source-db-node
-  Tailscale name/IP: source-db-node / 100.x.x.3
-  Services:
-    - PostgreSQL source database
-    - optional Adminer, если нужен локальный доступ к source DB
+  - PostgreSQL source database
+  - Adminer для просмотра PostgreSQL
 ```
 
-Дальше в командах используются DNS-имена Tailscale MagicDNS:
+### 1.2. Data flow
+
+```text
+PostgreSQL source DB
+  -> Debezium PostgreSQL Source Connector
+  -> Redpanda/Kafka topic
+  -> ClickHouse Sink Connector
+  -> ClickHouse
+  -> MCP server
+  -> LibreChat
+
+LibreChat
+  -> agent-proxy
+  -> LLM runtime
+  -> LangFuse traces
+```
+
+### 1.3. Почему нужен Redpanda/Kafka
+
+Debezium Connect не пишет напрямую из PostgreSQL в ClickHouse. Он публикует CDC events в Kafka-compatible broker. Поэтому минимальный pipeline требует:
+
+```text
+PostgreSQL -> Debezium -> Kafka/Redpanda -> ClickHouse Sink -> ClickHouse
+```
+
+---
+
+## 2. Имена, порты и переменные
+
+### 2.1. Tailscale hostnames
+
+В документе используются MagicDNS-имена:
 
 ```text
 ai-data-node
@@ -57,161 +99,228 @@ pipeline-node
 source-db-node
 ```
 
-Если MagicDNS выключен, используйте Tailscale IP вида `100.x.x.x`.
+Если MagicDNS отключён, замените имена на Tailscale IP вида `100.x.x.x`.
 
-## 1. Подготовка всех трёх Ubuntu servers
+### 2.2. Основные порты
 
-Выполнить на каждой машине.
+| Машина | Порт | Сервис | Назначение |
+|---|---:|---|---|
+| `ai-data-node` | `8123` | ClickHouse HTTP/UI | SQL HTTP API и `/play` |
+| `ai-data-node` | `9000` | ClickHouse native | Native protocol |
+| `ai-data-node` | `3333` | MCP server | MCP endpoint/health |
+| `ai-data-node` | `3344` | agent-proxy | OpenAI-compatible proxy |
+| `ai-data-node` | `3000` | LangFuse | LangFuse UI/API |
+| `ai-data-node` | `3080` | LibreChat | Chat UI |
+| `ai-data-node` | `11434` | Ollama | LLM runtime |
+| `ai-data-node` | `8082` | Adminer | ClickHouse/PostgreSQL UI |
+| `pipeline-node` | `9092` | Redpanda/Kafka | Kafka API |
+| `pipeline-node` | `9644` | Redpanda admin | Admin API |
+| `pipeline-node` | `8083` | Debezium Connect | Connect REST API |
+| `pipeline-node` | `8080` | Debezium UI | Connect UI |
+| `pipeline-node` | `8081` | Airflow | Airflow UI |
+| `source-db-node` | `5432` | PostgreSQL | Source DB |
+| `source-db-node` | `8082` | Adminer | PostgreSQL UI |
 
-### 1.1. Обновить ОС
+### 2.3. Demo credentials
+
+Для production обязательно заменить.
+
+```text
+PostgreSQL source:
+  DB: app_logs
+  User: app
+  Password: app_password
+
+ClickHouse:
+  DB: analytics
+  User: analytics
+  Password: analytics_password
+
+Airflow:
+  User: admin
+  Password: admin
+
+LangFuse DB:
+  DB: langfuse
+  User: langfuse
+  Password: langfuse_password
+```
+
+---
+
+## 3. Общая подготовка всех серверов
+
+Выполнить на каждой машине: `ai-data-node`, `pipeline-node`, `source-db-node`.
+
+### 3.1. Обновить ОС
+
+**Команда:**
 
 ```bash
 sudo apt update && sudo apt upgrade -y
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 lsb_release -a && uname -a
 ```
 
-Ожидаемо: команда показывает Ubuntu Server и актуальное ядро.
+**Ожидаемо:** Ubuntu Server и версия ядра выводятся без ошибок.
 
-### 1.2. Установить базовые утилиты
+### 3.2. Установить базовые утилиты
+
+**Команда:**
 
 ```bash
-sudo apt install -y ca-certificates curl gnupg lsb-release jq net-tools htop unzip
+sudo apt install -y ca-certificates curl gnupg lsb-release jq net-tools htop unzip nano
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 curl --version && jq --version
 ```
 
-Ожидаемо: обе команды выводят версии.
+**Ожидаемо:** обе команды выводят версии.
 
-### 1.3. Установить Docker Engine и Docker Compose plugin
+### 3.3. Установить Docker Engine
+
+**Команда:**
 
 ```bash
 sudo install -m 0755 -d /etc/apt/keyrings
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 ls -ld /etc/apt/keyrings
 ```
 
+**Команда:**
+
 ```bash
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 ls -l /etc/apt/keyrings/docker.gpg
 ```
 
+**Команда:**
+
 ```bash
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 stat -c '%a %n' /etc/apt/keyrings/docker.gpg
 ```
 
+**Команда:**
+
 ```bash
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 cat /etc/apt/sources.list.d/docker.list
 ```
 
+**Команда:**
+
 ```bash
 sudo apt update
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 apt-cache policy docker-ce | sed -n '1,20p'
 ```
 
+**Команда:**
+
 ```bash
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 docker --version && docker compose version
 ```
 
+### 3.4. Разрешить текущему пользователю запускать Docker
+
+**Команда:**
+
 ```bash
 sudo usermod -aG docker $USER
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 id $USER
 ```
 
-Важно: после добавления пользователя в группу Docker перелогиньтесь по SSH.
+**Ожидаемо:** в списке групп есть `docker`.
 
-После перелогина проверить:
+После этого перелогиньтесь по SSH.
+
+**Проверка после перелогина:**
 
 ```bash
 docker run --rm hello-world
 ```
 
-Ожидаемо: Docker выводит `Hello from Docker!`.
+**Ожидаемо:** Docker выводит `Hello from Docker!`.
 
-### 1.4. Создать рабочую директорию
+### 3.5. Создать рабочую директорию
 
-```bash
-sudo mkdir -p /opt/agentic-data-stack
-```
-
-Проверка:
+**Команда:**
 
 ```bash
-ls -ld /opt/agentic-data-stack
+sudo mkdir -p /opt/agentic-data-stack && sudo chown -R $USER:$USER /opt/agentic-data-stack
 ```
 
-```bash
-sudo chown -R $USER:$USER /opt/agentic-data-stack
-```
-
-Проверка:
+**Проверка:**
 
 ```bash
 stat -c '%U:%G %n' /opt/agentic-data-stack
 ```
 
-## 2. Tailscale VPN для трёх машин
+**Ожидаемо:** владелец — текущий пользователь.
+
+---
+
+## 4. Tailscale VPN
 
 Выполнить на каждой машине.
 
-### 2.1. Установить Tailscale
+### 4.1. Установить Tailscale
+
+**Команда:**
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
 ```
 
-Проверка:
+**Проверка:**
 
 ```bash
 tailscale version
 ```
 
-### 2.2. Подключить машину к tailnet
+### 4.2. Подключить машины к tailnet
 
 На `ai-data-node`:
 
@@ -249,35 +358,30 @@ sudo tailscale up --hostname=source-db-node --ssh
 tailscale status
 ```
 
-### 2.3. Проверить связность между машинами
+**Ожидаемо:** все три машины видны в одном tailnet.
 
-С `pipeline-node` проверить source database node:
+### 4.3. Проверить связность
+
+На `pipeline-node`:
 
 ```bash
 ping -c 3 source-db-node
-```
-
-Проверка успешности: есть ответы `3 received`.
-
-С `pipeline-node` проверить ClickHouse node:
-
-```bash
 ping -c 3 ai-data-node
 ```
 
-Проверка успешности: есть ответы `3 received`.
+Проверка: в обоих случаях `3 received`.
 
-С `ai-data-node` проверить pipeline node:
+На `ai-data-node`:
 
 ```bash
 ping -c 3 pipeline-node
 ```
 
-Проверка успешности: есть ответы `3 received`.
+Проверка: `3 received`.
 
-### 2.4. Минимальные firewall правила
+### 4.4. Firewall только через Tailscale
 
-На `source-db-node` разрешить PostgreSQL только из Tailscale:
+На `source-db-node`:
 
 ```bash
 sudo ufw allow in on tailscale0 to any port 5432 proto tcp
@@ -286,128 +390,44 @@ sudo ufw allow in on tailscale0 to any port 5432 proto tcp
 Проверка:
 
 ```bash
-sudo ufw status verbose
+sudo ufw status verbose | grep 5432
 ```
 
-На `ai-data-node` разрешить ClickHouse, LibreChat, LangFuse, MCP, Adminer и LLM endpoint через Tailscale:
+На `ai-data-node`:
 
 ```bash
-sudo ufw allow in on tailscale0 to any port 8123 proto tcp
+for port in 8123 9000 3333 3344 3000 3080 11434 8082; do sudo ufw allow in on tailscale0 to any port $port proto tcp; done
 ```
 
 Проверка:
 
 ```bash
-sudo ufw status verbose | grep 8123
+sudo ufw status verbose | grep -E '8123|9000|3333|3344|3000|3080|11434|8082'
 ```
 
+На `pipeline-node`:
+
 ```bash
-sudo ufw allow in on tailscale0 to any port 9000 proto tcp
+for port in 8083 8080 8081 9092 9644; do sudo ufw allow in on tailscale0 to any port $port proto tcp; done
 ```
 
 Проверка:
 
 ```bash
-sudo ufw status verbose | grep 9000
+sudo ufw status verbose | grep -E '8083|8080|8081|9092|9644'
 ```
 
-```bash
-sudo ufw allow in on tailscale0 to any port 3333 proto tcp
-```
+---
 
-Проверка:
+## 5. Machine 3: source database node
 
-```bash
-sudo ufw status verbose | grep 3333
-```
+Выполнять на `source-db-node`.
 
-```bash
-sudo ufw allow in on tailscale0 to any port 3000 proto tcp
-```
+### 5.1. Цель раздела
 
-Проверка:
+Поднять PostgreSQL с logical replication и Adminer для просмотра source DB.
 
-```bash
-sudo ufw status verbose | grep 3000
-```
-
-```bash
-sudo ufw allow in on tailscale0 to any port 3080 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 3080
-```
-
-```bash
-sudo ufw allow in on tailscale0 to any port 8082 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 8082
-```
-
-```bash
-sudo ufw allow in on tailscale0 to any port 11434 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 11434
-```
-
-На `pipeline-node` разрешить Debezium, Debezium UI, Redpanda и Airflow через Tailscale:
-
-```bash
-sudo ufw allow in on tailscale0 to any port 8083 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 8083
-```
-
-```bash
-sudo ufw allow in on tailscale0 to any port 8080 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 8080
-```
-
-```bash
-sudo ufw allow in on tailscale0 to any port 8081 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 8081
-```
-
-```bash
-sudo ufw allow in on tailscale0 to any port 9092 proto tcp
-```
-
-Проверка:
-
-```bash
-sudo ufw status verbose | grep 9092
-```
-
-## 3. Machine 3: PostgreSQL source database
-
-Раздел выполняется на `source-db-node`.
-
-### 3.1. Создать docker-compose для PostgreSQL и Adminer
+### 5.2. Создать директории и `.env`
 
 ```bash
 mkdir -p /opt/agentic-data-stack/source-db/postgres-init
@@ -420,11 +440,11 @@ ls -ld /opt/agentic-data-stack/source-db/postgres-init
 ```
 
 ```bash
-cat > /opt/agentic-data-stack/source-db/.env <<'EOF'
+cat > /opt/agentic-data-stack/source-db/.env <<'ENV'
 POSTGRES_DB=app_logs
 POSTGRES_USER=app
 POSTGRES_PASSWORD=app_password
-EOF
+ENV
 ```
 
 Проверка:
@@ -433,8 +453,10 @@ EOF
 grep -E 'POSTGRES_DB|POSTGRES_USER' /opt/agentic-data-stack/source-db/.env
 ```
 
+### 5.3. Создать demo schema и seed data
+
 ```bash
-cat > /opt/agentic-data-stack/source-db/postgres-init/001_schema.sql <<'EOF'
+cat > /opt/agentic-data-stack/source-db/postgres-init/001_schema.sql <<'SQL'
 CREATE TABLE IF NOT EXISTS public.app_events
 (
   id BIGSERIAL PRIMARY KEY,
@@ -466,19 +488,20 @@ SELECT
   CASE WHEN g % 3 = 0 THEN 50 + (g % 500) ELSE NULL END,
   CASE WHEN g % 3 = 0 THEN ((g % 100)::numeric / 10000) ELSE NULL END,
   jsonb_build_object('source', 'seed', 'n', g)
-FROM generate_series(1, 1000) AS g
-ON CONFLICT DO NOTHING;
-EOF
+FROM generate_series(1, 1000) AS g;
+SQL
 ```
 
 Проверка:
 
 ```bash
-sed -n '1,20p' /opt/agentic-data-stack/source-db/postgres-init/001_schema.sql
+sed -n '1,30p' /opt/agentic-data-stack/source-db/postgres-init/001_schema.sql
 ```
 
+### 5.4. Создать Compose file
+
 ```bash
-cat > /opt/agentic-data-stack/source-db/docker-compose.yml <<'EOF'
+cat > /opt/agentic-data-stack/source-db/docker-compose.yml <<'YAML'
 services:
   postgres:
     image: postgres:16-alpine
@@ -516,7 +539,7 @@ services:
 
 volumes:
   postgres_data:
-EOF
+YAML
 ```
 
 Проверка:
@@ -525,7 +548,7 @@ EOF
 docker compose -f /opt/agentic-data-stack/source-db/docker-compose.yml config >/dev/null && echo OK
 ```
 
-### 3.2. Запустить PostgreSQL source database
+### 5.5. Запустить PostgreSQL и Adminer
 
 ```bash
 docker compose -f /opt/agentic-data-stack/source-db/docker-compose.yml up -d
@@ -537,7 +560,9 @@ docker compose -f /opt/agentic-data-stack/source-db/docker-compose.yml up -d
 docker compose -f /opt/agentic-data-stack/source-db/docker-compose.yml ps
 ```
 
-Проверить readiness:
+Ожидаемо: `source_postgres` и `source_adminer` в состоянии `Up`.
+
+### 5.6. Проверить PostgreSQL
 
 ```bash
 docker exec source_postgres pg_isready -U app -d app_logs
@@ -545,15 +570,11 @@ docker exec source_postgres pg_isready -U app -d app_logs
 
 Ожидаемо: `accepting connections`.
 
-Проверить logical replication:
-
 ```bash
 docker exec source_postgres psql -U app -d app_logs -c "SHOW wal_level;"
 ```
 
 Ожидаемо: `logical`.
-
-Проверить данные:
 
 ```bash
 docker exec source_postgres psql -U app -d app_logs -c "SELECT count(*) FROM public.app_events;"
@@ -561,78 +582,50 @@ docker exec source_postgres psql -U app -d app_logs -c "SELECT count(*) FROM pub
 
 Ожидаемо: `1000`.
 
-Проверить доступ с `pipeline-node`:
+### 5.7. Проверить доступ с pipeline node
 
-```bash
-psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT count(*) FROM public.app_events;"
-```
-
-Если `psql` не установлен на `pipeline-node`, установить:
+Выполнить на `pipeline-node`.
 
 ```bash
 sudo apt install -y postgresql-client
 ```
 
-Проверка установки:
+Проверка:
 
 ```bash
 psql --version
 ```
 
-Adminer source database:
-
-```text
-http://source-db-node:8082
+```bash
+psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT count(*) FROM public.app_events;"
 ```
 
-Параметры входа:
+Ожидаемо: `1000`.
 
-```text
-System: PostgreSQL
-Server: postgres
-Username: app
-Password: app_password
-Database: app_logs
-```
+---
 
-Проверка Adminer:
+## 6. Machine 1: AI/data node
+
+Выполнять на `ai-data-node`.
+
+### 6.1. Цель раздела
+
+Поднять ClickHouse, LLM runtime, LangFuse, MCP server, LibreChat и Adminer.
+
+### 6.2. Создать директории и `.env`
 
 ```bash
-curl -I http://source-db-node:8082
-```
-
-Ожидаемо: HTTP status `200` или `302`.
-
-## 4. Machine 1: ClickHouse, Adminer, LangFuse, LibreChat, MCP, LLM
-
-Раздел выполняется на `ai-data-node`.
-
-### 4.1. Создать директории
-
-```bash
-mkdir -p /opt/agentic-data-stack/ai-data/clickhouse-init
+mkdir -p /opt/agentic-data-stack/ai-data/{clickhouse-init,librechat}
 ```
 
 Проверка:
 
 ```bash
-ls -ld /opt/agentic-data-stack/ai-data/clickhouse-init
+find /opt/agentic-data-stack/ai-data -maxdepth 2 -type d | sort
 ```
 
 ```bash
-mkdir -p /opt/agentic-data-stack/ai-data/librechat
-```
-
-Проверка:
-
-```bash
-ls -ld /opt/agentic-data-stack/ai-data/librechat
-```
-
-### 4.2. Создать `.env`
-
-```bash
-cat > /opt/agentic-data-stack/ai-data/.env <<'EOF'
+cat > /opt/agentic-data-stack/ai-data/.env <<'ENV'
 CLICKHOUSE_DB=analytics
 CLICKHOUSE_USER=analytics
 CLICKHOUSE_PASSWORD=analytics_password
@@ -648,29 +641,26 @@ LANGFUSE_SECRET_KEY=replace-after-langfuse-project-created
 
 LIBRECHAT_JWT_SECRET=replace-with-long-random-secret
 LIBRECHAT_JWT_REFRESH_SECRET=replace-with-long-random-secret
-LIBRECHAT_MODELS=qwen2.5:7b
-LIBRECHAT_TITLE_MODEL=qwen2.5:7b
-LIBRECHAT_SUMMARY_MODEL=qwen2.5:7b
 AGENT_PROXY_API_KEY=local-dev-key
 AGENT_PROXY_BASE_URL=http://agent-proxy:3344/v1
 
 UPSTREAM_OPENAI_API_KEY=local-dev-key
 UPSTREAM_OPENAI_BASE_URL=http://ollama:11434/v1
-EOF
+ENV
 ```
 
 Проверка:
 
 ```bash
-grep -E 'CLICKHOUSE_DB|LANGFUSE_HOST|LIBRECHAT_MODELS|UPSTREAM_OPENAI_BASE_URL' /opt/agentic-data-stack/ai-data/.env
+grep -E 'CLICKHOUSE_DB|LANGFUSE_HOST|AGENT_PROXY_BASE_URL|UPSTREAM_OPENAI_BASE_URL' /opt/agentic-data-stack/ai-data/.env
 ```
 
-### 4.3. Вариант B: заранее подготовленная структура ClickHouse
+### 6.3. Подготовить ClickHouse schema для варианта B
 
-Этот вариант нужен, если ClickHouse schema уже известна и должна контролироваться вручную.
+Если выбираете Debezium вариант B, создайте schema заранее.
 
 ```bash
-cat > /opt/agentic-data-stack/ai-data/clickhouse-init/001_schema.sql <<'EOF'
+cat > /opt/agentic-data-stack/ai-data/clickhouse-init/001_schema.sql <<'SQL'
 CREATE DATABASE IF NOT EXISTS analytics;
 
 CREATE TABLE IF NOT EXISTS analytics.app_events_raw
@@ -704,21 +694,25 @@ SELECT
 FROM analytics.app_events_raw
 GROUP BY hour, event_type
 ORDER BY hour DESC, event_type;
-EOF
+SQL
 ```
 
 Проверка:
 
 ```bash
-sed -n '1,40p' /opt/agentic-data-stack/ai-data/clickhouse-init/001_schema.sql
+sed -n '1,80p' /opt/agentic-data-stack/ai-data/clickhouse-init/001_schema.sql
 ```
 
-Для варианта A, когда структура создаётся автоматически ClickHouse sink connector, этот файл можно не создавать или оставить только `CREATE DATABASE IF NOT EXISTS analytics;`. Подробности в разделе 6.
+Если выбираете вариант A, оставьте только:
 
-### 4.4. LibreChat config без ручного JS-кода
+```sql
+CREATE DATABASE IF NOT EXISTS analytics;
+```
+
+### 6.4. Подготовить LibreChat config
 
 ```bash
-cat > /opt/agentic-data-stack/ai-data/librechat/librechat.yaml <<'EOF'
+cat > /opt/agentic-data-stack/ai-data/librechat/librechat.yaml <<'YAML'
 version: 1.2.1
 
 cache: true
@@ -746,7 +740,7 @@ mcpServers:
   clickhouse-analytics:
     type: streamable-http
     url: http://mcp-server:3333/mcp
-EOF
+YAML
 ```
 
 Проверка:
@@ -755,12 +749,12 @@ EOF
 sed -n '1,80p' /opt/agentic-data-stack/ai-data/librechat/librechat.yaml
 ```
 
-### 4.5. Создать docker-compose для Machine 1
+### 6.5. Создать Compose file
 
-Важно: `mcp-server` и `agent-proxy` ниже указаны как готовые container images. Замените `your-registry/...` на ваши реальные образы. Если вы не используете отдельный `agent-proxy`, LibreChat можно подключить напрямую к LLM OpenAI-compatible endpoint, но тогда LangFuse tracing нужно обеспечить другим способом.
+`mcp-server` и `agent-proxy` указаны как готовые образы. Замените `your-registry/...` на реальные имена.
 
 ```bash
-cat > /opt/agentic-data-stack/ai-data/docker-compose.yml <<'EOF'
+cat > /opt/agentic-data-stack/ai-data/docker-compose.yml <<'YAML'
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -885,11 +879,6 @@ services:
   adminer:
     image: adminer:4
     container_name: ai_adminer
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      langfuse-db:
-        condition: service_healthy
     ports:
       - "8082:8080"
 
@@ -898,60 +887,42 @@ volumes:
   langfuse_db_data:
   librechat_mongo_data:
   ollama_data:
-EOF
+YAML
 ```
 
 Проверка:
 
 ```bash
-docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml config >/dev/null && echo OK
+docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml --env-file /opt/agentic-data-stack/ai-data/.env config >/dev/null && echo OK
 ```
 
-### 4.6. Запустить Machine 1 services
+### 6.6. Запустить и проверить Machine 1
 
 ```bash
-docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml up -d
+docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml --env-file /opt/agentic-data-stack/ai-data/.env up -d
 ```
 
 Проверка:
 
 ```bash
-docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml ps
+docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml --env-file /opt/agentic-data-stack/ai-data/.env ps
 ```
 
-Проверить ClickHouse:
+Проверки сервисов:
 
 ```bash
 curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT 1'
-```
-
-Ожидаемо: `1`.
-
-Проверить подготовленную таблицу, если используется вариант B:
-
-```bash
-curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'EXISTS TABLE analytics.app_events_raw'
-```
-
-Ожидаемо: `1`.
-
-Проверить LangFuse:
-
-```bash
 curl -I http://ai-data-node:3000
-```
-
-Ожидаемо: HTTP status `200`, `302` или другой web response без network error.
-
-Проверить Ollama:
-
-```bash
 curl http://ai-data-node:11434/api/tags
+curl http://ai-data-node:3344/health
+curl http://ai-data-node:3333/health
+curl -I http://ai-data-node:3080
+curl -I http://ai-data-node:8082
 ```
 
-Ожидаемо: JSON со списком моделей, возможно пустым.
+Ожидаемо: ClickHouse возвращает `1`, остальные endpoints отвечают без network error.
 
-Загрузить LLM модель, если используется Ollama:
+Загрузить demo LLM модель:
 
 ```bash
 docker exec ai_ollama ollama pull qwen2.5:7b
@@ -963,129 +934,37 @@ docker exec ai_ollama ollama pull qwen2.5:7b
 docker exec ai_ollama ollama list
 ```
 
-Проверить agent-proxy:
+---
+
+## 7. Machine 2: pipeline node
+
+Выполнять на `pipeline-node`.
+
+### 7.1. Цель раздела
+
+Поднять Kafka-compatible broker, Debezium Connect, Debezium UI и Airflow.
+
+### 7.2. Создать директории и `.env`
 
 ```bash
-curl http://ai-data-node:3344/health
-```
-
-Ожидаемо: JSON с `ok:true`.
-
-Проверить MCP server:
-
-```bash
-curl http://ai-data-node:3333/health
-```
-
-Ожидаемо: JSON с `ok:true`.
-
-Проверить LibreChat:
-
-```bash
-curl -I http://ai-data-node:3080
-```
-
-Ожидаемо: HTTP response от web UI.
-
-Проверить Adminer:
-
-```bash
-curl -I http://ai-data-node:8082
-```
-
-Ожидаемо: HTTP status `200` или `302`.
-
-Adminer для ClickHouse:
-
-```text
-http://ai-data-node:8082
-```
-
-Параметры входа:
-
-```text
-System: ClickHouse
-Server: clickhouse
-Username: analytics
-Password: analytics_password
-Database: analytics
-```
-
-Если текущий образ Adminer не содержит ClickHouse driver, используйте ClickHouse built-in UI:
-
-```text
-http://ai-data-node:8123/play
-```
-
-Проверка ClickHouse UI:
-
-```bash
-curl -I http://ai-data-node:8123/play
-```
-
-## 5. Machine 2: Redpanda, Debezium, Airflow
-
-Раздел выполняется на `pipeline-node`.
-
-### 5.1. Создать директории
-
-```bash
-mkdir -p /opt/agentic-data-stack/pipeline/debezium/connectors
+mkdir -p /opt/agentic-data-stack/pipeline/{debezium/connectors,debezium/plugins,airflow/dags}
 ```
 
 Проверка:
 
 ```bash
-ls -ld /opt/agentic-data-stack/pipeline/debezium/connectors
+find /opt/agentic-data-stack/pipeline -maxdepth 3 -type d | sort
 ```
 
 ```bash
-mkdir -p /opt/agentic-data-stack/pipeline/debezium/plugins
-```
-
-Проверка:
-
-```bash
-ls -ld /opt/agentic-data-stack/pipeline/debezium/plugins
-```
-
-```bash
-mkdir -p /opt/agentic-data-stack/pipeline/airflow/dags
-```
-
-Проверка:
-
-```bash
-ls -ld /opt/agentic-data-stack/pipeline/airflow/dags
-```
-
-### 5.2. Установить ClickHouse Kafka Connect plugin
-
-Скачайте ClickHouse Kafka Connect plugin и положите его в:
-
-```text
-/opt/agentic-data-stack/pipeline/debezium/plugins
-```
-
-Пример проверки после копирования:
-
-```bash
-find /opt/agentic-data-stack/pipeline/debezium/plugins -type f -name '*.jar'
-```
-
-Ожидаемо: виден JAR `clickhouse-kafka-connect`.
-
-### 5.3. Создать `.env` для pipeline node
-
-```bash
-cat > /opt/agentic-data-stack/pipeline/.env <<'EOF'
+cat > /opt/agentic-data-stack/pipeline/.env <<'ENV'
 AIRFLOW_ADMIN_USER=admin
 AIRFLOW_ADMIN_PASSWORD=admin
 AIRFLOW_ADMIN_EMAIL=admin@example.local
 AIRFLOW_DB=airflow
 AIRFLOW_DB_USER=airflow
 AIRFLOW_DB_PASSWORD=airflow_password
-EOF
+ENV
 ```
 
 Проверка:
@@ -1094,10 +973,26 @@ EOF
 grep -E 'AIRFLOW_ADMIN_USER|AIRFLOW_DB' /opt/agentic-data-stack/pipeline/.env
 ```
 
-### 5.4. Создать docker-compose для pipeline node
+### 7.3. Установить ClickHouse Kafka Connect plugin
+
+Положите ClickHouse Kafka Connect plugin JAR в:
+
+```text
+/opt/agentic-data-stack/pipeline/debezium/plugins
+```
+
+Проверка:
 
 ```bash
-cat > /opt/agentic-data-stack/pipeline/docker-compose.yml <<'EOF'
+find /opt/agentic-data-stack/pipeline/debezium/plugins -type f -name '*.jar'
+```
+
+Ожидаемо: виден JAR `clickhouse-kafka-connect`.
+
+### 7.4. Создать Compose file
+
+```bash
+cat > /opt/agentic-data-stack/pipeline/docker-compose.yml <<'YAML'
 services:
   redpanda:
     image: redpandadata/redpanda:v24.2.8
@@ -1160,7 +1055,6 @@ services:
   airflow-db:
     image: postgres:16-alpine
     container_name: pipeline_airflow_db
-    env_file: .env
     environment:
       POSTGRES_DB: ${AIRFLOW_DB}
       POSTGRES_USER: ${AIRFLOW_DB_USER}
@@ -1179,7 +1073,6 @@ services:
     depends_on:
       airflow-db:
         condition: service_healthy
-    env_file: .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/${AIRFLOW_DB}
@@ -1194,7 +1087,6 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-    env_file: .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/${AIRFLOW_DB}
@@ -1211,7 +1103,6 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-    env_file: .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/${AIRFLOW_DB}
@@ -1223,91 +1114,60 @@ services:
 volumes:
   redpanda_data:
   airflow_db_data:
-EOF
+YAML
 ```
 
 Проверка:
 
 ```bash
-docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml config >/dev/null && echo OK
+docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml --env-file /opt/agentic-data-stack/pipeline/.env config >/dev/null && echo OK
 ```
 
-### 5.5. Запустить pipeline services
+### 7.5. Запустить и проверить Machine 2
 
 ```bash
-docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml up -d
+docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml --env-file /opt/agentic-data-stack/pipeline/.env up -d
 ```
 
 Проверка:
 
 ```bash
-docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml ps
+docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml --env-file /opt/agentic-data-stack/pipeline/.env ps
 ```
 
-Проверить Redpanda:
+Проверки сервисов:
 
 ```bash
 docker exec pipeline_redpanda rpk cluster health
-```
-
-Ожидаемо: `Healthy: true`.
-
-Проверить Debezium Connect:
-
-```bash
 curl http://pipeline-node:8083/connectors
-```
-
-Ожидаемо: пустой JSON-массив `[]`, если connectors ещё не зарегистрированы.
-
-Проверить plugin ClickHouse Sink:
-
-```bash
 curl http://pipeline-node:8083/connector-plugins | jq '.[].class' | grep ClickHouseSinkConnector
-```
-
-Ожидаемо: вывод содержит `com.clickhouse.kafka.connect.ClickHouseSinkConnector`.
-
-Проверить Debezium UI:
-
-```bash
 curl -I http://pipeline-node:8080
-```
-
-Ожидаемо: HTTP response от UI.
-
-Проверить Airflow:
-
-```bash
 curl -I http://pipeline-node:8081
 ```
 
-Ожидаемо: HTTP response от UI.
+Ожидаемо: Redpanda healthy, Debezium REST отвечает, ClickHouse plugin найден, UI доступны.
 
-Airflow UI:
+---
+
+## 8. Debezium migration scenarios
+
+Выполнять на `pipeline-node`.
+
+Общий source connector одинаковый для обоих вариантов:
 
 ```text
-http://pipeline-node:8081
+PostgreSQL -> Redpanda topic pg_flat.public.app_events
 ```
 
-Credentials:
+Sink connector отличается:
 
-```text
-admin / admin
-```
+- **Вариант A** — ClickHouse пустой, connector пытается создать структуру автоматически.
+- **Вариант B** — ClickHouse schema уже подготовлена, connector пишет в готовую таблицу.
 
-## 6. Debezium миграция: два варианта
-
-В обоих вариантах source connector читает PostgreSQL changes и пишет их в Kafka topic `pg_flat.public.app_events`.
-
-Разница находится в ClickHouse sink connector.
-
-### 6.1. Source connector PostgreSQL -> Redpanda
-
-Создать source connector config на `pipeline-node`:
+### 8.1. Source connector: PostgreSQL -> Redpanda
 
 ```bash
-cat > /opt/agentic-data-stack/pipeline/debezium/connectors/postgres-source.json <<'EOF'
+cat > /opt/agentic-data-stack/pipeline/debezium/connectors/postgres-source.json <<'JSON'
 {
   "name": "postgres-app-events-source",
   "config": {
@@ -1335,7 +1195,7 @@ cat > /opt/agentic-data-stack/pipeline/debezium/connectors/postgres-source.json 
     "value.converter.schemas.enable": "false"
   }
 }
-EOF
+JSON
 ```
 
 Проверка:
@@ -1344,8 +1204,6 @@ EOF
 jq . /opt/agentic-data-stack/pipeline/debezium/connectors/postgres-source.json >/dev/null && echo OK
 ```
 
-Зарегистрировать source connector:
-
 ```bash
 curl -X POST http://pipeline-node:8083/connectors -H 'Content-Type: application/json' --data @/opt/agentic-data-stack/pipeline/debezium/connectors/postgres-source.json
 ```
@@ -1353,34 +1211,20 @@ curl -X POST http://pipeline-node:8083/connectors -H 'Content-Type: application/
 Проверка:
 
 ```bash
-curl http://pipeline-node:8083/connectors/postgres-app-events-source/status | jq .
-```
-
-Ожидаемо: `connector.state` и `tasks[0].state` равны `RUNNING`.
-
-Проверить Kafka topic:
-
-```bash
+curl http://pipeline-node:8083/connectors/postgres-app-events-source/status | jq '.connector.state, .tasks[0].state'
 docker exec pipeline_redpanda rpk topic list
 ```
 
-Ожидаемо: есть topic `pg_flat.public.app_events`.
+Ожидаемо: connector `RUNNING`, topic `pg_flat.public.app_events` существует.
 
-### 6.2. Вариант A: миграция в пустой ClickHouse с автоматическим созданием структуры
+### 8.2. Вариант A: ClickHouse пустой, auto-create структуры
 
-Используйте этот вариант, если ClickHouse должен получить таблицу автоматически на основании событий/схемы.
+Выбирайте этот вариант, если хотите, чтобы ClickHouse sink connector сам создал таблицу.
 
-Требования:
-
-- ClickHouse database `analytics` существует.
-- Таблица `analytics.app_events` или `analytics.app_events_raw` заранее не создаётся вручную.
-- В ClickHouse sink connector включается auto-create/evolution, если ваша версия ClickHouse Kafka Connect Sink поддерживает эти параметры.
-- Debezium value converter должен передавать schemas, иначе sink connector может не знать типы колонок.
-
-Создать sink config:
+Ограничение: параметры auto-create зависят от версии ClickHouse Kafka Connect Sink. Если connector не поддерживает `auto.create`/`auto.evolve`, используйте вариант B.
 
 ```bash
-cat > /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-autocreate.json <<'EOF'
+cat > /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-autocreate.json <<'JSON'
 {
   "name": "clickhouse-app-events-sink-autocreate",
   "config": {
@@ -1403,58 +1247,41 @@ cat > /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-autoc
     "key.converter.schemas.enable": "true"
   }
 }
-EOF
+JSON
 ```
 
-Проверка JSON:
+Проверка:
 
 ```bash
 jq . /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-autocreate.json >/dev/null && echo OK
 ```
 
-Зарегистрировать sink connector:
-
 ```bash
 curl -X POST http://pipeline-node:8083/connectors -H 'Content-Type: application/json' --data @/opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-autocreate.json
 ```
 
-Проверка статуса:
+Проверка:
 
 ```bash
-curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink-autocreate/status | jq .
-```
-
-Ожидаемо: `connector.state` и `tasks[0].state` равны `RUNNING`.
-
-Проверить, что таблица появилась в ClickHouse:
-
-```bash
+curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink-autocreate/status | jq '.connector.state, .tasks[0].state'
 curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SHOW TABLES FROM analytics'
 ```
 
-Ожидаемо: появилась таблица, соответствующая topic или настройкам connector.
+Ожидаемо: sink `RUNNING`, в ClickHouse появилась таблица.
 
-Проверить количество строк:
+Проверка данных:
 
 ```bash
 curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT count() FROM analytics.app_events'
 ```
 
-Если connector создал таблицу с другим именем, сначала посмотрите `SHOW TABLES FROM analytics` и замените имя таблицы в запросе.
+Если таблица создана под другим именем, сначала выполните `SHOW TABLES FROM analytics` и замените имя таблицы.
 
-Проверка ошибок:
+### 8.3. Вариант B: миграция в заранее подготовленную ClickHouse schema
 
-```bash
-docker logs pipeline_debezium --tail=200
-```
+Это рекомендуемый вариант для предсказуемой production-схемы.
 
-Если connector не поддерживает `auto.create`/`auto.evolve`, используйте вариант B.
-
-### 6.3. Вариант B: миграция в заранее подготовленную структуру ClickHouse
-
-Используйте этот вариант, если schema контролируется вручную, например таблица `analytics.app_events_raw` уже создана на `ai-data-node`.
-
-Проверить таблицу:
+Проверка таблицы:
 
 ```bash
 curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'DESCRIBE TABLE analytics.app_events_raw'
@@ -1462,10 +1289,8 @@ curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --da
 
 Ожидаемо: ClickHouse возвращает список колонок.
 
-Создать sink config:
-
 ```bash
-cat > /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-prepared.json <<'EOF'
+cat > /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-prepared.json <<'JSON'
 {
   "name": "clickhouse-app-events-sink",
   "config": {
@@ -1488,122 +1313,36 @@ cat > /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-prepa
     "key.converter.schemas.enable": "false"
   }
 }
-EOF
+JSON
 ```
 
-Проверка JSON:
+Проверка:
 
 ```bash
 jq . /opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-prepared.json >/dev/null && echo OK
 ```
 
-Зарегистрировать sink connector:
-
 ```bash
 curl -X POST http://pipeline-node:8083/connectors -H 'Content-Type: application/json' --data @/opt/agentic-data-stack/pipeline/debezium/connectors/clickhouse-sink-prepared.json
 ```
 
-Проверка статуса:
-
-```bash
-curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink/status | jq .
-```
-
-Ожидаемо: `connector.state` и `tasks[0].state` равны `RUNNING`.
-
-Проверить данные в ClickHouse:
-
-```bash
-curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT count() FROM analytics.app_events_raw'
-```
-
-Ожидаемо: после snapshot значение приближается к count в PostgreSQL, например `1000`.
-
-Проверить summary view:
-
-```bash
-curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT * FROM analytics.v_event_summary LIMIT 10'
-```
-
-Ожидаемо: ClickHouse возвращает агрегированные строки.
-
-## 7. Проверка end-to-end потока
-
-Сравнить PostgreSQL count:
-
-```bash
-psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT count(*) FROM public.app_events;"
-```
-
-Проверка: PostgreSQL возвращает count, например `1000`.
-
-Сравнить ClickHouse count:
-
-```bash
-curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT count() FROM analytics.app_events_raw'
-```
-
-Проверка: ClickHouse возвращает такой же count для варианта B.
-
-Добавить новую строку в PostgreSQL:
-
-```bash
-psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "INSERT INTO public.app_events (user_id, session_id, event_type, route, status_code, latency_ms, metadata) VALUES ('manual_user', 'manual_session', 'manual_test', '/manual', 200, 123, '{\"source\":\"manual\"}'::jsonb);"
-```
-
-Проверка PostgreSQL:
-
-```bash
-psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT count(*) FROM public.app_events WHERE event_type = 'manual_test';"
-```
-
-Проверка ClickHouse:
-
-```bash
-curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary "SELECT count() FROM analytics.app_events_raw WHERE event_type = 'manual_test'"
-```
-
-Ожидаемо: ClickHouse возвращает `1` после небольшой задержки.
-
-Проверить source connector:
-
-```bash
-curl http://pipeline-node:8083/connectors/postgres-app-events-source/status | jq '.connector.state, .tasks[0].state'
-```
-
-Ожидаемо:
-
-```text
-"RUNNING"
-"RUNNING"
-```
-
-Проверить sink connector для варианта B:
+Проверка:
 
 ```bash
 curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink/status | jq '.connector.state, .tasks[0].state'
+curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT count() FROM analytics.app_events_raw'
+curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT * FROM analytics.v_event_summary LIMIT 10'
 ```
 
-Ожидаемо:
+Ожидаемо: sink `RUNNING`, count приближается к PostgreSQL count, view возвращает агрегаты.
 
-```text
-"RUNNING"
-"RUNNING"
-```
+---
 
-Проверить Redpanda topics:
+## 9. Adminer и UI-доступы
 
-```bash
-docker exec pipeline_redpanda rpk topic list
-```
+### 9.1. PostgreSQL через Adminer
 
-Ожидаемо: есть `pg_flat.public.app_events`.
-
-## 8. Adminer: просмотр PostgreSQL и ClickHouse
-
-### 8.1. PostgreSQL через Adminer на source-db-node
-
-Открыть:
+URL:
 
 ```text
 http://source-db-node:8082
@@ -1619,15 +1358,15 @@ Password: app_password
 Database: app_logs
 ```
 
-Проверка с CLI:
+Проверка:
 
 ```bash
 curl -I http://source-db-node:8082
 ```
 
-### 8.2. ClickHouse через Adminer на ai-data-node
+### 9.2. ClickHouse через Adminer
 
-Открыть:
+URL:
 
 ```text
 http://ai-data-node:8082
@@ -1643,13 +1382,13 @@ Password: analytics_password
 Database: analytics
 ```
 
-Проверка с CLI:
+Проверка:
 
 ```bash
 curl -I http://ai-data-node:8082
 ```
 
-Если Adminer image не показывает ClickHouse driver, используйте built-in ClickHouse UI:
+Если Adminer image не показывает ClickHouse driver, используйте ClickHouse built-in UI:
 
 ```text
 http://ai-data-node:8123/play
@@ -1661,129 +1400,70 @@ http://ai-data-node:8123/play
 curl -I http://ai-data-node:8123/play
 ```
 
-## 9. LibreChat, MCP и LangFuse smoke checks
+### 9.3. Остальные UI
 
-Проверить LibreChat UI:
+| UI | URL | Credentials |
+|---|---|---|
+| LibreChat | `http://ai-data-node:3080` | создать пользователя в UI или через admin script |
+| LangFuse | `http://ai-data-node:3000` | создать пользователя/проект в UI |
+| Debezium UI | `http://pipeline-node:8080` | без логина по умолчанию |
+| Airflow | `http://pipeline-node:8081` | `admin / admin` |
 
-```bash
-curl -I http://ai-data-node:3080
-```
+---
 
-Проверка: HTTP response без network error.
+## 10. End-to-end smoke check
 
-Проверить MCP server:
+### 10.1. Сравнить counts
 
-```bash
-curl http://ai-data-node:3333/health
-```
-
-Проверка: `ok:true`.
-
-Проверить agent-proxy:
+PostgreSQL:
 
 ```bash
-curl http://ai-data-node:3344/health
+psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT count(*) FROM public.app_events;"
 ```
 
-Проверка: `ok:true`.
-
-Проверить список LLM моделей:
+ClickHouse для варианта B:
 
 ```bash
-curl http://ai-data-node:3344/v1/models
+curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT count() FROM analytics.app_events_raw'
 ```
 
-Проверка: JSON со списком моделей.
+Ожидаемо: counts совпадают после завершения snapshot.
 
-Проверить LangFuse UI:
+### 10.2. Проверить realtime CDC
 
 ```bash
-curl -I http://ai-data-node:3000
+psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "INSERT INTO public.app_events (user_id, session_id, event_type, route, status_code, latency_ms, metadata) VALUES ('manual_user', 'manual_session', 'manual_test', '/manual', 200, 123, '{\"source\":\"manual\"}'::jsonb);"
 ```
 
-Проверка: HTTP response без network error.
-
-После создания проекта в LangFuse обновите на `ai-data-node`:
+Проверка PostgreSQL:
 
 ```bash
-nano /opt/agentic-data-stack/ai-data/.env
+psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT count(*) FROM public.app_events WHERE event_type = 'manual_test';"
 ```
 
-Проверка:
+Проверка ClickHouse для варианта B:
 
 ```bash
-grep -E 'LANGFUSE_PUBLIC_KEY|LANGFUSE_SECRET_KEY' /opt/agentic-data-stack/ai-data/.env
+curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary "SELECT count() FROM analytics.app_events_raw WHERE event_type = 'manual_test'"
 ```
 
-Перезапустить сервисы, которым нужны ключи:
+Ожидаемо: ClickHouse возвращает `1` после небольшой задержки.
 
-```bash
-docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml up -d --force-recreate agent-proxy librechat mcp-server
-```
+### 10.3. Проверить connectors
 
-Проверка:
-
-```bash
-docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml ps agent-proxy librechat mcp-server
-```
-
-## 10. Airflow smoke checks
-
-Открыть:
-
-```text
-http://pipeline-node:8081
-```
-
-Проверка CLI:
-
-```bash
-curl -I http://pipeline-node:8081
-```
-
-Проверить scheduler logs:
-
-```bash
-docker logs pipeline_airflow_scheduler --tail=100
-```
-
-Проверка: нет циклических ошибок подключения к metadata DB.
-
-Проверить webserver logs:
-
-```bash
-docker logs pipeline_airflow_webserver --tail=100
-```
-
-Проверка: webserver слушает порт `8080` внутри контейнера.
-
-## 11. Полный checklist успешного развертывания
-
-На `source-db-node`:
-
-```bash
-docker exec source_postgres psql -U app -d app_logs -c "SELECT count(*) FROM public.app_events;"
-```
-
-Ожидаемо: count больше `0`.
-
-На `pipeline-node`:
-
-```bash
-curl http://pipeline-node:8083/connectors
-```
-
-Ожидаемо: source и sink connectors в списке.
-
-На `pipeline-node`:
+Source:
 
 ```bash
 curl http://pipeline-node:8083/connectors/postgres-app-events-source/status | jq '.connector.state, .tasks[0].state'
 ```
 
-Ожидаемо: `RUNNING` и `RUNNING`.
+Sink вариант A:
 
-На `pipeline-node` для варианта B:
+```bash
+curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink-autocreate/status | jq '.connector.state, .tasks[0].state'
+```
+
+Sink вариант B:
 
 ```bash
 curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink/status | jq '.connector.state, .tasks[0].state'
@@ -1791,60 +1471,122 @@ curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink/status | jq
 
 Ожидаемо: `RUNNING` и `RUNNING`.
 
-На `ai-data-node`:
-
-```bash
-curl 'http://ai-data-node:8123/?user=analytics&password=analytics_password' --data-binary 'SELECT count() FROM analytics.app_events_raw'
-```
-
-Ожидаемо: count соответствует PostgreSQL.
-
-На `ai-data-node`:
+### 10.4. Проверить AI/MCP layer
 
 ```bash
 curl http://ai-data-node:3333/health
+curl http://ai-data-node:3344/health
+curl http://ai-data-node:3344/v1/models
+curl -I http://ai-data-node:3080
+curl -I http://ai-data-node:3000
 ```
 
-Ожидаемо: `ok:true`.
+Ожидаемо: health endpoints возвращают `ok:true`, UI отвечают без network error.
 
-На `ai-data-node`:
+---
+
+## 11. Troubleshooting
+
+### 11.1. Debezium не видит PostgreSQL
+
+Проверка с `pipeline-node`:
+
+```bash
+psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT 1;"
+```
+
+Если не работает:
+
+- проверьте Tailscale DNS/IP;
+- проверьте firewall `tailscale0`;
+- проверьте `wal_level=logical`;
+- проверьте credentials.
+
+### 11.2. ClickHouse Sink plugin не найден
+
+Проверка:
+
+```bash
+curl http://pipeline-node:8083/connector-plugins | jq '.[].class' | grep ClickHouseSinkConnector
+```
+
+Если пусто:
+
+```bash
+find /opt/agentic-data-stack/pipeline/debezium/plugins -type f -name '*.jar'
+```
+
+После добавления plugin перезапустите Debezium:
+
+```bash
+docker compose -f /opt/agentic-data-stack/pipeline/docker-compose.yml --env-file /opt/agentic-data-stack/pipeline/.env up -d --force-recreate debezium
+```
+
+### 11.3. Sink connector упал
+
+Статус:
+
+```bash
+curl http://pipeline-node:8083/connectors/clickhouse-app-events-sink/status | jq .
+```
+
+Логи:
+
+```bash
+docker logs pipeline_debezium --tail=200
+```
+
+Частые причины:
+
+- ClickHouse table отсутствует в варианте B;
+- `topic2TableMap` не совпадает с topic;
+- типы колонок ClickHouse не совпадают с Debezium payload;
+- ClickHouse недоступен по `ai-data-node:8123`.
+
+### 11.4. Adminer не показывает ClickHouse
+
+Некоторые Adminer images не содержат ClickHouse driver. Используйте:
+
+```text
+http://ai-data-node:8123/play
+```
+
+Проверка:
+
+```bash
+curl -I http://ai-data-node:8123/play
+```
+
+### 11.5. agent-proxy не видит LLM runtime
+
+Проверка Ollama:
+
+```bash
+curl http://ai-data-node:11434/api/tags
+```
+
+Проверка proxy:
 
 ```bash
 curl http://ai-data-node:3344/health
 ```
 
-Ожидаемо: `ok:true`.
+Проверьте `.env` на `ai-data-node`:
 
-На `ai-data-node`:
-
-```bash
-curl -I http://ai-data-node:3080
+```text
+UPSTREAM_OPENAI_BASE_URL=http://ollama:11434/v1
 ```
 
-Ожидаемо: LibreChat UI отвечает.
+---
 
-На `ai-data-node`:
+## 12. Production notes
 
-```bash
-curl -I http://ai-data-node:3000
-```
-
-Ожидаемо: LangFuse UI отвечает.
-
-На `pipeline-node`:
-
-```bash
-curl -I http://pipeline-node:8081
-```
-
-Ожидаемо: Airflow UI отвечает.
-
-## 12. Важные замечания
-
-- Для production замените все пароли и секреты в `.env`.
+- Замените все demo passwords и secrets.
 - Не открывайте PostgreSQL, ClickHouse, Debezium Connect и Adminer в публичный интернет.
 - Используйте Tailscale ACL, чтобы ограничить доступ между машинами.
-- Для варианта A auto-create параметры зависят от версии ClickHouse Kafka Connect Sink. Если auto-create не поддерживается, используйте вариант B.
-- Для любой source DB кроме PostgreSQL нужен соответствующий Debezium source connector и отдельная настройка CDC/binlog/redo logs.
-- Для MySQL/MariaDB нужно включить binlog и использовать `io.debezium.connector.mysql.MySqlConnector`.
-- Для Oracle/SQL Server нужны отдельные Debezium connector images/plugins и права на CDC.
+- Для варианта A проверьте поддержку `auto.create`/`auto.evolve` в конкретной версии ClickHouse Kafka Connect Sink.
+- Для production обычно предпочтительнее вариант B: schema ClickHouse создаётся и версионируется вручную.
+- Для source DB кроме PostgreSQL нужен соответствующий Debezium source connector.
+- Для MySQL/MariaDB включите binlog и используйте `io.debezium.connector.mysql.MySqlConnector`.
+- Для Oracle/SQL Server нужны отдельные Debezium connectors и права на CDC.
+- `mcp-server` и `agent-proxy` должны быть заранее собраны в container images и доступны с серверов.
