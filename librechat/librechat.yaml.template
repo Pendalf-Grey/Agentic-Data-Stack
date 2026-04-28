@@ -1,0 +1,27 @@
+version: 1.2.1
+
+cache: true
+
+mcpSettings:
+  allowedDomains:
+    - "mcp-server"
+    - "http://mcp-server:3333"
+
+endpoints:
+  custom:
+    - name: "Local OpenAI-compatible"
+      apiKey: "${AGENT_PROXY_API_KEY}"
+      baseURL: "${AGENT_PROXY_BASE_URL}"
+      models:
+        default:
+${LIBRECHAT_MODEL_LIST_YAML}
+        fetch: false
+      titleConvo: true
+      titleModel: "${LIBRECHAT_TITLE_MODEL}"
+      summarize: false
+      summaryModel: "${LIBRECHAT_SUMMARY_MODEL}"
+
+mcpServers:
+  clickhouse-analytics:
+    type: streamable-http
+    url: http://mcp-server:3333/mcp

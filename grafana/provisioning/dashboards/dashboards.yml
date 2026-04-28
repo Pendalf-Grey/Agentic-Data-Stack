@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: Agentic Data Stack
+    orgId: 1
+    folder: Agentic Data Stack
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

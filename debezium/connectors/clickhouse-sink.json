@@ -1,0 +1,22 @@
+{
+  "name": "clickhouse-app-events-sink",
+  "config": {
+    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+    "tasks.max": "1",
+    "topics": "pg_flat.public.app_events",
+    "hostname": "clickhouse",
+    "port": "8123",
+    "database": "analytics",
+    "username": "analytics",
+    "password": "analytics_password",
+    "ssl": "false",
+    "topic2TableMap": "pg_flat.public.app_events=app_events_raw",
+    "dateTimeFormats": "event_time=yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'",
+    "schemas.enable": "false",
+    "exactlyOnce": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false"
+  }
+}

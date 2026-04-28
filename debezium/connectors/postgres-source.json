@@ -1,0 +1,28 @@
+{
+  "name": "postgres-app-events-source",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "plugin.name": "pgoutput",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "app",
+    "database.password": "app_password",
+    "database.dbname": "app_logs",
+    "database.server.name": "app_logs",
+    "topic.prefix": "pg_flat",
+    "schema.include.list": "public",
+    "table.include.list": "public.app_events",
+    "slot.name": "app_events_slot",
+    "publication.name": "app_events_publication",
+    "publication.autocreate.mode": "filtered",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "false",
+    "decimal.handling.mode": "string",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "true",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false"
+  }
+}

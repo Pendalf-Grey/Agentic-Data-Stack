@@ -1,0 +1,29 @@
+version: 1.2.1
+
+cache: true
+
+mcpSettings:
+  allowedDomains:
+    - "mcp-server"
+    - "http://mcp-server:3333"
+
+endpoints:
+  custom:
+    - name: "Local OpenAI-compatible"
+      apiKey: "${AGENT_PROXY_API_KEY}"
+      baseURL: "${AGENT_PROXY_BASE_URL}"
+      models:
+        default:
+          - "qwen2.5:7b"
+          - "qwen2.5:14b"
+          - "llama3.2-vision:latest"
+        fetch: false
+      titleConvo: true
+      titleModel: "qwen2.5:7b"
+      summarize: false
+      summaryModel: "qwen2.5:7b"
+
+mcpServers:
+  clickhouse-analytics:
+    type: streamable-http
+    url: http://mcp-server:3333/mcp
