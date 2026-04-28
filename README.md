@@ -7,6 +7,7 @@
 - `QUICKSTART.md` — краткая инструкция с основными командами, проверками и частыми ошибками.
 - `RUNBOOK_DETAILED.md` — максимально подробная инструкция с полным сценарием запуска, UI, Debezium, ClickHouse, LibreChat, Airflow и troubleshooting.
 - `LLM_LANGFUSE_SETUP.md` — ревизия локальных/облачных LLM providers и схема подключения LangFuse tracing.
+- `UBUNTU_BARE_DEPLOYMENT.md` — развертывание минимального Agentic Data Stack на трёх bare Ubuntu servers через Tailscale.
 
 ## Конфигурация локальных LLM
 
