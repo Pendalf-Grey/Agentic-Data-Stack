@@ -8,9 +8,9 @@ ___
 Задача Agentic Data Stack - анализ логов ClickHouse, анализ таблиц и данных с помощью LLM
 
 В моей доке три машины
-1 - БД Postgre
-2 - Debezium + Airflow
-3 - Вот этот Agentic Data Stack
+- 1 - БД Postgre
+- 2 - Debezium + Airflow
+- 3 - Вот этот Agentic Data Stack
 
 Из Postge данные будут мигрировать в clickHouse с помощью debezium
 
