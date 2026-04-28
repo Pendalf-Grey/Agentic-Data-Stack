@@ -5,20 +5,20 @@
 Документ содержит только обязательные компоненты. JS-код здесь не приводится: `mcp-server` и `agent-proxy` запускаются как готовые container images.
 
 ___
-Задача Agentic Data Stack - анализ логов ClickHouse, анализ таблиц и данных с помощью LLM
+Задача Agentic Data Stack - анализ логов ClickHouse, анализ таблиц и данных с помощью LLM.
 
-В моей доке три машины
+В моей доке три машины:
 - 1 - БД Postgre
 - 2 - Debezium + Airflow
 - 3 - Вот этот Agentic Data Stack
 
-Из Postge данные будут мигрировать в clickHouse с помощью debezium
+Из Postge данные будут мигрировать в ClickHouse с помощью Debezium.
 
 Airfow здесь - это sheduler для Debezium.
 
-Как только данные залетели в ClickHouse их можно анализировать в LibreChat локальными или облачными модельками
+Как только данные залетели в ClickHouse их можно анализировать в LibreChat локальными или облачными модельками.
 
-LangFuse даёт свою собственную аналитику не по ClickHouse а по тому, как отвечают модели
+LangFuse даёт свою собственную аналитику не по ClickHouse, а по тому, как отвечают модели.
 
 ## Содержание
 
