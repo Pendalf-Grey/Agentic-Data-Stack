@@ -14,7 +14,8 @@ ___
 
 Из Postge данные будут мигрировать в clickHouse с помощью debezium
 
-Airfow здесь - это sheduler для Debezium
+Airfow здесь - это sheduler для Debezium.
+
 Как только данные залетели в ClickHouse их можно анализировать в LibreChat локальными или облачными модельками
 
 LangFuse даёт свою собственную аналитику не по ClickHouse а по тому, как отвечают модели
