@@ -5,7 +5,7 @@
 Документ содержит только обязательные компоненты. JS-код здесь не приводится: `mcp-server` и `agent-proxy` запускаются как готовые container images.
 
 ___
-Задача Agentic Data Stack - анализ логов ClickHouse, анализ таблиц и данных с помощью LLM.
+Задача Agentic Data Stack - анализ логов, таблиц и данных ClickHouse с помощью LLM.
 
 В моей доке три машины:
 - 1 - БД Postgre
