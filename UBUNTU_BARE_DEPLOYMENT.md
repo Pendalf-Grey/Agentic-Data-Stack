@@ -2,7 +2,7 @@
 
 Этот документ описывает минимальное развертывание Agentic Data Stack на трёх чистых Ubuntu Server, связанных приватной VPN-сетью Tailscale.
 
-Документ содержит только обязательные компоненты. JS-код здесь не приводится: `mcp-server` и `agent-proxy` запускаются как готовые container images.
+Документ содержит только обязательные компоненты. JS-код здесь не приводится как листинг. `mcp-server` и `agent-proxy` используются так же, как в этом репозитории: Docker Compose собирает их из директорий `./mcp-server` и `./agent-proxy`.
 
 ___
 Задача Agentic Data Stack - анализ логов, таблиц и данных ClickHouse с помощью LLM.
@@ -887,7 +887,7 @@ psql "postgresql://app:app_password@source-db-node:5432/app_logs" -c "SELECT cou
 ### 6.2. Создать директории и `.env`
 
 ```bash
-mkdir -p /opt/agentic-data-stack/ai-data/{clickhouse-init,librechat}
+mkdir -p /opt/agentic-data-stack/ai-data/{clickhouse-init,librechat,agent-proxy,mcp-server}
 ```
 
 Проверка:
@@ -918,6 +918,15 @@ AGENT_PROXY_BASE_URL=http://agent-proxy:3344/v1
 
 UPSTREAM_OPENAI_API_KEY=local-dev-key
 UPSTREAM_OPENAI_BASE_URL=http://ollama:11434/v1
+
+OPENAI_MODEL=qwen2.5:7b
+OPENAI_MODEL_FAST=qwen2.5:7b
+OPENAI_MODEL_SMART=qwen2.5:14b
+OPENAI_MODEL_VISION=llama3.2-vision:latest
+OPENAI_EMBEDDING_MODEL=nomic-embed-text:latest
+LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.2-vision:latest
+LIBRECHAT_TITLE_MODEL=qwen2.5:7b
+LIBRECHAT_SUMMARY_MODEL=qwen2.5:7b
 ENV
 ```
 
@@ -981,10 +990,40 @@ sed -n '1,80p' /opt/agentic-data-stack/ai-data/clickhouse-init/001_schema.sql
 CREATE DATABASE IF NOT EXISTS analytics;
 ```
 
-### 6.4. Подготовить LibreChat config
+### 6.4. Подготовить исходники локальных services
+
+В локальном `docker-compose.yml` проекта `agent-proxy` и `mcp-server` не берутся из registry. Они собираются из директорий:
+
+```text
+./agent-proxy
+./mcp-server
+```
+
+Поэтому на `ai-data-node` эти директории должны лежать рядом с `docker-compose.yml`:
+
+```text
+/opt/agentic-data-stack/ai-data/agent-proxy
+/opt/agentic-data-stack/ai-data/mcp-server
+```
+
+Самый простой вариант — скопировать их из этого репозитория с рабочей машины:
 
 ```bash
-cat > /opt/agentic-data-stack/ai-data/librechat/librechat.yaml <<'YAML'
+rsync -av ./agent-proxy ./mcp-server user@ai-data-node:/opt/agentic-data-stack/ai-data/
+```
+
+Проверка на `ai-data-node`:
+
+```bash
+find /opt/agentic-data-stack/ai-data/agent-proxy /opt/agentic-data-stack/ai-data/mcp-server -maxdepth 2 -type f | sort | sed -n '1,40p'
+```
+
+Ожидаемо: видны `Dockerfile`, `package.json` и `src/server.js` в обеих директориях.
+
+### 6.5. Подготовить LibreChat config
+
+```bash
+cat > /opt/agentic-data-stack/ai-data/librechat/librechat.yaml.template <<'YAML'
 version: 1.2.1
 
 cache: true
@@ -1001,12 +1040,12 @@ endpoints:
       baseURL: "${AGENT_PROXY_BASE_URL}"
       models:
         default:
-          - "qwen2.5:7b"
-        fetch: true
+${LIBRECHAT_MODEL_LIST_YAML}
+        fetch: false
       titleConvo: true
-      titleModel: "qwen2.5:7b"
+      titleModel: "${LIBRECHAT_TITLE_MODEL}"
       summarize: false
-      summaryModel: "qwen2.5:7b"
+      summaryModel: "${LIBRECHAT_SUMMARY_MODEL}"
 
 mcpServers:
   clickhouse-analytics:
@@ -1015,15 +1054,69 @@ mcpServers:
 YAML
 ```
 
+Создайте render script, как в текущем проекте:
+
+```bash
+cat > /opt/agentic-data-stack/ai-data/librechat/render-config.sh <<'SH'
+#!/bin/sh
+set -eu
+
+models="${LIBRECHAT_MODELS:-${OPENAI_MODEL:-qwen2.5:7b}}"
+title_model="${LIBRECHAT_TITLE_MODEL:-${OPENAI_MODEL:-$(printf '%s' "$models" | cut -d, -f1)}}"
+summary_model="${LIBRECHAT_SUMMARY_MODEL:-$title_model}"
+model_yaml=""
+
+old_ifs="$IFS"
+IFS=','
+for model in $models; do
+  trimmed="$(printf '%s' "$model" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  if [ -n "$trimmed" ]; then
+    model_yaml="${model_yaml}          - \"${trimmed}\"
+"
+  fi
+done
+IFS="$old_ifs"
+
+if [ -z "$model_yaml" ]; then
+  model_yaml='          - "qwen2.5:7b"
+'
+fi
+
+export AGENT_PROXY_API_KEY="${AGENT_PROXY_API_KEY:-local-dev-key}"
+export AGENT_PROXY_BASE_URL="${AGENT_PROXY_BASE_URL:-http://agent-proxy:3344/v1}"
+export LIBRECHAT_TITLE_MODEL="$title_model"
+export LIBRECHAT_SUMMARY_MODEL="$summary_model"
+export LIBRECHAT_MODEL_LIST_YAML="$model_yaml"
+
+python3 - <<'PY'
+from pathlib import Path
+import os
+
+template = Path('/app/librechat.yaml.template').read_text()
+for key in [
+    'AGENT_PROXY_API_KEY',
+    'AGENT_PROXY_BASE_URL',
+    'LIBRECHAT_TITLE_MODEL',
+    'LIBRECHAT_SUMMARY_MODEL',
+    'LIBRECHAT_MODEL_LIST_YAML',
+]:
+    template = template.replace('${' + key + '}', os.environ.get(key, ''))
+Path('/app/librechat.yaml').write_text(template)
+PY
+SH
+chmod +x /opt/agentic-data-stack/ai-data/librechat/render-config.sh
+```
+
 Проверка:
 
 ```bash
-sed -n '1,80p' /opt/agentic-data-stack/ai-data/librechat/librechat.yaml
+sed -n '1,80p' /opt/agentic-data-stack/ai-data/librechat/librechat.yaml.template
+sed -n '1,80p' /opt/agentic-data-stack/ai-data/librechat/render-config.sh
 ```
 
-### 6.5. Создать Compose file
+### 6.6. Создать Compose file
 
-`mcp-server` и `agent-proxy` указаны как готовые образы. Замените `your-registry/...` на реальные имена.
+`mcp-server` и `agent-proxy` используются как в текущем проекте: не через registry image, а через локальную сборку из `./mcp-server` и `./agent-proxy`.
 
 ```bash
 cat > /opt/agentic-data-stack/ai-data/docker-compose.yml <<'YAML'
@@ -1087,7 +1180,8 @@ services:
       - ollama_data:/root/.ollama
 
   agent-proxy:
-    image: your-registry/agent-proxy:latest
+    build:
+      context: ./agent-proxy
     container_name: ai_agent_proxy
     depends_on:
       - langfuse
@@ -1103,7 +1197,8 @@ services:
       - "3344:3344"
 
   mcp-server:
-    image: your-registry/clickhouse-mcp-server:latest
+    build:
+      context: ./mcp-server
     container_name: ai_mcp_server
     depends_on:
       clickhouse:
@@ -1113,7 +1208,9 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
-      PORT: 3333
+      LANGFUSE_HOST: ${LANGFUSE_HOST}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
     ports:
       - "3333:3333"
 
@@ -1139,6 +1236,14 @@ services:
       JWT_REFRESH_SECRET: ${LIBRECHAT_JWT_REFRESH_SECRET}
       AGENT_PROXY_API_KEY: ${AGENT_PROXY_API_KEY}
       AGENT_PROXY_BASE_URL: ${AGENT_PROXY_BASE_URL}
+      OPENAI_MODEL: ${OPENAI_MODEL}
+      OPENAI_MODEL_FAST: ${OPENAI_MODEL_FAST}
+      OPENAI_MODEL_SMART: ${OPENAI_MODEL_SMART}
+      OPENAI_MODEL_VISION: ${OPENAI_MODEL_VISION}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL}
+      LIBRECHAT_MODELS: ${LIBRECHAT_MODELS}
+      LIBRECHAT_TITLE_MODEL: ${LIBRECHAT_TITLE_MODEL}
+      LIBRECHAT_SUMMARY_MODEL: ${LIBRECHAT_SUMMARY_MODEL}
       LANGFUSE_HOST: ${LANGFUSE_HOST}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
@@ -1146,7 +1251,9 @@ services:
     ports:
       - "3080:3080"
     volumes:
-      - ./librechat/librechat.yaml:/app/librechat.yaml:ro
+      - ./librechat/librechat.yaml.template:/app/librechat.yaml.template:ro
+      - ./librechat/render-config.sh:/app/render-config.sh:ro
+    command: sh /app/render-config.sh
 
   adminer:
     image: adminer:4
@@ -1168,7 +1275,7 @@ YAML
 docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml --env-file /opt/agentic-data-stack/ai-data/.env config >/dev/null && echo OK
 ```
 
-### 6.6. Запустить и проверить Machine 1
+### 6.7. Запустить и проверить Machine 1
 
 ```bash
 docker compose -f /opt/agentic-data-stack/ai-data/docker-compose.yml --env-file /opt/agentic-data-stack/ai-data/.env up -d
