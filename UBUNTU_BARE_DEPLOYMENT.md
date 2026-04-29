@@ -40,10 +40,35 @@ LangFuse даёт свою собственную аналитику не по C
 Каждый шаг оформлен одинаково:
 
 - **Команда** — что выполнить.
+- **Зачем** — какую задачу решает команда.
+- **Флаги и параметры** — что означают важные ключи, если они есть.
 - **Проверка** — чем проверить результат.
 - **Ожидаемо** — что должно получиться.
 
-Команды выполняются на конкретной машине, указанной в заголовке раздела.
+Команды выполняются на конкретной машине, указанной в заголовке раздела. Если команда создаёт большой конфигурационный файл через `cat > file <<'EOF'`, пояснение относится ко всей операции создания файла, а внутренние параметры описываются перед или после блока.
+
+### Общий справочник команд и флагов
+
+Дальше по документу многие команды повторяются. Чтобы не дублировать одинаковые пояснения под каждым блоком, используйте этот справочник:
+
+- **`cat > file <<'EOF' ... EOF`** — создаёт или полностью перезаписывает файл. `>` означает запись в файл, `<<'EOF'` открывает heredoc-блок, одинарные кавычки вокруг `EOF` запрещают shell подставлять переменные внутри содержимого.
+- **`mkdir -p path`** — создаёт директорию и все недостающие родительские директории. Флаг `-p` не считает ошибкой ситуацию, когда директория уже существует.
+- **`grep -E 'a|b' file`** — ищет строки по extended regular expression. Флаг `-E` включает расширенный синтаксис regex, `|` означает OR.
+- **`sed -n '1,80p' file`** — печатает только указанный диапазон строк. Флаг `-n` отключает автоматическую печать всех строк, `1,80p` печатает строки с 1 по 80.
+- **`find path -maxdepth N -type d|f`** — ищет файлы или директории. `-maxdepth` ограничивает глубину поиска, `-type d` ищет директории, `-type f` ищет файлы.
+- **`docker compose -f file --env-file file command`** — запускает Docker Compose с явно указанным compose-файлом и env-файлом. `-f` выбирает compose YAML, `--env-file` выбирает файл переменных окружения.
+- **`docker compose config`** — валидирует compose-файл и печатает итоговую конфигурацию после подстановки переменных.
+- **`docker compose up -d`** — создаёт/обновляет containers и запускает их в фоне. Флаг `-d` означает detached mode.
+- **`docker compose ps`** — показывает состояние containers текущего compose project.
+- **`docker exec container command`** — выполняет команду внутри уже запущенного container.
+- **`curl URL`** — делает HTTP request. `-I` запрашивает только headers, `-X POST` задаёт HTTP method, `-H` добавляет header, `--data`/`--data-binary` отправляет request body.
+- **`jq .`** — проверяет и форматирует JSON. Если JSON невалидный, команда завершится с ошибкой.
+- **`psql "postgresql://..." -c "SQL"`** — подключается к PostgreSQL и выполняет SQL. Флаг `-c` передаёт SQL-команду из shell.
+- **`rpk topic list`** — показывает Kafka/Redpanda topics.
+- **`ufw status verbose`** — показывает firewall rules в подробном виде.
+- **`|`** — pipe: передаёт stdout первой команды на stdin второй команды.
+- **`&&`** — запускает следующую команду только если предыдущая завершилась успешно.
+- **`> /dev/null`** — скрывает stdout команды, чтобы не засорять терминал.
 
 ---
 
@@ -176,11 +201,28 @@ LangFuse DB:
 sudo apt update && sudo apt upgrade -y
 ```
 
+**Зачем:** обновляет локальный индекс пакетов и устанавливает доступные security/bugfix updates перед установкой Docker и остальных сервисов.
+
+**Флаги и параметры:**
+
+- `sudo` — выполняет команду с правами администратора.
+- `apt update` — скачивает актуальные списки пакетов из подключённых repositories.
+- `&&` — запускает вторую команду только если первая завершилась успешно.
+- `apt upgrade` — обновляет уже установленные пакеты.
+- `-y` — автоматически отвечает `yes` на подтверждение установки.
+
 **Проверка:**
 
 ```bash
 lsb_release -a && uname -a
 ```
+
+**Зачем:** показывает версию Ubuntu и ядра, чтобы убедиться, что команда выполняется на ожидаемой системе.
+
+**Флаги и параметры:**
+
+- `lsb_release -a` — выводит полную информацию о дистрибутиве.
+- `uname -a` — выводит версию ядра и архитектуру.
 
 **Ожидаемо:** Ubuntu Server и версия ядра выводятся без ошибок.
 
@@ -192,15 +234,39 @@ lsb_release -a && uname -a
 sudo apt install -y ca-certificates curl gnupg lsb-release jq net-tools htop unzip nano
 ```
 
+**Зачем:** ставит утилиты, которые нужны для скачивания ключей, работы с repositories, диагностики сети, просмотра JSON и редактирования файлов.
+
+**Флаги и параметры:**
+
+- `apt install` — устанавливает указанные пакеты.
+- `-y` — не спрашивает подтверждение перед установкой.
+- `ca-certificates` — корневые сертификаты для HTTPS.
+- `curl` — скачивание файлов и проверка HTTP endpoints.
+- `gnupg` — работа с GPG keys для apt repositories.
+- `lsb-release` — определение версии Ubuntu.
+- `jq` — форматирование и фильтрация JSON.
+- `net-tools` — сетевые утилиты вроде `netstat`.
+- `htop` — интерактивный монитор процессов.
+- `unzip` — распаковка zip archives.
+- `nano` — простой консольный editor.
+
 **Проверка:**
 
 ```bash
 curl --version && jq --version
 ```
 
+**Зачем:** подтверждает, что две ключевые утилиты действительно установились.
+
+**Флаги и параметры:**
+
+- `--version` — выводит версию программы и завершает выполнение.
+
 **Ожидаемо:** обе команды выводят версии.
 
 ### 3.3. Установить Docker Engine
+
+Важно: не копируйте URL `https://download.docker.com/linux/ubuntu/gpg` как отдельную shell-команду. Его нужно передавать в `curl`, иначе shell попытается выполнить URL как программу и выдаст `No such file or directory`.
 
 **Команда:**
 
@@ -208,23 +274,58 @@ curl --version && jq --version
 sudo install -m 0755 -d /etc/apt/keyrings
 ```
 
+**Зачем:** создаёт стандартную директорию для GPG keys сторонних apt repositories.
+
+**Флаги и параметры:**
+
+- `install` — создаёт файл/директорию с нужными правами; здесь используется как безопасная альтернатива `mkdir + chmod`.
+- `-m 0755` — права: владелец может читать/писать/выполнять, остальные читать/выполнять.
+- `-d` — создать директорию, а не файл.
+- `/etc/apt/keyrings` — место хранения ключей repositories.
+
 **Проверка:**
 
 ```bash
 ls -ld /etc/apt/keyrings
 ```
 
+**Зачем:** показывает, что директория создана и какие у неё права.
+
+**Флаги и параметры:**
+
+- `ls -l` — длинный формат вывода.
+- `-d` — показать саму директорию, а не её содержимое.
+
 **Команда:**
 
 ```bash
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo rm -f /etc/apt/keyrings/docker.gpg
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
 ```
+
+**Зачем:** удаляет старый/битый key file после неудачных попыток, скачивает официальный Docker GPG key и сохраняет его в формате, пригодном для `apt`.
+
+**Флаги и параметры:**
+
+- `rm -f` — удалить файл; `-f` не ругается, если файла нет.
+- `curl` — скачивает ключ по HTTPS.
+- `-f` — завершиться с ошибкой при HTTP errors.
+- `-s` — silent mode, меньше лишнего вывода.
+- `-S` — показать ошибку даже в silent mode.
+- `-L` — следовать redirects.
+- `|` — передаёт скачанный key в `gpg` через pipe.
+- `gpg --dearmor` — конвертирует ASCII-armored key в binary keyring format.
+- `--yes` — разрешает перезапись без интерактивного вопроса.
+- `-o /etc/apt/keyrings/docker.gpg` — путь для сохранения keyring.
 
 **Проверка:**
 
 ```bash
 ls -l /etc/apt/keyrings/docker.gpg
+file /etc/apt/keyrings/docker.gpg
 ```
+
+**Зачем:** проверяет, что key file существует и похож на GPG keyring, а не на пустой/битый файл.
 
 **Команда:**
 
@@ -232,17 +333,47 @@ ls -l /etc/apt/keyrings/docker.gpg
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
 ```
 
+**Зачем:** делает key readable для `apt`, чтобы пакетный менеджер мог проверить подпись Docker repository.
+
+**Флаги и параметры:**
+
+- `chmod` — меняет права файла.
+- `a+r` — добавить право чтения для всех категорий пользователей.
+
 **Проверка:**
 
 ```bash
 stat -c '%a %n' /etc/apt/keyrings/docker.gpg
 ```
 
+**Зачем:** показывает числовые права файла и его имя.
+
+**Флаги и параметры:**
+
+- `stat` — выводит metadata файла.
+- `-c '%a %n'` — формат вывода: права в octal format и имя файла.
+
 **Команда:**
 
 ```bash
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+ARCH=$(dpkg --print-architecture)
+CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${CODENAME} stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 ```
+
+**Зачем:** добавляет Docker repository в список источников `apt`. Команда разбита на переменные `ARCH` и `CODENAME`, чтобы избежать ошибок с вложенными кавычками при копировании.
+
+**Флаги и параметры:**
+
+- `dpkg --print-architecture` — определяет архитектуру сервера, например `amd64` или `arm64`.
+- `. /etc/os-release` — загружает переменные Ubuntu release в текущий shell.
+- `VERSION_CODENAME` — codename Ubuntu release, например `jammy` или `noble`.
+- `deb [...]` — строка apt repository.
+- `arch=${ARCH}` — использовать repository только для текущей CPU architecture.
+- `signed-by=/etc/apt/keyrings/docker.gpg` — доверять этому repository только при подписи указанным ключом.
+- `stable` — Docker stable channel.
+- `tee /etc/apt/sources.list.d/docker.list` — записывает строку в системный файл через `sudo`.
+- `> /dev/null` — скрывает дублирующий вывод `tee` в терминал.
 
 **Проверка:**
 
@@ -250,11 +381,17 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 cat /etc/apt/sources.list.d/docker.list
 ```
 
+**Зачем:** показывает итоговую repository строку, чтобы проверить `arch`, `signed-by` и Ubuntu codename.
+
+**Ожидаемо:** строка начинается с `deb [arch=... signed-by=/etc/apt/keyrings/docker.gpg]`.
+
 **Команда:**
 
 ```bash
 sudo apt update
 ```
+
+**Зачем:** заставляет `apt` прочитать новый Docker repository и получить список доступных Docker packages.
 
 **Проверка:**
 
@@ -262,17 +399,36 @@ sudo apt update
 apt-cache policy docker-ce | sed -n '1,20p'
 ```
 
+**Зачем:** проверяет, что пакет `docker-ce` виден из Docker repository.
+
+**Флаги и параметры:**
+
+- `apt-cache policy docker-ce` — показывает кандидата на установку и repositories, где найден пакет.
+- `sed -n '1,20p'` — печатает только первые 20 строк, чтобы вывод был коротким.
+
 **Команда:**
 
 ```bash
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
+**Зачем:** устанавливает Docker Engine, CLI, container runtime, Buildx и Docker Compose plugin.
+
+**Флаги и параметры:**
+
+- `docker-ce` — Docker Community Engine daemon.
+- `docker-ce-cli` — команда `docker`.
+- `containerd.io` — container runtime, который использует Docker.
+- `docker-buildx-plugin` — расширенный builder для Docker images.
+- `docker-compose-plugin` — команда `docker compose`.
+
 **Проверка:**
 
 ```bash
 docker --version && docker compose version
 ```
+
+**Зачем:** подтверждает, что Docker CLI и Compose plugin установились.
 
 ### 3.4. Разрешить текущему пользователю запускать Docker
 
@@ -282,11 +438,21 @@ docker --version && docker compose version
 sudo usermod -aG docker $USER
 ```
 
+**Зачем:** добавляет текущего пользователя в группу `docker`, чтобы запускать `docker` без `sudo` после перелогина.
+
+**Флаги и параметры:**
+
+- `usermod` — изменяет параметры пользователя.
+- `-aG docker` — append в дополнительную группу `docker`; важно использовать `-a`, чтобы не удалить другие группы.
+- `$USER` — имя текущего пользователя shell.
+
 **Проверка:**
 
 ```bash
 id $USER
 ```
+
+**Зачем:** показывает uid/gid и группы пользователя.
 
 **Ожидаемо:** в списке групп есть `docker`.
 
@@ -298,6 +464,14 @@ id $USER
 docker run --rm hello-world
 ```
 
+**Зачем:** запускает тестовый контейнер Docker и сразу удаляет его после завершения.
+
+**Флаги и параметры:**
+
+- `run` — создать и запустить container.
+- `--rm` — удалить container после завершения.
+- `hello-world` — официальный минимальный test image.
+
 **Ожидаемо:** Docker выводит `Hello from Docker!`.
 
 ### 3.5. Создать рабочую директорию
@@ -308,11 +482,29 @@ docker run --rm hello-world
 sudo mkdir -p /opt/agentic-data-stack && sudo chown -R $USER:$USER /opt/agentic-data-stack
 ```
 
+**Зачем:** создаёт общий каталог для compose-файлов и данных стека, затем передаёт владение текущему пользователю.
+
+**Флаги и параметры:**
+
+- `mkdir -p` — создать директорию и родителей, не ошибаться если директория уже существует.
+- `/opt/agentic-data-stack` — production-like location для application stack.
+- `&&` — менять владельца только если директория успешно создана.
+- `chown -R` — рекурсивно изменить владельца каталога.
+- `$USER:$USER` — пользователь и группа текущего пользователя.
+
 **Проверка:**
 
 ```bash
 stat -c '%U:%G %n' /opt/agentic-data-stack
 ```
+
+**Зачем:** показывает владельца, группу и путь каталога.
+
+**Флаги и параметры:**
+
+- `%U` — имя владельца.
+- `%G` — имя группы.
+- `%n` — имя файла/каталога.
 
 **Ожидаемо:** владелец — текущий пользователь.
 
@@ -330,6 +522,13 @@ stat -c '%U:%G %n' /opt/agentic-data-stack
 curl -fsSL https://tailscale.com/install.sh | sh
 ```
 
+**Зачем:** скачивает и запускает официальный installer Tailscale для Ubuntu.
+
+**Флаги и параметры:**
+
+- `curl -fsSL` — скачать скрипт с fail-on-error, silent output, visible errors и redirects.
+- `| sh` — передать скачанный installer в shell.
+
 **Проверка:**
 
 ```bash
@@ -344,6 +543,14 @@ tailscale version
 sudo tailscale up --hostname=ai-data-node --ssh
 ```
 
+**Зачем:** подключает первую машину к tailnet, задаёт ей понятное имя и включает Tailscale SSH.
+
+**Флаги и параметры:**
+
+- `tailscale up` — авторизует и поднимает Tailscale interface.
+- `--hostname=ai-data-node` — имя машины в tailnet/MagicDNS.
+- `--ssh` — включает доступ через Tailscale SSH.
+
 Проверка:
 
 ```bash
@@ -356,6 +563,13 @@ tailscale status
 sudo tailscale up --hostname=pipeline-node --ssh
 ```
 
+**Зачем:** подключает вторую машину к tailnet как pipeline node.
+
+**Флаги и параметры:**
+
+- `--hostname=pipeline-node` — имя машины для Debezium/Airflow host.
+- `--ssh` — включает Tailscale SSH.
+
 Проверка:
 
 ```bash
@@ -367,6 +581,13 @@ tailscale status
 ```bash
 sudo tailscale up --hostname=source-db-node --ssh
 ```
+
+**Зачем:** подключает третью машину к tailnet как source database node.
+
+**Флаги и параметры:**
+
+- `--hostname=source-db-node` — имя машины для PostgreSQL source DB.
+- `--ssh` — включает Tailscale SSH.
 
 Проверка:
 
@@ -384,6 +605,13 @@ tailscale status
 ping -c 3 source-db-node
 ping -c 3 ai-data-node
 ```
+
+**Зачем:** проверяет, что `pipeline-node` видит source DB и AI/data node по Tailscale DNS.
+
+**Флаги и параметры:**
+
+- `ping` — отправляет ICMP packets для проверки сетевой связности.
+- `-c 3` — отправить 3 пакета и завершиться.
 
 Проверка: в обоих случаях `3 received`.
 
@@ -403,6 +631,15 @@ ping -c 3 pipeline-node
 sudo ufw allow in on tailscale0 to any port 5432 proto tcp
 ```
 
+**Зачем:** разрешает доступ к PostgreSQL только через Tailscale interface, а не из публичного интернета.
+
+**Флаги и параметры:**
+
+- `ufw allow in` — разрешить входящий traffic.
+- `on tailscale0` — правило применяется только к Tailscale interface.
+- `to any port 5432` — открыть только PostgreSQL port.
+- `proto tcp` — разрешить TCP protocol.
+
 Проверка:
 
 ```bash
@@ -415,6 +652,15 @@ sudo ufw status verbose | grep 5432
 for port in 8123 9000 3333 3344 3000 3080 11434 8082; do sudo ufw allow in on tailscale0 to any port $port proto tcp; done
 ```
 
+**Зачем:** открывает на `ai-data-node` только нужные порты ClickHouse, MCP, agent-proxy, LangFuse, LibreChat, Ollama и Adminer через Tailscale.
+
+**Флаги и параметры:**
+
+- `for port in ...; do ...; done` — цикл по списку портов.
+- `$port` — текущий порт из списка.
+- `on tailscale0` — не открывать сервисы наружу, только в VPN.
+- `proto tcp` — все перечисленные сервисы используют TCP.
+
 Проверка:
 
 ```bash
@@ -426,6 +672,16 @@ sudo ufw status verbose | grep -E '8123|9000|3333|3344|3000|3080|11434|8082'
 ```bash
 for port in 8083 8080 8081 9092 9644; do sudo ufw allow in on tailscale0 to any port $port proto tcp; done
 ```
+
+**Зачем:** открывает на `pipeline-node` только нужные порты Debezium, Debezium UI, Airflow и Redpanda через Tailscale.
+
+**Флаги и параметры:**
+
+- `8083` — Debezium Connect REST API.
+- `8080` — Debezium UI.
+- `8081` — Airflow UI.
+- `9092` — Kafka-compatible API Redpanda.
+- `9644` — Redpanda admin API.
 
 Проверка:
 
