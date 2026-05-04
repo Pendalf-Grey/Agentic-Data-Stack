@@ -1,6 +1,8 @@
 services:
   postgres:
     image: postgres:16-alpine
+    profiles:
+      - postgres-source
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -70,8 +72,6 @@ services:
   debezium:
     image: debezium/connect:2.7.3.Final
     depends_on:
-      postgres:
-        condition: service_healthy
       redpanda:
         condition: service_healthy
       clickhouse:
@@ -94,13 +94,15 @@ services:
       - ./debezium/plugins:/debezium-plugins
 
   connectors-init:
-    image: curlimages/curl:8.11.1
+    image: node:22-alpine
     depends_on:
       - debezium
+    env_file:
+      - .env
     volumes:
       - ./debezium/connectors:/connectors:ro
-      - ./debezium/register-connectors.sh:/register-connectors.sh:ro
-    command: sh /register-connectors.sh
+      - ./debezium/register-connectors.mjs:/register-connectors.mjs:ro
+    command: node /register-connectors.mjs
     restart: "no"
 
   grafana:

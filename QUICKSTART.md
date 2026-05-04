@@ -13,6 +13,24 @@ cp .env.example .env
 UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 ```
 
+По умолчанию Debezium читает локальный demo PostgreSQL. В `.env` это задается так:
+
+```env
+ACTIVE_SOURCE_DB=postgres
+COMPOSE_PROFILES=postgres-source
+```
+
+Для другого источника раскомментируйте только одну активную БД:
+
+```env
+# ACTIVE_SOURCE_DB=postgres
+ACTIVE_SOURCE_DB=mysql
+# ACTIVE_SOURCE_DB=mongodb
+# COMPOSE_PROFILES=postgres-source
+```
+
+Затем заполните соответствующий блок `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`. Неактивные блоки оставьте закомментированными.
+
 ## 2. Запуск
 
 ```bash
@@ -47,9 +65,14 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 ## 4. UI
 
 - LibreChat: `http://localhost:3080`
+- Регистрация LibreChat: `http://localhost:3080/register`
+- Вход LibreChat: `http://localhost:3080/login`
 - Grafana: `http://localhost:3001`
 - Dashboard: `http://localhost:3001/d/agentic-data-stack-events/agentic-data-stack-events`
 - ClickHouse UI: `http://localhost:8123/play`
+- Debezium REST: `http://localhost:8083/connectors`
+- MCP health: `http://localhost:3333/health`
+- Agent proxy health: `http://localhost:3344/health`
 
 Grafana login/password из `.env`:
 
