@@ -106,6 +106,23 @@ LibreChat настроен на MCP endpoint:
 http://mcp-server:3333/mcp
 ```
 
+Регистрация локальных пользователей включена через `.env`:
+
+```env
+ALLOW_EMAIL_LOGIN=true
+ALLOW_REGISTRATION=true
+ALLOW_UNVERIFIED_EMAIL_LOGIN=true
+```
+
+Первый зарегистрированный пользователь становится администратором LibreChat.
+
+Порядок первого входа:
+
+1. Откройте `http://localhost:3080/register`.
+2. Зарегистрируйте локального пользователя.
+3. После регистрации откройте `http://localhost:3080/login`.
+4. Войдите с email и паролем, которые указали при регистрации.
+
 В LibreChat выберите endpoint `Local OpenAI-compatible` и включите MCP tools `clickhouse-analytics`.
 
 Примеры запросов:

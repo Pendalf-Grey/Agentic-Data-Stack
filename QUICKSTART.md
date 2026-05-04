@@ -59,7 +59,16 @@ admin / admin
 
 ## 5. LibreChat
 
-В LibreChat выберите `Local OpenAI-compatible` endpoint и включите MCP tools `clickhouse-analytics`.
+Сначала нужно зарегистрировать локального пользователя:
+
+1. Откройте `http://localhost:3080/register`.
+2. Создайте аккаунт.
+3. Откройте `http://localhost:3080/login`.
+4. Войдите с email и паролем из регистрации.
+
+Первый зарегистрированный пользователь становится администратором LibreChat.
+
+После входа выберите `Local OpenAI-compatible` endpoint и включите MCP tools `clickhouse-analytics`.
 
 Рабочие запросы:
 
