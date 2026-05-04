@@ -7,49 +7,63 @@ cd /Users/subbotaevgenij/PycharmProjects/Clicker/CascadeProjects/Agentic-Data-St
 cp .env.example .env
 ```
 
-Перед запуском обязательно отредактируйте `.env`.
+Перед запуском откройте `.env`.
 
-Для внешней БД заполните активный блок `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
+Если подключаетесь к внешней БД, заполните **host**, **port**, **user**, **password** и параметры active source-БД.
 
-Для быстрой локальной проверки включите demo-режим.
-
-Если Ollama запущена на macOS, Docker-контейнеры увидят ее через:
-
-```env
-UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
-```
-
-По умолчанию `.env.example` показывает внешний PostgreSQL как основной сценарий.
-
-Если нужно быстро проверить проект без чужой БД, включите локальный demo PostgreSQL:
+Если хотите просто проверить стек локально, включите demo-режим:
 
 ```env
 SOURCE_MODE=demo
 ACTIVE_SOURCE_DB=postgres
 COMPOSE_PROFILES=postgres-source
+POSTGRES_SOURCE_HOST=postgres
+POSTGRES_SOURCE_USER=app
+POSTGRES_SOURCE_PASSWORD=app_password
+POSTGRES_SOURCE_DB=app_logs
+POSTGRES_SOURCE_TOPIC=pg_flat.public.app_events
+POSTGRES_SOURCE_SSL_MODE=disable
 ```
 
-Для внешней БД оставьте demo-профиль выключенным и раскомментируйте только одну активную БД:
+## 2. Расписание Миграции
+
+Airflow запускает DAG `scheduled_debezium_migration`.
+
+Расписание задается в `.env` через **cron**:
 
 ```env
-SOURCE_MODE=external
-ACTIVE_SOURCE_DB=mysql
-# COMPOSE_PROFILES=postgres-source
+AIRFLOW_MIGRATION_CRON=0 2 * * *
+AIRFLOW_DAG_PAUSED=true
 ```
 
-Затем заполните соответствующий блок `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
+`0 2 * * *` означает “каждый день в 02:00”.
 
-Неактивные блоки оставьте закомментированными.
+После первого запуска зайдите в Airflow:
 
-## 2. Запуск
+```text
+http://localhost:8081
+```
+
+Логин и пароль:
+
+```env
+AIRFLOW_ADMIN_USER=admin
+AIRFLOW_ADMIN_PASSWORD=admin
+```
+
+Включите DAG toggle, если хотите, чтобы расписание начало работать.
+
+Для ручного запуска нажмите Trigger DAG.
+
+## 3. Запуск
 
 ```bash
 docker compose up -d --build
 ```
 
-Если заняты порты `3001`, `3080`, `3333`, `3344`, `5432`, `8083`, `8123`, `9000`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
+Если заняты порты `3001`, `3080`, `3333`, `3344`, `5432`, `8081`, `8083`, `8123`, `9000`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
 
-## 3. Проверка
+## 4. Проверка
 
 ```bash
 docker compose ps
@@ -65,13 +79,14 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
   --data-binary 'SELECT count() FROM analytics.app_events_raw'
 ```
 
-Ожидаемо после initial snapshot: `1000`.
+В demo-режиме после initial snapshot ожидается `1000`.
 
-## 4. UI
+## 5. UI
 
 - LibreChat: `http://localhost:3080`
 - Регистрация LibreChat: `http://localhost:3080/register`
 - Вход LibreChat: `http://localhost:3080/login`
+- Airflow: `http://localhost:8081`
 - Grafana: `http://localhost:3001`
 - Dashboard: `http://localhost:3001/d/agentic-data-stack-events/agentic-data-stack-events`
 - ClickHouse UI: `http://localhost:8123/play`
@@ -79,15 +94,9 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 - MCP health: `http://localhost:3333/health`
 - Agent proxy health: `http://localhost:3344/health`
 
-Grafana login/password из `.env`:
+## 6. LibreChat
 
-```text
-admin / admin
-```
-
-## 5. LibreChat
-
-Сначала нужно зарегистрировать локального пользователя:
+Сначала зарегистрируйте локального пользователя:
 
 1. Откройте `http://localhost:3080/register`.
 2. Создайте аккаунт.
@@ -97,17 +106,3 @@ admin / admin
 Первый зарегистрированный пользователь становится администратором LibreChat.
 
 После входа выберите `Local OpenAI-compatible` endpoint и включите MCP tools `clickhouse-analytics`.
-
-Рабочие запросы:
-
-```text
-Проанализируй routes по error rate и p95 latency.
-```
-
-```text
-Визуализируй error rate по routes и верни ссылку на Grafana.
-```
-
-```text
-Построй график количества логов по времени с разбивкой по event_type.
-```

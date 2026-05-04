@@ -1,24 +1,60 @@
 # Agentic Data Stack
 
-Минимальный локальный стек для аналитики логов, мигрированных через Debezium в ClickHouse, с LibreChat, MCP tools и Grafana-визуализациями.
+Это локальный стек для аналитики данных, которые приходят из внешней БД через **Debezium** и попадают в **ClickHouse**.
 
-## Что осталось в проекте
+Идея простая: подключаемся к чужой source-БД, забираем изменения, складываем их в аналитическое хранилище, смотрим графики в **Grafana** и задаем вопросы данным через **LibreChat** + **MCP**.
 
-- `postgres` — локальный demo-источник логов `public.app_events` с logical replication. Используется только когда включен профиль `postgres-source`.
-- `redpanda` — Kafka-compatible broker для Debezium.
-- `debezium` — Kafka Connect runtime.
-- `connectors-init` — одноразовая регистрация Debezium source/sink connectors.
-- `clickhouse` — аналитическое хранилище `analytics`.
-- `grafana` — dashboards поверх ClickHouse, опубликована на `http://localhost:3001`.
-- `mcp-server` — MCP tools для LibreChat: аналитика ClickHouse и ссылки на Grafana.
-- `agent-proxy` — OpenAI-compatible proxy к локальной/облачной модели.
-- `librechat` и `librechat-db` — чат-интерфейс и MongoDB.
+Локальный PostgreSQL в проекте оставлен только как demo-пример. В реальной работе чаще используется внешняя БД: чужой **host**, внешний **IP**, отдельный **user**, отдельный **password**, свои правила firewall/VPN/TLS.
 
-Из стека убраны Airflow, Langfuse, Adminer и Debezium UI, потому что для текущего сценария они не обязательны.
+## Что Делают Сервисы
 
-## Подключение к внешней source-БД
+**Airflow** — планировщик.
 
-Основной сценарий проекта — подключение к внешней БД, которая не принадлежит этому compose-стеку. Локальный PostgreSQL оставлен только как отключаемый demo-пример.
+Он нужен, когда миграцию надо запускать не сразу, а в определенное **время**, **день недели** или по регулярному расписанию. В этом проекте Airflow запускает DAG `scheduled_debezium_migration`, который регистрирует или обновляет Debezium connectors.
+
+В других проектах Airflow чаще всего используют для ETL/ELT-процессов: загрузить данные, преобразовать, проверить качество, запустить отчет, отправить уведомление.
+
+**Debezium** — CDC-инструмент.
+
+CDC означает Change Data Capture. Это способ читать изменения из БД: новые строки, обновления и удаления. Debezium читает журнал изменений source-БД и отправляет события дальше.
+
+В других проектах Debezium часто используют для репликации данных, аудита, realtime-аналитики и синхронизации микросервисов.
+
+**Redpanda** — Kafka-compatible брокер сообщений.
+
+Здесь он работает как транспорт между Debezium и ClickHouse sink connector. Debezium пишет изменения в **topic**, а ClickHouse sink читает этот **topic**.
+
+В других проектах Redpanda или Kafka обычно используют как надежную “шину событий” между сервисами.
+
+**ClickHouse** — аналитическая БД.
+
+Она хранит данные в формате, удобном для быстрых агрегатов: count, group by, latency, error rate, временные ряды.
+
+В других проектах ClickHouse часто используют для логов, продуктовой аналитики, метрик, observability и дешевых быстрых отчетов по большим объемам данных.
+
+**Grafana** — интерфейс для графиков.
+
+Она читает данные из ClickHouse и показывает dashboards. В этом проекте MCP tools возвращают ссылки на Grafana, чтобы модель не пыталась рисовать SVG-картинки внутри LibreChat.
+
+В других проектах Grafana обычно используют для мониторинга, алертов, метрик и операционных dashboards.
+
+**LibreChat** — web UI для общения с моделью.
+
+В этом проекте LibreChat подключен к локальной или облачной OpenAI-compatible модели через `agent-proxy`. Также LibreChat видит MCP tools и может просить их анализировать ClickHouse.
+
+В других проектах LibreChat часто используют как единый чат-интерфейс к нескольким LLM providers.
+
+**MCP server** — мост между моделью и инструментами.
+
+MCP означает Model Context Protocol. Это способ дать модели безопасные tools: посмотреть схему ClickHouse, выполнить read-only запрос, получить ссылку на Grafana panel.
+
+В других проектах MCP используют, когда модели нужно не просто отвечать текстом, а работать с внешними системами: БД, API, файлами, задачами, dashboards.
+
+## Подключение К Внешней БД
+
+Основной сценарий проекта — внешняя source-БД.
+
+Это значит, что база не запускается внутри Docker Compose. Она уже существует где-то снаружи: на сервере клиента, в облаке, в корпоративной сети, за VPN или firewall.
 
 В `.env` выберите режим:
 
@@ -27,9 +63,7 @@ SOURCE_MODE=external
 # SOURCE_MODE=demo
 ```
 
-Внешняя БД не запускается Docker Compose. Debezium внутри контейнера подключается к ней по host/port/credentials из `.env`.
-
-Активный source connector выбирается отдельно. Должна быть раскомментирована ровно одна строка:
+Затем выберите тип active source-БД. Должна быть раскомментирована ровно одна строка:
 
 ```env
 ACTIVE_SOURCE_DB=postgres
@@ -37,23 +71,31 @@ ACTIVE_SOURCE_DB=postgres
 # ACTIVE_SOURCE_DB=mongodb
 ```
 
-Для внешней БД профиль локального PostgreSQL должен быть выключен:
+Для внешней БД локальный demo PostgreSQL должен быть выключен:
 
 ```env
 # COMPOSE_PROFILES=postgres-source
 ```
 
-Для локального demo-PostgreSQL включите профиль:
+Ключевые параметры почти всегда одни и те же:
 
-```env
-SOURCE_MODE=demo
-ACTIVE_SOURCE_DB=postgres
-COMPOSE_PROFILES=postgres-source
-```
+**host** — DNS-имя или **IP** сервера БД.
 
-### External PostgreSQL
+**port** — сетевой порт БД, например `5432` для PostgreSQL или `3306` для MySQL.
 
-Пример подключения к чужой PostgreSQL:
+**user** — пользователь, под которым Debezium подключается к source-БД.
+
+**password** — пароль этого пользователя.
+
+**database** — имя БД.
+
+**table** или **collection** — что именно читаем.
+
+**topic** — поток сообщений в Redpanda/Kafka, куда Debezium пишет изменения.
+
+## External PostgreSQL
+
+Пример `.env` для чужой PostgreSQL:
 
 ```env
 SOURCE_MODE=external
@@ -74,23 +116,27 @@ POSTGRES_SOURCE_SSL_MODE=require
 POSTGRES_SOURCE_TOPIC=customer_pg.public.app_events
 ```
 
-Если PostgreSQL запущен на macOS-хосте рядом с Docker Desktop, используйте:
+Если PostgreSQL запущен прямо на Mac рядом с Docker Desktop, используйте:
 
 ```env
 POSTGRES_SOURCE_HOST=host.docker.internal
 ```
 
-Для PostgreSQL source-БД должны быть выполнены условия:
+Для PostgreSQL нужны не только **host**, **user** и **password**.
 
-- `wal_level=logical` — режим PostgreSQL, который разрешает читать журнал изменений не только для восстановления БД, но и для внешних CDC-инструментов.
-- Доступ к host/port из Docker-контейнеров `connectors-init` и `debezium`.
-- Пользователь Debezium имеет права на чтение таблицы, создание/использование replication slot и publication.
-- Таблица должна иметь primary key или replica identity, подходящую для CDC.
-- `POSTGRES_SOURCE_SLOT` должен быть уникальным для этого Debezium-подключения.
+Debezium читает не обычный SQL-дамп, а поток изменений. Поэтому в PostgreSQL должен быть включен `wal_level=logical`.
 
-### External MySQL
+**WAL** означает Write-Ahead Log. Это журнал PostgreSQL, куда сначала попадают изменения, и уже потом они считаются надежно сохраненными в таблицах.
 
-Пример подключения к чужой MySQL:
+**Replication slot** — именованная позиция чтения WAL. Она нужна, чтобы PostgreSQL понимал, какие изменения Debezium уже прочитал.
+
+**Publication** — список таблиц, изменения которых PostgreSQL разрешает отдавать наружу.
+
+Пользователь Debezium должен иметь права читать нужную таблицу, использовать logical replication, replication slot и publication.
+
+## External MySQL
+
+Пример `.env` для чужой MySQL:
 
 ```env
 SOURCE_MODE=external
@@ -109,17 +155,20 @@ MYSQL_SOURCE_SSL_MODE=preferred
 MYSQL_SOURCE_TOPIC=customer_mysql.customer_app.app_events
 ```
 
-Для MySQL source-БД должны быть выполнены условия:
+Для MySQL должен быть включен **binlog**.
 
-- Включен binary log — журнал изменений MySQL, из которого Debezium читает события.
-- `binlog_format=ROW` — Debezium нужны изменения на уровне строк, а не только SQL-команды.
-- `binlog_row_image=FULL` — в binlog должны попадать все поля измененной строки.
-- `MYSQL_SOURCE_SERVER_ID` уникален среди replica/CDC clients.
-- Пользователь Debezium имеет права чтения и replication client/slave.
+**Binlog** — binary log, журнал изменений MySQL. Debezium читает его так же, как PostgreSQL connector читает WAL.
 
-### External MongoDB
+Нужные настройки MySQL:
 
-Пример подключения к чужой MongoDB:
+- `binlog_format=ROW`
+- `binlog_row_image=FULL`
+- уникальный `MYSQL_SOURCE_SERVER_ID`
+- права чтения и replication client/slave для пользователя Debezium
+
+## External MongoDB
+
+Пример `.env` для чужой MongoDB:
 
 ```env
 SOURCE_MODE=external
@@ -133,15 +182,17 @@ MONGODB_SOURCE_TOPIC_PREFIX=customer_mongo
 MONGODB_SOURCE_TOPIC=customer_mongo.customer_app.app_events
 ```
 
-Для MongoDB source-БД должны быть выполнены условия:
+MongoDB должна работать как replica set или sharded cluster.
 
-- MongoDB работает как replica set или sharded cluster с change streams.
-- Пользователь имеет права читать collection и change stream.
-- Connection string должен включать нужный `authSource`, replica set и TLS-параметры, если они требуются.
+Debezium использует **change stream**. Это API MongoDB, через который можно подписаться на изменения документов.
 
-### Local demo PostgreSQL
+Пользователь должен иметь права читать нужную **collection** и ее change stream.
 
-Demo-настройки нужны только для проверки проекта без внешней БД:
+## Local Demo PostgreSQL
+
+Demo-режим нужен только для проверки проекта без внешней БД.
+
+Он запускает локальный PostgreSQL с тестовыми логами `public.app_events`.
 
 ```env
 SOURCE_MODE=demo
@@ -166,67 +217,103 @@ POSTGRES_SOURCE_SSL_MODE=disable
 POSTGRES_SOURCE_TOPIC=pg_flat.public.app_events
 ```
 
-### Как применяется переключение
+## Как Работает Миграция
 
-`connectors-init` при старте делает три вещи:
+`connectors-init` запускается один раз при старте compose.
 
-1. Смотрит `ACTIVE_SOURCE_DB`.
-2. Рендерит нужный шаблон из `debezium/connectors/<db>-source.json`.
-3. Создает или обновляет активный source connector и ClickHouse sink connector, а неактивные source connectors удаляет.
+Он смотрит на `ACTIVE_SOURCE_DB`, берет нужный шаблон из `debezium/connectors/<db>-source.json`, подставляет значения из `.env` и регистрирует Debezium connector.
 
-ClickHouse sink использует topic из переменной активной БД, например `POSTGRES_SOURCE_TOPIC`, и пишет его в таблицу:
+ClickHouse sink connector тоже создается автоматически.
+
+Он читает **topic** активной source-БД и пишет строки в таблицу ClickHouse:
 
 ```env
 CLICKHOUSE_SINK_TABLE=app_events_raw
 ```
 
-Важно: текущая аналитика, Grafana dashboard и MCP tools рассчитаны на структуру `analytics.app_events_raw`.
+Текущие Grafana dashboards и MCP tools рассчитаны на таблицу `analytics.app_events_raw`.
 
-При переключении на MySQL или MongoDB источник должен отдавать поля, совместимые с этой таблицей.
+Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema, `CLICKHOUSE_SINK_TABLE`, Grafana panels и MCP-запросы.
 
-Если структура данных другая, нужно обновить ClickHouse schema, `CLICKHOUSE_SINK_TABLE`, Grafana panels и MCP-запросы под новую модель данных.
+## Airflow: Запуск Миграции По Расписанию
 
-### Термины
+Airflow доступен здесь:
 
-CDC означает Change Data Capture.
+```text
+http://localhost:8081
+```
 
-Это подход, при котором система читает поток изменений из исходной БД: insert, update, delete. Debezium использует CDC, чтобы переносить не только начальный snapshot, но и последующие изменения.
+Логин и пароль задаются в `.env`:
 
-Snapshot — это первичная выгрузка текущего состояния таблицы или collection.
+```env
+AIRFLOW_ADMIN_USER=admin
+AIRFLOW_ADMIN_PASSWORD=admin
+AIRFLOW_ADMIN_EMAIL=admin@example.com
+```
 
-После snapshot Debezium переходит в потоковый режим и начинает читать новые изменения из журнала БД.
+При первом запуске `airflow-init` создает локального пользователя Airflow.
 
-Replication slot в PostgreSQL — это именованная позиция чтения WAL.
+После входа в Airflow найдите DAG:
 
-WAL означает Write-Ahead Log. Это журнал PostgreSQL, куда сначала записываются изменения, а уже потом они считаются надежно сохраненными в таблицах.
+```text
+scheduled_debezium_migration
+```
 
-Publication в PostgreSQL — это список таблиц, изменения которых разрешено публиковать для logical replication.
+Этот DAG делает то же, что `connectors-init`, но по расписанию: регистрирует или обновляет active Debezium source connector и ClickHouse sink connector.
 
-Logical replication — это репликация на уровне строк и таблиц, а не побайтовая копия файлов БД.
+Расписание задается через **cron** в `.env`:
 
-Binlog в MySQL — это binary log, журнал изменений MySQL.
+```env
+AIRFLOW_MIGRATION_CRON=0 2 * * *
+```
 
-Change stream в MongoDB — это API, через который можно подписаться на изменения документов.
+Cron — это короткая запись расписания.
 
-Topic в Kafka/Redpanda — это именованный поток сообщений.
+Формат такой:
 
-Debezium пишет изменения из source-БД в topic, а ClickHouse sink читает этот topic и пишет строки в таблицу ClickHouse.
+```text
+минута час день_месяца месяц день_недели
+```
 
-Sink connector — это коннектор, который забирает данные из Kafka/Redpanda и пишет их в целевую систему.
+Примеры:
 
-Source connector — это коннектор, который читает данные из исходной системы и отправляет их в Kafka/Redpanda.
+```env
+# Каждый день в 02:00
+AIRFLOW_MIGRATION_CRON=0 2 * * *
 
-### Ограничения и безопасность
+# Каждый понедельник в 03:30
+AIRFLOW_MIGRATION_CRON=30 3 * * 1
 
-- Debezium не может читать любую чужую БД только по обычному read-only login.
-- Для CDC нужны специальные настройки сервера и права replication/change stream.
-- Network path должен быть открыт от Docker Desktop до внешней БД.
-- VPN, firewall, allowlist IP, DNS и TLS должны быть настроены отдельно.
-- Не коммитьте реальные пароли в Git.
-- Файл `.env` находится в `.gitignore`, а `.env.example` должен содержать только placeholders.
-- Если внешний источник использует self-signed TLS certificates, потребуется добавить доверенные CA/certs в Debezium container или настроить connection string/SSL mode под конкретную БД.
-- Текущий ClickHouse sink настроен на одну таблицу `app_events_raw`.
-- Для нескольких таблиц или другой схемы данных нужно добавить новые ClickHouse tables и расширить `topic2TableMap`.
+# Первого числа каждого месяца в 01:00
+AIRFLOW_MIGRATION_CRON=0 1 1 * *
+```
+
+По умолчанию DAG создается в paused-состоянии:
+
+```env
+AIRFLOW_DAG_PAUSED=true
+```
+
+Это сделано специально, чтобы миграция из внешней БД не стартовала случайно.
+
+Чтобы включить расписание:
+
+1. Откройте `http://localhost:8081`.
+2. Войдите под `AIRFLOW_ADMIN_USER` и `AIRFLOW_ADMIN_PASSWORD`.
+3. Найдите DAG `scheduled_debezium_migration`.
+4. Нажмите toggle, чтобы снять DAG с паузы.
+
+Чтобы запустить миграцию вручную, нажмите кнопку Trigger DAG в Airflow UI.
+
+Если меняете `AIRFLOW_MIGRATION_CRON`, перезапустите Airflow scheduler:
+
+```bash
+docker compose up -d airflow-scheduler airflow-webserver
+```
+
+Важно: Debezium обычно работает как непрерывный CDC-процесс.
+
+Airflow в этом проекте отвечает за момент регистрации или обновления connectors. Если нужен строгий “миграционный интервал”, например запускать в 02:00 и останавливать в 03:00, нужно добавить отдельный DAG для pause/resume или delete connectors.
 
 ## Запуск
 
@@ -237,7 +324,7 @@ cp .env.example .env
 
 Перед запуском отредактируйте `.env`.
 
-Если подключаетесь к внешней БД, заполните host, port, user, password и остальные переменные активного блока `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
+Если подключаетесь к внешней БД, заполните **host**, **port**, **user**, **password** и остальные переменные активного блока `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
 
 Если внешней БД пока нет и нужно проверить проект на demo-данных, включите `SOURCE_MODE=demo` и `COMPOSE_PROFILES=postgres-source`.
 
@@ -247,108 +334,29 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Если нужные порты уже заняты другим локальным стеком, остановите тот стек или поменяйте published ports в `docker-compose.yml`.
+Если нужные **ports** уже заняты другим локальным стеком, остановите тот стек или поменяйте published ports в `docker-compose.yml`.
 
-## Локальная модель
+## LibreChat
 
-По умолчанию LibreChat ходит через `agent-proxy` в OpenAI-compatible endpoint:
-
-```env
-UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
-UPSTREAM_OPENAI_API_KEY=local-dev-key
-LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.2-vision:latest
-OPENAI_MODEL=qwen2.5:7b
-OPENAI_MODEL_SMART=qwen2.5:14b
-```
-
-Если используете Ollama, убедитесь, что нужные модели скачаны на macOS:
-
-```bash
-ollama pull qwen2.5:14b
-ollama pull nomic-embed-text
-```
-
-## Endpoints
-
-- `http://localhost:3080` — LibreChat Web UI.
-- `http://localhost:3080/register` — регистрация первого локального пользователя.
-- `http://localhost:3080/login` — вход в LibreChat после регистрации.
-- `http://localhost:3001` — Grafana UI.
-- `http://localhost:3001/d/agentic-data-stack-events/agentic-data-stack-events` — dashboard `Agentic Data Stack Events`.
-- `http://localhost:3333/health` — healthcheck MCP server.
-- `http://localhost:3333/mcp` — MCP endpoint, который LibreChat использует внутри Docker как `http://mcp-server:3333/mcp`.
-- `http://localhost:3344/health` — healthcheck OpenAI-compatible `agent-proxy`.
-- `http://localhost:3344/v1/models` — внешний debug endpoint списка моделей через `agent-proxy`.
-- `http://agent-proxy:3344/v1` — внутренний Docker endpoint для LibreChat, задается как `AGENT_PROXY_BASE_URL`.
-- `http://host.docker.internal:11434/v1` — OpenAI-compatible endpoint Ollama на macOS, задается как `UPSTREAM_OPENAI_BASE_URL`.
-- `http://localhost:8083` — Debezium Kafka Connect REST API.
-- `http://localhost:8083/connectors` — список зарегистрированных Debezium connectors.
-- `http://localhost:8123/play` — ClickHouse Web UI.
-- `http://localhost:8123` — ClickHouse HTTP API.
-- `localhost:9000` — ClickHouse native TCP port.
-- `localhost:9092` — Redpanda Kafka API.
-- `localhost:9644` — Redpanda admin API.
-- `localhost:5432` — demo PostgreSQL, только при `COMPOSE_PROFILES=postgres-source`.
-
-Grafana внутри Docker работает на `grafana:3000`, но пользовательские ссылки должны быть только с внешним портом `localhost:3001`. MCP server уже настроен так, чтобы отдавать ссылки именно на `http://localhost:3001`.
-
-## Проверка
-
-```bash
-docker compose ps
-curl http://localhost:3333/health
-curl http://localhost:3344/health
-```
-
-Проверить, что Debezium connectors зарегистрированы:
-
-```bash
-curl http://localhost:8083/connectors
-```
-
-Ожидаемо:
-
-```json
-["postgres-app-events-source","clickhouse-app-events-sink"]
-```
-
-Проверить миграцию данных в ClickHouse:
-
-```bash
-curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
-  --data-binary 'SELECT count() FROM analytics.app_events_raw'
-```
-
-Ожидаемо после initial snapshot:
+LibreChat доступен здесь:
 
 ```text
-1000
+http://localhost:3080
 ```
 
-## LibreChat + ClickHouse
-
-LibreChat настроен на MCP endpoint:
+Сначала нужно зарегистрироваться:
 
 ```text
-http://mcp-server:3333/mcp
-```
-
-Регистрация локальных пользователей включена через `.env`:
-
-```env
-ALLOW_EMAIL_LOGIN=true
-ALLOW_REGISTRATION=true
-ALLOW_UNVERIFIED_EMAIL_LOGIN=true
+http://localhost:3080/register
 ```
 
 Первый зарегистрированный пользователь становится администратором LibreChat.
 
-Порядок первого входа:
+После регистрации откройте:
 
-1. Откройте `http://localhost:3080/register`.
-2. Зарегистрируйте локального пользователя.
-3. После регистрации откройте `http://localhost:3080/login`.
-4. Войдите с email и паролем, которые указали при регистрации.
+```text
+http://localhost:3080/login
+```
 
 В LibreChat выберите endpoint `Local OpenAI-compatible` и включите MCP tools `clickhouse-analytics`.
 
@@ -366,15 +374,88 @@ ALLOW_UNVERIFIED_EMAIL_LOGIN=true
 Визуализируй error rate по routes и дай ссылку на Grafana.
 ```
 
-## MCP tools
+## Локальная Или Облачная Модель
 
-- `describe_analytics_schema`
-- `sample_app_events`
-- `event_summary`
-- `route_performance`
-- `model_usage`
-- `error_trends`
-- `visualize_event_volume`
-- `visualize_route_performance`
-- `visualize_model_usage`
-- `run_readonly_query`
+LibreChat ходит в модель через `agent-proxy`.
+
+Для Ollama на macOS обычно используется:
+
+```env
+UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+UPSTREAM_OPENAI_API_KEY=local-dev-key
+```
+
+Список моделей для UI:
+
+```env
+LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.2-vision:latest
+OPENAI_MODEL=qwen2.5:7b
+OPENAI_MODEL_SMART=qwen2.5:14b
+```
+
+## Endpoints
+
+- `http://localhost:3080` — LibreChat Web UI.
+- `http://localhost:3080/register` — регистрация локального пользователя LibreChat.
+- `http://localhost:3080/login` — вход в LibreChat.
+- `http://localhost:8081` — Airflow Web UI.
+- `http://localhost:3001` — Grafana UI.
+- `http://localhost:3001/d/agentic-data-stack-events/agentic-data-stack-events` — dashboard `Agentic Data Stack Events`.
+- `http://localhost:3333/health` — healthcheck MCP server.
+- `http://localhost:3333/mcp` — MCP endpoint. Внутри Docker LibreChat использует `http://mcp-server:3333/mcp`.
+- `http://localhost:3344/health` — healthcheck `agent-proxy`.
+- `http://localhost:3344/v1/models` — debug endpoint списка моделей через `agent-proxy`.
+- `http://agent-proxy:3344/v1` — внутренний Docker endpoint для LibreChat.
+- `http://host.docker.internal:11434/v1` — OpenAI-compatible endpoint Ollama на macOS.
+- `http://localhost:8083` — Debezium Kafka Connect REST API.
+- `http://localhost:8083/connectors` — список зарегистрированных Debezium connectors.
+- `http://localhost:8123/play` — ClickHouse Web UI.
+- `http://localhost:8123` — ClickHouse HTTP API.
+- `localhost:9000` — ClickHouse native TCP port.
+- `localhost:9092` — Redpanda Kafka API.
+- `localhost:9644` — Redpanda admin API.
+- `localhost:5432` — demo PostgreSQL, только при `COMPOSE_PROFILES=postgres-source`.
+
+Grafana внутри Docker работает на `grafana:3000`.
+
+Пользовательские ссылки должны использовать внешний адрес `http://localhost:3001`.
+
+## Проверка
+
+```bash
+docker compose ps
+curl http://localhost:3333/health
+curl http://localhost:3344/health
+curl http://localhost:8083/connectors
+```
+
+Проверить строки в ClickHouse:
+
+```bash
+curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
+  --data-binary 'SELECT count() FROM analytics.app_events_raw'
+```
+
+Для demo-режима после initial snapshot ожидается:
+
+```text
+1000
+```
+
+## Ограничения И Безопасность
+
+Debezium не может читать любую чужую БД только по обычному read-only login.
+
+Для CDC нужны специальные права и настройки source-сервера.
+
+Нужно заранее проверить сетевой путь от Docker Desktop до внешней БД: **VPN**, **firewall**, **allowlist IP**, **DNS**, **TLS**.
+
+Не коммитьте реальные пароли в Git.
+
+Файл `.env` находится в `.gitignore`. В `.env.example` должны быть только placeholders.
+
+Если внешняя БД использует self-signed TLS certificates, потребуется добавить доверенные CA/certs в Debezium container или настроить SSL-параметры под конкретную БД.
+
+Текущий ClickHouse sink настроен на одну таблицу `app_events_raw`.
+
+Для нескольких таблиц или другой схемы данных нужно добавить новые ClickHouse tables и расширить `topic2TableMap`.
