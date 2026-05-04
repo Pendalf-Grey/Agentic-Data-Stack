@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: ads_postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -25,54 +24,8 @@ services:
       timeout: 5s
       retries: 10
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    container_name: ads_clickhouse
-    environment:
-      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-    ports:
-      - "8123:8123"
-      - "9000:9000"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  debezium:
-    image: debezium/connect:2.7.3.Final
-    container_name: ads_debezium
-    depends_on:
-      postgres:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-    environment:
-      BOOTSTRAP_SERVERS: redpanda:9092
-      GROUP_ID: ads-connect
-      CONFIG_STORAGE_TOPIC: ads_connect_configs
-      OFFSET_STORAGE_TOPIC: ads_connect_offsets
-      STATUS_STORAGE_TOPIC: ads_connect_statuses
-      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONNECT_PLUGIN_PATH: /kafka/connect,/debezium-plugins
-    ports:
-      - "8083:8083"
-    volumes:
-      - ./debezium/connectors:/connectors:ro
-      - ./debezium/plugins:/debezium-plugins
-
   redpanda:
     image: redpandadata/redpanda:v24.2.8
-    container_name: ads_redpanda
     command:
       - redpanda
       - start
@@ -95,108 +48,63 @@ services:
       timeout: 5s
       retries: 10
 
-  debezium-ui:
-    image: debezium/debezium-ui:2.5
-    platform: linux/amd64
-    container_name: ads_debezium_ui
-    depends_on:
-      - debezium
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
     environment:
-      KAFKA_CONNECT_URIS: http://debezium:8083
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
-      - "8080:8080"
-
-  airflow-init:
-    image: apache/airflow:2.10.2
-    container_name: ads_airflow_init
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      - "8123:8123"
+      - "9000:9000"
     volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/requirements.txt:/requirements.txt:ro
-    command: bash -c "pip install -r /requirements.txt && airflow db migrate && airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL} || true"
-
-  airflow-webserver:
-    image: apache/airflow:2.10.2
-    container_name: ads_airflow_webserver
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    ports:
-      - "8081:8080"
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/requirements.txt:/requirements.txt:ro
-    command: bash -c "pip install -r /requirements.txt && airflow webserver"
-
-  airflow-scheduler:
-    image: apache/airflow:2.10.2
-    container_name: ads_airflow_scheduler
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/requirements.txt:/requirements.txt:ro
-    command: bash -c "pip install -r /requirements.txt && airflow scheduler"
-
-  langfuse-db:
-    image: postgres:16-alpine
-    container_name: ads_langfuse_db
-    environment:
-      POSTGRES_DB: ${LANGFUSE_DB}
-      POSTGRES_USER: ${LANGFUSE_DB_USER}
-      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD}
-    volumes:
-      - langfuse_db_data:/var/lib/postgresql/data
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_DB_USER} -d ${LANGFUSE_DB}"]
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
       interval: 10s
       timeout: 5s
       retries: 10
 
-  langfuse:
-    image: langfuse/langfuse:2
-    container_name: ads_langfuse
-    depends_on:
-      langfuse-db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://${LANGFUSE_DB_USER}:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/${LANGFUSE_DB}
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
-      SALT: ${LANGFUSE_SALT}
-      NEXTAUTH_URL: ${LANGFUSE_HOST}
-      TELEMETRY_ENABLED: "false"
-    ports:
-      - "3000:3000"
-
-  adminer:
-    image: adminer:4
-    container_name: ads_adminer
+  debezium:
+    image: debezium/connect:2.7.3.Final
     depends_on:
       postgres:
         condition: service_healthy
-      langfuse-db:
+      redpanda:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: ads-connect
+      CONFIG_STORAGE_TOPIC: ads_connect_configs
+      OFFSET_STORAGE_TOPIC: ads_connect_offsets
+      STATUS_STORAGE_TOPIC: ads_connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_PLUGIN_PATH: /kafka/connect,/debezium-plugins
     ports:
-      - "8082:8080"
+      - "8083:8083"
+    volumes:
+      - ./debezium/connectors:/connectors:ro
+      - ./debezium/plugins:/debezium-plugins
+
+  connectors-init:
+    image: curlimages/curl:8.11.1
+    depends_on:
+      - debezium
+    volumes:
+      - ./debezium/connectors:/connectors:ro
+      - ./debezium/register-connectors.sh:/register-connectors.sh:ro
+    command: sh /register-connectors.sh
+    restart: "no"
 
   grafana:
     image: grafana/grafana-oss:11.3.0
-    container_name: ads_grafana
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -216,13 +124,42 @@ services:
 
   librechat-db:
     image: mongo:7
-    container_name: ads_librechat_mongo
     volumes:
       - librechat_mongo_data:/data/db
 
+  agent-proxy:
+    build:
+      context: ./agent-proxy
+    environment:
+      PORT: 3344
+      UPSTREAM_OPENAI_API_KEY: ${UPSTREAM_OPENAI_API_KEY}
+      UPSTREAM_OPENAI_BASE_URL: ${UPSTREAM_OPENAI_BASE_URL}
+    ports:
+      - "3344:3344"
+
+  mcp-server:
+    build:
+      context: ./mcp-server
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      grafana:
+        condition: service_started
+    environment:
+      PUBLIC_BASE_URL: http://localhost:3333
+      GRAFANA_BASE_URL: http://localhost:3001
+      GRAFANA_API_URL: http://grafana:3000
+      GRAFANA_USER: ${GRAFANA_ADMIN_USER}
+      GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      CLICKHOUSE_HOST: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
+    ports:
+      - "3333:3333"
+
   librechat:
     image: ghcr.io/danny-avila/librechat:latest
-    container_name: ads_librechat
     depends_on:
       - librechat-db
       - agent-proxy
@@ -244,9 +181,6 @@ services:
       LIBRECHAT_MODELS: ${LIBRECHAT_MODELS}
       LIBRECHAT_TITLE_MODEL: ${LIBRECHAT_TITLE_MODEL}
       LIBRECHAT_SUMMARY_MODEL: ${LIBRECHAT_SUMMARY_MODEL}
-      LANGFUSE_HOST: ${LANGFUSE_HOST}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
       NO_INDEX: "true"
     ports:
       - "3080:3080"
@@ -255,47 +189,9 @@ services:
       - ./librechat/render-config.sh:/app/render-config.sh:ro
     command: sh /app/render-config.sh
 
-  agent-proxy:
-    build:
-      context: ./agent-proxy
-    container_name: ads_agent_proxy
-    environment:
-      PORT: 3344
-      UPSTREAM_OPENAI_API_KEY: ${UPSTREAM_OPENAI_API_KEY}
-      UPSTREAM_OPENAI_BASE_URL: ${UPSTREAM_OPENAI_BASE_URL}
-      LANGFUSE_HOST: http://langfuse:3000
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
-    ports:
-      - "3344:3344"
-
-  mcp-server:
-    build:
-      context: ./mcp-server
-    container_name: ads_mcp_server
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    environment:
-      PUBLIC_BASE_URL: http://localhost:3333
-      GRAFANA_BASE_URL: http://localhost:3001
-      GRAFANA_API_URL: http://grafana:3000
-      GRAFANA_USER: ${GRAFANA_ADMIN_USER}
-      GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      CLICKHOUSE_HOST: http://clickhouse:8123
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
-      LANGFUSE_HOST: ${LANGFUSE_HOST}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
-    ports:
-      - "3333:3333"
-
 volumes:
   postgres_data:
-  clickhouse_data:
   redpanda_data:
-  langfuse_db_data:
-  librechat_mongo_data:
+  clickhouse_data:
   grafana_data:
+  librechat_mongo_data:
