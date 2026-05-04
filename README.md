@@ -142,11 +142,59 @@ docker compose exec clickhouse clickhouse-client \
   --query "SELECT * FROM analytics.v_event_summary LIMIT 10"
 ```
 
+## LibreChat + ClickHouse analysis
+
+LibreChat is configured with the `clickhouse-analytics` MCP server:
+
+```text
+http://mcp-server:3333/mcp
+```
+
+In LibreChat, use the `Local OpenAI-compatible` endpoint and enable/select the `clickhouse-analytics` MCP tools in the chat or add them to an Agent. Then the selected model can inspect the ClickHouse schema, read migrated event samples, use purpose-built analytics tools, return Grafana panel links, run read-only ClickHouse `SELECT` queries, and summarize the results.
+
+Grafana links returned to the user must use the host-published URL:
+
+```text
+http://localhost:3001
+```
+
+The MCP server creates Grafana short URLs through the Grafana API and rewrites them to this host-published URL. Do not rewrite these links to Docker-internal `grafana:3000`, `grafana-server:3000`, or `localhost:3000`, and do not invent `d-solo` links.
+
+Example prompts:
+
+```text
+Analyze the migrated ClickHouse events and show the busiest routes by event count.
+```
+
+```text
+Use ClickHouse to find error-rate trends by hour and explain the likely hotspots.
+```
+
+```text
+Compare model usage, token usage, and total_cost_usd by model_name.
+```
+
+```text
+Построй график количества логов по времени с разбивкой по event_type.
+```
+
+```text
+Визуализируй error rate по routes и объясни, какие endpoints проблемные.
+```
+
 ## MCP tools
 
-MCP server предоставляет два инструмента:
+MCP server предоставляет инструменты:
 
+- `describe_analytics_schema` — показывает схему аналитических таблиц и views.
+- `sample_app_events` — возвращает примеры строк, мигрированных из PostgreSQL в ClickHouse через Debezium.
 - `event_summary` — возвращает агрегаты из `analytics.v_event_summary`.
+- `route_performance` — анализирует трафик, пользователей, ошибки, error rate и latency по route.
+- `model_usage` — анализирует использование моделей, токены, completions и стоимость по `model_name`.
+- `error_trends` — показывает почасовые ошибки по route и status code.
+- `visualize_event_volume` — возвращает ссылку на Grafana time-series panel объема логов по времени в разрезе `event_type`.
+- `visualize_route_performance` — возвращает ссылку на Grafana panel по route для `events`, `error_rate`, `avg_latency_ms` или `p95_latency_ms`.
+- `visualize_model_usage` — возвращает ссылку на Grafana panel по `model_name` для `events`, `total_tokens`, `total_cost_usd` или `avg_latency_ms`.
 - `run_readonly_query` — выполняет только `SELECT`-запросы в ClickHouse.
 
 LibreChat настроен на MCP endpoint:

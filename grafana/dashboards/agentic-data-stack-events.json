@@ -345,12 +345,248 @@
             "uid": "clickhouse-analytics"
           },
           "format": 1,
-          "rawSql": "SELECT id, event_time, user_id, event_type, route, model, status, latency_ms FROM analytics.app_events_raw ORDER BY id DESC LIMIT 50",
+          "rawSql": "SELECT id, event_time, user_id, event_type, route, model_name, status_code, latency_ms FROM analytics.app_events_raw ORDER BY id DESC LIMIT 50",
           "refId": "A"
         }
       ],
       "title": "Latest Events",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "error_rate",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 6,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.7,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "auto",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-analytics"
+          },
+          "format": 1,
+          "rawSql": "SELECT route, round(countIf(status_code >= 400) / count(), 4) AS error_rate, count() AS events, countIf(status_code >= 400) AS errors, round(avgOrNull(latency_ms), 2) AS avg_latency_ms, quantileOrNull(0.95)(latency_ms) AS p95_latency_ms FROM analytics.app_events_raw WHERE route IS NOT NULL GROUP BY route ORDER BY error_rate ASC, p95_latency_ms ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Problem Routes by Error Rate",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "id": 7,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-analytics"
+          },
+          "format": 1,
+          "rawSql": "SELECT route, count() AS events, uniqExact(user_id) AS users, countIf(status_code >= 400) AS errors, round(errors / events, 4) AS error_rate, round(avgOrNull(latency_ms), 2) AS avg_latency_ms, quantileOrNull(0.95)(latency_ms) AS p95_latency_ms FROM analytics.app_events_raw WHERE route IS NOT NULL GROUP BY route ORDER BY error_rate ASC, p95_latency_ms ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Problem Routes Details",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse-analytics"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "total_cost_usd",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "id": 8,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.7,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "auto",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse-analytics"
+          },
+          "format": 1,
+          "rawSql": "SELECT model_name, sumOrNull(total_cost_usd) AS total_cost_usd, sum(ifNull(prompt_tokens, 0) + ifNull(completion_tokens, 0)) AS total_tokens, round(avgOrNull(latency_ms), 2) AS avg_latency_ms FROM analytics.app_events_raw WHERE model_name IS NOT NULL GROUP BY model_name ORDER BY total_cost_usd DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Model Cost by Model Name",
+      "type": "barchart"
     }
   ],
   "refresh": "30s",

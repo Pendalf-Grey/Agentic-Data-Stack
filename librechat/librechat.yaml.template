@@ -25,3 +25,13 @@ mcpServers:
   clickhouse-analytics:
     type: streamable-http
     url: http://mcp-server:3333/mcp
+    timeout: 60000
+    serverInstructions: |
+      Use these tools when the user asks about application events, logs, users, routes, latency, errors, model usage, token usage, cost, or data migrated through Debezium.
+      The primary ClickHouse objects are analytics.app_events_raw for raw migrated events and analytics.v_event_summary for hourly aggregates.
+      Start with describe_analytics_schema when you need the available columns. Use sample_app_events for examples of raw migrated rows.
+      Prefer the purpose-built tools route_performance, model_usage, error_trends, and event_summary for common analytical questions.
+      When the user asks to visualize, plot, chart, graph, draw, or show trends, use visualize_event_volume, visualize_route_performance, or visualize_model_usage.
+      Visualization tools return a browser-ready Grafana short URL and a fallback panel URL. Include the browserShortUrl exactly in your answer, then explain the chart from the returned rows.
+      Never rewrite Grafana links, never invent d-solo URLs, and never use made-up dashboard UIDs. The user's browser must use http://localhost:3001. Do not use grafana:3000, grafana-server:3000, or localhost:3000.
+      Use run_readonly_query only for SELECT queries. Prefer grouped aggregations and explicit LIMIT clauses for exploratory analysis.
