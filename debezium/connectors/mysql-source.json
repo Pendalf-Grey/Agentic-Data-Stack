@@ -7,6 +7,7 @@
     "database.user": "${MYSQL_SOURCE_USER}",
     "database.password": "${MYSQL_SOURCE_PASSWORD}",
     "database.server.id": "${MYSQL_SOURCE_SERVER_ID}",
+    "database.ssl.mode": "${MYSQL_SOURCE_SSL_MODE}",
     "topic.prefix": "${MYSQL_SOURCE_TOPIC_PREFIX}",
     "database.include.list": "${MYSQL_SOURCE_DB}",
     "table.include.list": "${MYSQL_SOURCE_DB}.${MYSQL_SOURCE_TABLE}",

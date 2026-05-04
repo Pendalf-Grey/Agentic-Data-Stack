@@ -7,29 +7,39 @@ cd /Users/subbotaevgenij/PycharmProjects/Clicker/CascadeProjects/Agentic-Data-St
 cp .env.example .env
 ```
 
+Перед запуском обязательно отредактируйте `.env`.
+
+Для внешней БД заполните активный блок `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
+
+Для быстрой локальной проверки включите demo-режим.
+
 Если Ollama запущена на macOS, Docker-контейнеры увидят ее через:
 
 ```env
 UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 ```
 
-По умолчанию Debezium читает локальный demo PostgreSQL. В `.env` это задается так:
+По умолчанию `.env.example` показывает внешний PostgreSQL как основной сценарий.
+
+Если нужно быстро проверить проект без чужой БД, включите локальный demo PostgreSQL:
 
 ```env
+SOURCE_MODE=demo
 ACTIVE_SOURCE_DB=postgres
 COMPOSE_PROFILES=postgres-source
 ```
 
-Для другого источника раскомментируйте только одну активную БД:
+Для внешней БД оставьте demo-профиль выключенным и раскомментируйте только одну активную БД:
 
 ```env
-# ACTIVE_SOURCE_DB=postgres
+SOURCE_MODE=external
 ACTIVE_SOURCE_DB=mysql
-# ACTIVE_SOURCE_DB=mongodb
 # COMPOSE_PROFILES=postgres-source
 ```
 
-Затем заполните соответствующий блок `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`. Неактивные блоки оставьте закомментированными.
+Затем заполните соответствующий блок `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
+
+Неактивные блоки оставьте закомментированными.
 
 ## 2. Запуск
 
@@ -37,12 +47,7 @@ ACTIVE_SOURCE_DB=mysql
 docker compose up -d --build
 ```
 
-Если заняты порты `3001`, `3080`, `3333`, `3344`, `5432`, `8083`, `8123`, `9000`, `9092` или `9644`, остановите старый стек:
-
-```bash
-cd /Users/subbotaevgenij/PycharmProjects/Clicker/CascadeProjects/2048
-docker compose down
-```
+Если заняты порты `3001`, `3080`, `3333`, `3344`, `5432`, `8083`, `8123`, `9000`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
 
 ## 3. Проверка
 

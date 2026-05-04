@@ -9,6 +9,7 @@
     "database.password": "${POSTGRES_SOURCE_PASSWORD}",
     "database.dbname": "${POSTGRES_SOURCE_DB}",
     "database.server.name": "${POSTGRES_SOURCE_DB}",
+    "database.sslmode": "${POSTGRES_SOURCE_SSL_MODE}",
     "topic.prefix": "${POSTGRES_SOURCE_TOPIC_PREFIX}",
     "schema.include.list": "${POSTGRES_SOURCE_SCHEMA}",
     "table.include.list": "${POSTGRES_SOURCE_SCHEMA}.${POSTGRES_SOURCE_TABLE}",

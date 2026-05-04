@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 
 const connectUrl = (process.env.CONNECT_URL || 'http://debezium:8083').replace(/\/$/, '');
+const sourceMode = (process.env.SOURCE_MODE || 'external').trim().toLowerCase();
 const activeSource = (process.env.ACTIVE_SOURCE_DB || 'postgres').trim().toLowerCase();
 const connectorsDir = '/connectors';
 const sourceTemplate = `${connectorsDir}/${activeSource}-source.json`;
@@ -134,6 +135,11 @@ async function listSourceTemplates() {
 }
 
 async function main() {
+  if (!['external', 'demo'].includes(sourceMode)) {
+    throw new Error(`SOURCE_MODE must be "external" or "demo", got "${sourceMode}"`);
+  }
+
+  console.log(`Source mode is ${sourceMode}; active source is ${activeSource}`);
   await fs.access(sourceTemplate);
 
   await waitForSource();
