@@ -6,6 +6,12 @@
 
 Локальный PostgreSQL в проекте оставлен только как demo-пример. В реальной работе чаще используется внешняя БД: чужой **host**, внешний **IP**, отдельный **user**, отдельный **password**, свои правила firewall/VPN/TLS.
 
+Для развертывания системы с нуля на нескольких машинах используйте подробный документ:
+
+```text
+docs/JUNIOR_DEVOPS_DEPLOYMENT_GUIDE.md
+```
+
 ## Что Делают Сервисы
 
 **Airflow** — планировщик.
@@ -92,6 +98,30 @@ ACTIVE_SOURCE_DB=postgres
 **table** или **collection** — что именно читаем.
 
 **topic** — поток сообщений в Redpanda/Kafka, куда Debezium пишет изменения.
+
+## Source-БД Первична
+
+В этой архитектуре первична внешняя **source-БД**.
+
+ClickHouse не диктует структуру данных.
+
+ClickHouse хранит аналитическую копию, которая должна быть построена вокруг реальной source schema: реальных **tables**, **columns**, **types** и бизнес-смысла данных.
+
+`analytics.app_events_raw` — это только demo-таблица для локального примера.
+
+В production есть два подхода.
+
+**Manual schema mode**: DevOps заранее создает ClickHouse tables SQL-скриптами.
+
+Это надежнее, когда source schema известна и согласована.
+
+**Auto schema bootstrap mode**: отдельный bootstrap job сначала читает metadata source-БД, генерирует `CREATE TABLE` для ClickHouse, а уже потом запускается ClickHouse sink connector.
+
+Так можно вообще не создавать ClickHouse structure руками.
+
+Важно: это лучше делать отдельным шагом, а не считать обязанностью ClickHouse sink.
+
+Официальный ClickHouse Kafka Connect sink обычно ожидает, что target table уже существует. Поэтому auto-create в этой системе должен быть отдельным pre-step: `schema-bootstrap`.
 
 ## External PostgreSQL
 
