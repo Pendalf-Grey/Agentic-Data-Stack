@@ -235,6 +235,83 @@ CLICKHOUSE_SINK_TABLE=app_events_raw
 
 Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema, `CLICKHOUSE_SINK_TABLE`, Grafana panels и MCP-запросы.
 
+### Ремарка Про ClickHouse Sink
+
+**ClickHouse sink** в этом проекте — это отдельный Kafka Connect connector.
+
+Он не читает внешнюю БД сам.
+
+Он читает сообщения из **Redpanda/Kafka topic** и записывает их в **ClickHouse**.
+
+Вся цепочка выглядит так:
+
+```text
+External DB / demo PostgreSQL
+  -> Debezium source connector
+  -> Redpanda topic
+  -> ClickHouse sink connector
+  -> ClickHouse table analytics.app_events_raw
+```
+
+То есть **Debezium source connector** отвечает за чтение source-БД.
+
+**Redpanda** хранит поток изменений в topic.
+
+**ClickHouse sink connector** забирает этот поток и вставляет строки в ClickHouse.
+
+Конфиг ClickHouse sink находится здесь:
+
+```text
+debezium/connectors/clickhouse-sink.json
+```
+
+Ключевые настройки:
+
+```json
+"topics": "${ACTIVE_SOURCE_TOPIC}",
+"database": "${CLICKHOUSE_DB}",
+"topic2TableMap": "${ACTIVE_SOURCE_TOPIC}=${CLICKHOUSE_SINK_TABLE}"
+```
+
+Это читается так:
+
+```text
+читать ACTIVE_SOURCE_TOPIC
+писать в CLICKHOUSE_SINK_TABLE
+```
+
+В demo-режиме это превращается примерно в такую связь:
+
+```text
+pg_flat.public.app_events -> analytics.app_events_raw
+```
+
+Поэтому фраза “текущий ClickHouse sink настроен на одну таблицу `app_events_raw`” верна.
+
+Сейчас один source topic складывается в одну ClickHouse table.
+
+Если нужно мигрировать несколько таблиц, например:
+
+```text
+public.users
+public.orders
+public.payments
+```
+
+нужно сделать несколько вещей:
+
+1. Добавить эти таблицы в source connector, например через `table.include.list`.
+2. Создать соответствующие tables в ClickHouse.
+3. Расширить `topic2TableMap`.
+
+Пример:
+
+```text
+pg.public.users=users_raw,pg.public.orders=orders_raw,pg.public.payments=payments_raw
+```
+
+Без такого mapping sink connector не будет понимать, в какие ClickHouse tables складывать разные topics.
+
 ## Airflow: Запуск Миграции По Расписанию
 
 Airflow доступен здесь:
