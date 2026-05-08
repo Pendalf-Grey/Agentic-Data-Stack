@@ -61,7 +61,7 @@ AIRFLOW_ADMIN_PASSWORD=admin
 docker compose up -d --build
 ```
 
-Если заняты порты `3001`, `3080`, `3333`, `3344`, `5432`, `8081`, `8083`, `8123`, `9000`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
+Если заняты порты `3001`, `3002`, `3030`, `3080`, `3333`, `3344`, `5432`, `8081`, `8083`, `8123`, `9000`, `9090`, `9091`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
 
 ## 4. Проверка
 
@@ -69,6 +69,7 @@ docker compose up -d --build
 docker compose ps
 curl http://localhost:3333/health
 curl http://localhost:3344/health
+curl http://localhost:3002/api/public/health
 curl http://localhost:8083/connectors
 ```
 
@@ -89,6 +90,9 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 - Airflow: `http://localhost:8081`
 - Grafana: `http://localhost:3001`
 - Dashboard: `http://localhost:3001/d/agentic-data-stack-events/agentic-data-stack-events`
+- Langfuse: `http://localhost:3002`
+- Langfuse health: `http://localhost:3002/api/public/health`
+- MinIO console для Langfuse: `http://localhost:9091`
 - ClickHouse UI: `http://localhost:8123/play`
 - Debezium REST: `http://localhost:8083/connectors`
 - MCP health: `http://localhost:3333/health`
@@ -106,3 +110,41 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 Первый зарегистрированный пользователь становится администратором LibreChat.
 
 После входа выберите `Local OpenAI-compatible` endpoint и включите MCP tools `clickhouse-analytics`.
+
+## 7. Langfuse
+
+Langfuse нужен для наблюдаемости LLM.
+
+Наблюдаемость означает, что можно открыть конкретный запрос к модели и увидеть **input**, **output**, **model**, **latency**, **token usage**, ошибки и metadata.
+
+Откройте:
+
+```text
+http://localhost:3002
+```
+
+Локальный пользователь создается автоматически при первом запуске:
+
+```env
+LANGFUSE_INIT_USER_EMAIL=admin@example.com
+LANGFUSE_INIT_USER_PASSWORD=admin123456
+```
+
+После входа откройте project:
+
+```text
+Agentic Data Stack LLM
+```
+
+Чтобы появились traces:
+
+1. Откройте LibreChat.
+2. Задайте вопрос модели.
+3. Вернитесь в Langfuse.
+4. Откройте раздел `Traces`.
+
+`agent-proxy` отправляет traces в Langfuse автоматически, если в `.env` включено:
+
+```env
+LANGFUSE_ENABLED=true
+```

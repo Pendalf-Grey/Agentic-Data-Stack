@@ -27,6 +27,7 @@ External Database
   -> ClickHouse sink connector
   -> ClickHouse
   -> Grafana / MCP / LibreChat
+  -> Langfuse traces for LLM requests
 ```
 
 По-человечески:
@@ -38,6 +39,7 @@ External Database
 5. **MCP server** дает LLM-модели инструменты для безопасной аналитики.
 6. **LibreChat** дает человеку web UI для общения с моделью.
 7. **Airflow** запускает регистрацию или обновление коннекторов по расписанию.
+8. **Langfuse** показывает traces LLM-запросов: что отправили в модель, что получили, какая модель отвечала и сколько времени занял вызов.
 
 ## 2. Что Делает Каждый Компонент
 
@@ -188,6 +190,73 @@ MCP server дает модели набор tools.
 
 Модель через MCP tools обращается к ClickHouse и Grafana.
 
+### Agent Proxy
+
+**agent-proxy** — маленький OpenAI-compatible proxy.
+
+OpenAI-compatible означает, что сервис выглядит для LibreChat как OpenAI API, даже если реальная модель запущена локально в Ollama или в другом облачном провайдере.
+
+В этом проекте `agent-proxy` делает две вещи.
+
+Во-первых, он пересылает запросы LibreChat в upstream model endpoint.
+
+**Upstream** — это сервис выше по цепочке. Например, Ollama на Mac по адресу `http://host.docker.internal:11434/v1`.
+
+Во-вторых, `agent-proxy` отправляет trace каждого LLM-запроса в Langfuse.
+
+Это удобная точка интеграции, потому что почти все запросы LibreChat к модели проходят через этот proxy.
+
+### Langfuse
+
+**Langfuse** — observability-платформа для LLM-приложений.
+
+**Observability** означает наблюдаемость.
+
+В обычном приложении мы смотрим logs, metrics и traces.
+
+В LLM-приложении этого мало: нужно видеть еще **prompt**, **input**, **output**, **model**, **latency**, **usage tokens**, ошибки и metadata.
+
+**Trace** — запись одного пользовательского сценария или одного запроса.
+
+Например, пользователь спросил в LibreChat:
+
+```text
+Какие endpoints самые проблемные по error rate?
+```
+
+В Langfuse такой запрос появится как trace.
+
+Внутри trace будет generation.
+
+**Generation** — конкретный вызов LLM-модели: модель, параметры, входные сообщения и ответ.
+
+В этом проекте Langfuse работает так:
+
+```text
+LibreChat
+  -> agent-proxy
+  -> local/cloud LLM
+
+agent-proxy
+  -> Langfuse ingestion API
+  -> Langfuse worker
+  -> ClickHouse/Postgres/MinIO/Redis
+```
+
+Langfuse использует несколько внутренних хранилищ.
+
+**Postgres** хранит пользователей, organization, projects, API keys и настройки.
+
+**ClickHouse** хранит traces, observations и score-сущности, потому что это аналитические данные.
+
+**Redis** используется для очередей и cache.
+
+**MinIO** используется как S3-compatible object storage.
+
+**S3-compatible** означает, что сервис говорит тем же API, что Amazon S3. Для локального запуска удобно использовать MinIO.
+
+В production Langfuse часто ставят отдельно от основного приложения, чтобы команда могла анализировать качество LLM, debug-ить плохие ответы, смотреть latency, считать стоимость и сравнивать разные модели.
+
 ### Airflow
 
 **Airflow** — планировщик задач.
@@ -240,13 +309,13 @@ apply_active_connectors
 
 | Машина | Компоненты | CPU | RAM | Disk | Комментарий |
 |---|---|---:|---:|---:|---|
-| `laptop` | все сервисы проекта | 8-10 cores | 18-22 GB доступно Docker | 80-150 GB free | удобно для demo и разработки |
+| `laptop` | все сервисы проекта, включая Langfuse | 8-10 cores | 20-22 GB доступно Docker | 120-180 GB free | удобно для demo и разработки |
 
 Для Docker Desktop на macOS рекомендуется выделить:
 
 ```text
-CPU: 8 cores
-Memory: 18-20 GB
+CPU: 8-10 cores
+Memory: 20-22 GB
 Swap: 2-4 GB
 Disk image: 120 GB или больше
 ```
@@ -281,16 +350,16 @@ COMPOSE_PROFILES=postgres-source
 
 | VM | Компоненты | CPU | RAM | Disk | Комментарий |
 |---|---|---:|---:|---:|---|
-| `vm-data` | Redpanda, ClickHouse, demo PostgreSQL | 4 vCPU | 8-10 GB | 80 GB | data plane |
+| `vm-data` | Redpanda, ClickHouse, demo PostgreSQL | 4 vCPU | 10-12 GB | 100 GB | data plane и ClickHouse для analytics/langfuse |
 | `vm-orch` | Airflow DB, Airflow webserver, Airflow scheduler | 2 vCPU | 4 GB | 40 GB | расписание миграций |
-| `vm-app` | Grafana, MCP, agent-proxy, LibreChat, MongoDB | 3-4 vCPU | 8 GB | 60 GB | UI/API |
+| `vm-app` | Grafana, MCP, agent-proxy, LibreChat, MongoDB, Langfuse, Redis, MinIO | 4 vCPU | 10 GB | 80 GB | UI/API и LLM observability |
 
 Если хочется еще проще, можно сделать 2 VM:
 
 | VM | Компоненты | CPU | RAM | Disk |
 |---|---|---:|---:|---:|
 | `vm-data` | Redpanda, ClickHouse, Debezium, demo PostgreSQL | 5 vCPU | 12 GB | 100 GB |
-| `vm-app` | Airflow, Grafana, MCP, agent-proxy, LibreChat, MongoDB | 4 vCPU | 8 GB | 80 GB |
+| `vm-app` | Airflow, Grafana, MCP, agent-proxy, LibreChat, MongoDB, Langfuse, Redis, MinIO | 5 vCPU | 10 GB | 100 GB |
 
 Главная цель такой минимальной схемы — проверить сетевое взаимодействие.
 
@@ -315,6 +384,8 @@ COMPOSE_PROFILES=postgres-source
 | `meta-1` | Airflow metadata PostgreSQL | 2-4 vCPU | 8 GB | 100 GB SSD | лучше managed DB |
 | `app-1` | LibreChat, MCP, agent-proxy, Grafana | 4-8 vCPU | 16 GB | 100 GB SSD | UI/API |
 | `mongo-1` | LibreChat MongoDB | 2-4 vCPU | 8 GB | 100 GB SSD | для production лучше replica set |
+| `lf-web-1` | Langfuse web и worker | 4 vCPU | 8-16 GB | 100 GB SSD | LLM observability |
+| `lf-meta-1` | Langfuse PostgreSQL, Redis, object storage gateway | 4 vCPU | 8-16 GB | 200 GB SSD | для production лучше managed services |
 
 ### Почему Так
 
@@ -337,6 +408,12 @@ Airflow webserver и scheduler не должны хранить state тольк
 LibreChat и Grafana можно сначала поставить на одну app-машину.
 
 Если нагрузка вырастет, их можно разнести.
+
+Langfuse можно сначала поставить рядом с app-компонентами.
+
+Для production лучше выделить Langfuse отдельно, потому что traces могут быстро расти.
+
+Langfuse ClickHouse database можно держать в том же ClickHouse cluster, но обязательно в отдельной database, например `langfuse`.
 
 ## 4. Сеть И DNS
 
@@ -376,6 +453,8 @@ sudo nano /etc/hosts
 10.10.0.32 connect-2.internal
 10.10.0.41 airflow-1.internal
 10.10.0.51 app-1.internal
+10.10.0.61 lf-web-1.internal
+10.10.0.62 lf-meta-1.internal
 ```
 
 ## 5. Порты
@@ -390,6 +469,12 @@ sudo nano /etc/hosts
 | ClickHouse HTTP | `8123` | Grafana, MCP, sink | SQL по HTTP |
 | ClickHouse native | `9000` | ops/admin | native client |
 | Grafana | `3001` или `3000` | users/admin | dashboards |
+| Langfuse UI | `3002` или `3000` | users/admin | LLM traces и observability |
+| Langfuse worker | `3030` | internal only | background jobs |
+| Langfuse PostgreSQL | `5432` | Langfuse only | users/projects/settings |
+| Langfuse Redis | `6379` | Langfuse only | queues/cache |
+| Langfuse MinIO S3 API | `9090` или `9000` | Langfuse only | event/media object storage |
+| Langfuse MinIO Console | `9091` или `9001` | ops/admin only | управление local object storage |
 | LibreChat | `3080` | users | chat UI |
 | MCP server | `3333` | LibreChat/app network | tools для модели |
 | agent-proxy | `3344` | LibreChat/app network | OpenAI-compatible proxy |
@@ -576,6 +661,32 @@ CLICKHOUSE_SINK_TABLE=app_events_raw
 
 GRAFANA_ADMIN_USER=admin
 GRAFANA_ADMIN_PASSWORD=admin
+
+LANGFUSE_PUBLIC_URL=http://localhost:3002
+LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
+LANGFUSE_ENABLED=true
+LANGFUSE_ENVIRONMENT=local
+LANGFUSE_TELEMETRY_ENABLED=false
+LANGFUSE_POSTGRES_DB=langfuse
+LANGFUSE_POSTGRES_USER=langfuse
+LANGFUSE_POSTGRES_PASSWORD=langfuse_password
+LANGFUSE_REDIS_AUTH=langfuse_redis_password
+LANGFUSE_MINIO_ROOT_USER=minio
+LANGFUSE_MINIO_ROOT_PASSWORD=minio_password
+LANGFUSE_S3_BUCKET=langfuse
+LANGFUSE_CLICKHOUSE_DB=langfuse
+LANGFUSE_NEXTAUTH_SECRET=change-me-generate-secure-langfuse-nextauth-secret
+LANGFUSE_SALT=change-me-generate-secure-langfuse-salt
+LANGFUSE_ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
+LANGFUSE_INIT_ORG_ID=agentic-data-stack-org
+LANGFUSE_INIT_ORG_NAME=Agentic Data Stack
+LANGFUSE_INIT_PROJECT_ID=agentic-data-stack-project
+LANGFUSE_INIT_PROJECT_NAME=Agentic Data Stack LLM
+LANGFUSE_INIT_USER_EMAIL=admin@example.com
+LANGFUSE_INIT_USER_NAME=Admin
+LANGFUSE_INIT_USER_PASSWORD=admin123456
+LANGFUSE_PUBLIC_KEY=pk-lf-agentic-data-stack-local
+LANGFUSE_SECRET_KEY=sk-lf-agentic-data-stack-local
 
 AIRFLOW_ADMIN_USER=admin
 AIRFLOW_ADMIN_PASSWORD=admin
@@ -1633,10 +1744,20 @@ EOF
 - `airflow-webserver`;
 - `airflow-scheduler`;
 - `grafana`;
+- `langfuse-clickhouse-init`;
+- `langfuse-db`;
+- `langfuse-redis`;
+- `langfuse-minio`;
+- `langfuse-worker`;
+- `langfuse-web`;
 - `librechat-db`;
 - `agent-proxy`;
 - `mcp-server`;
 - `librechat`.
+
+Langfuse-сервисы можно взять из текущего `docker-compose.yml` проекта как reference implementation.
+
+Если junior DevOps собирает проект полностью с нуля, важно не забыть, что Langfuse требует не только `langfuse-web`, но и worker, Postgres, Redis, S3-compatible storage и ClickHouse database.
 
 В production, где компоненты идут на разные машины, используйте отдельные compose-файлы из следующих разделов.
 
@@ -1671,6 +1792,20 @@ AIRFLOW_WEBSERVER_SECRET_KEY=change-me
 LIBRECHAT_JWT_SECRET=change-me
 LIBRECHAT_JWT_REFRESH_SECRET=change-me
 CLICKHOUSE_PASSWORD=change-me
+LANGFUSE_NEXTAUTH_SECRET=change-me
+LANGFUSE_SALT=change-me
+LANGFUSE_ENCRYPTION_KEY=change-me-64-hex
+LANGFUSE_INIT_USER_PASSWORD=change-me-min-8-chars
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+Для `LANGFUSE_ENCRYPTION_KEY` нужен 64-character hex string.
+
+Пример:
+
+```bash
+openssl rand -hex 32
 ```
 
 Реальные пароли source-БД не коммитить.
@@ -2102,7 +2237,222 @@ GRAFANA_BASE_URL=https://grafana.example.com
 
 Если Grafana стоит за reverse proxy, `GRAFANA_BASE_URL` должен быть публичным URL для браузера пользователя.
 
-## 15. Регистрация В LibreChat
+## 15. Развертывание Langfuse
+
+Langfuse можно поднять рядом с app-слоем или на отдельной машине.
+
+Для локального Docker Compose в этом проекте используются:
+
+- `langfuse-web`;
+- `langfuse-worker`;
+- `langfuse-db`;
+- `langfuse-redis`;
+- `langfuse-minio`;
+- отдельная ClickHouse database `langfuse` внутри существующего ClickHouse server.
+
+Почему не достаточно одного контейнера Langfuse?
+
+Потому что Langfuse — не просто UI.
+
+Он принимает traces, кладет события в queue, обрабатывает их worker-ом, сохраняет metadata в Postgres, аналитические события в ClickHouse и файлы в S3-compatible storage.
+
+В локальном режиме S3-compatible storage — это MinIO.
+
+### 15.1 Переменные Langfuse
+
+В `.env` должны быть эти значения:
+
+```env
+LANGFUSE_PUBLIC_URL=http://localhost:3002
+LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
+LANGFUSE_ENABLED=true
+LANGFUSE_ENVIRONMENT=local
+LANGFUSE_TELEMETRY_ENABLED=false
+
+LANGFUSE_POSTGRES_DB=langfuse
+LANGFUSE_POSTGRES_USER=langfuse
+LANGFUSE_POSTGRES_PASSWORD=change-me
+
+LANGFUSE_REDIS_AUTH=change-me
+LANGFUSE_MINIO_ROOT_USER=minio
+LANGFUSE_MINIO_ROOT_PASSWORD=change-me
+LANGFUSE_S3_BUCKET=langfuse
+LANGFUSE_CLICKHOUSE_DB=langfuse
+
+LANGFUSE_NEXTAUTH_SECRET=change-me
+LANGFUSE_SALT=change-me
+LANGFUSE_ENCRYPTION_KEY=change-me-64-hex
+
+LANGFUSE_INIT_ORG_NAME=Agentic Data Stack
+LANGFUSE_INIT_PROJECT_NAME=Agentic Data Stack LLM
+LANGFUSE_INIT_USER_EMAIL=admin@example.com
+LANGFUSE_INIT_USER_PASSWORD=change-me-min-8-chars
+LANGFUSE_PUBLIC_KEY=pk-lf-change-me
+LANGFUSE_SECRET_KEY=sk-lf-change-me
+```
+
+`LANGFUSE_PUBLIC_URL` — адрес, который открывает человек в браузере.
+
+`LANGFUSE_INTERNAL_URL` — адрес внутри Docker network, куда `agent-proxy` отправляет traces.
+
+`LANGFUSE_PUBLIC_KEY` и `LANGFUSE_SECRET_KEY` — API keys проекта Langfuse.
+
+Их использует `agent-proxy`, чтобы писать traces.
+
+`LANGFUSE_INIT_USER_PASSWORD` должен быть не короче 8 символов.
+
+Если пароль короче, Langfuse web может стартовать, но будет отдавать `Internal Server Error`, а в logs появится сообщение:
+
+```text
+Password needs to be at least 8 characters long.
+```
+
+### 15.2 Первый Запуск Langfuse
+
+В локальном compose запуск общий:
+
+```bash
+docker compose up -d --build
+```
+
+Проверить Langfuse:
+
+```bash
+curl http://localhost:3002/api/public/health
+docker compose ps langfuse-web langfuse-worker langfuse-db langfuse-redis langfuse-minio
+```
+
+Открыть UI:
+
+```text
+http://localhost:3002
+```
+
+Войти пользователем:
+
+```env
+LANGFUSE_INIT_USER_EMAIL=admin@example.com
+LANGFUSE_INIT_USER_PASSWORD=admin123456
+```
+
+В production пароль должен быть другим.
+
+### 15.3 Регистрация И Авторизация Пользователя
+
+В локальном режиме пользователь создается автоматически через `LANGFUSE_INIT_USER_EMAIL` и `LANGFUSE_INIT_USER_PASSWORD`.
+
+Это удобнее, чем вручную проходить sign up после каждого пересоздания volume.
+
+Порядок:
+
+1. Открыть `http://localhost:3002`.
+2. Ввести email из `LANGFUSE_INIT_USER_EMAIL`.
+3. Ввести password из `LANGFUSE_INIT_USER_PASSWORD`.
+4. Нажать Sign in.
+5. Открыть organization `Agentic Data Stack`.
+6. Открыть project `Agentic Data Stack LLM`.
+
+Если автоматический пользователь не появился, проверить logs:
+
+```bash
+docker compose logs langfuse-web
+docker compose logs langfuse-worker
+```
+
+### 15.4 Создание Project И API Keys
+
+Для локального запуска project создается автоматически.
+
+Project name:
+
+```text
+Agentic Data Stack LLM
+```
+
+API keys тоже задаются через `.env`:
+
+```env
+LANGFUSE_PUBLIC_KEY=pk-lf-agentic-data-stack-local
+LANGFUSE_SECRET_KEY=sk-lf-agentic-data-stack-local
+```
+
+Если нужно создать project руками:
+
+1. Войти в Langfuse.
+2. Открыть organization.
+3. Нажать New Project.
+4. Указать project name.
+5. Открыть Project Settings.
+6. Создать API keys.
+7. Перенести public key и secret key в `.env`.
+8. Перезапустить `agent-proxy`.
+
+Команда перезапуска:
+
+```bash
+docker compose up -d --build agent-proxy
+```
+
+### 15.5 Как Trace Попадает В Langfuse
+
+В этой системе трассировка сделана на уровне `agent-proxy`.
+
+Поток такой:
+
+```text
+LibreChat
+  -> agent-proxy /v1/chat/completions
+  -> upstream LLM
+  -> response to LibreChat
+
+agent-proxy
+  -> Langfuse /api/public/ingestion
+```
+
+Если `LANGFUSE_ENABLED=true`, `agent-proxy` отправляет trace после каждого non-streaming и streaming chat completion.
+
+Если Langfuse временно недоступен, `agent-proxy` не ломает ответ пользователю.
+
+Он пишет warning в logs и продолжает отдавать ответ LibreChat.
+
+### 15.6 Ограничения Langfuse В Этом Проекте
+
+Langfuse видит те LLM-запросы, которые проходят через `agent-proxy`.
+
+Если какой-то сервис ходит в модель напрямую, минуя `agent-proxy`, Langfuse этот вызов не увидит.
+
+В текущей реализации `agent-proxy` пишет в Langfuse:
+
+- model name;
+- input messages;
+- output text;
+- latency по start/end time;
+- token usage, если upstream вернул `usage`;
+- metadata с endpoint и environment.
+
+Для streaming responses некоторые OpenAI-compatible providers не возвращают usage tokens в конце stream.
+
+В таком случае trace будет без token usage.
+
+Это нормально для локальных Ollama-compatible сценариев.
+
+### 15.7 Безопасность Langfuse
+
+Langfuse хранит prompts и outputs.
+
+Если пользователь отправил в LibreChat персональные данные, коммерческую тайну или токены, они могут попасть в Langfuse trace.
+
+Перед production нужно решить:
+
+- какие поля маскировать;
+- кто имеет доступ к Langfuse UI;
+- сколько хранить traces;
+- можно ли хранить prompts полностью;
+- нужен ли VPN, reverse proxy или SSO.
+
+Для production не оставляйте Langfuse открытым в интернет без авторизации и TLS.
+
+## 16. Регистрация В LibreChat
 
 Открыть:
 
@@ -2132,7 +2482,7 @@ Local OpenAI-compatible
 clickhouse-analytics
 ```
 
-## 16. Проверки После Развертывания
+## 17. Проверки После Развертывания
 
 Проверить Redpanda:
 
@@ -2191,13 +2541,25 @@ curl http://app-1.internal:3333/health
 curl http://app-1.internal:3344/health
 ```
 
-## 17. Backup И Restore
+Проверить Langfuse:
+
+```bash
+curl http://localhost:3002/api/public/health
+docker compose logs agent-proxy
+docker compose logs langfuse-web
+docker compose logs langfuse-worker
+```
+
+## 18. Backup И Restore
 
 Нужно делать backup:
 
 - ClickHouse data;
 - Airflow metadata DB;
 - LibreChat MongoDB;
+- Langfuse Postgres;
+- Langfuse ClickHouse database;
+- Langfuse MinIO bucket;
 - `.env` secrets;
 - Grafana dashboards;
 - connector configs.
@@ -2224,7 +2586,25 @@ MongoDB:
 mongodump --uri "mongodb://mongo-1.internal:27017/LibreChat" --out ./mongo-backup
 ```
 
-## 18. Monitoring
+Langfuse Postgres:
+
+```bash
+pg_dump "postgresql://langfuse:password@lf-meta-1.internal:5432/langfuse" > langfuse-postgres.sql
+```
+
+Langfuse ClickHouse database:
+
+```bash
+clickhouse-client --host ch-1.internal --query "BACKUP DATABASE langfuse TO Disk('backups', 'langfuse.zip')"
+```
+
+Langfuse MinIO:
+
+```bash
+mc mirror minio/langfuse ./langfuse-minio-backup
+```
+
+## 19. Monitoring
 
 Минимально мониторить:
 
@@ -2236,6 +2616,9 @@ mongodump --uri "mongodb://mongo-1.internal:27017/LibreChat" --out ./mongo-backu
 - Airflow DAG failures;
 - Grafana availability;
 - LibreChat availability;
+- Langfuse web/worker availability;
+- Langfuse ingestion errors;
+- Langfuse trace volume;
 - MCP `/health`;
 - agent-proxy `/health`.
 
@@ -2251,7 +2634,7 @@ curl http://connect-1.internal:8083/connectors/<connector-name>/status
 docker logs <debezium-container>
 ```
 
-## 19. Типовые Проблемы
+## 20. Типовые Проблемы
 
 ### Debezium Не Может Подключиться К Source-БД
 
@@ -2341,7 +2724,48 @@ GRAFANA_BASE_URL
 GRAFANA_BASE_URL=https://grafana.example.com
 ```
 
-## 20. Порядок Первого Production Запуска
+### Langfuse Открывается, Но Traces Не Появляются
+
+Проверить, что включена отправка traces:
+
+```env
+LANGFUSE_ENABLED=true
+LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
+```
+
+Проверить logs:
+
+```bash
+docker compose logs agent-proxy
+docker compose logs langfuse-web
+docker compose logs langfuse-worker
+```
+
+Проверить, что в LibreChat выбран endpoint, который идет через `agent-proxy`.
+
+Если LibreChat ходит напрямую в Ollama или другой provider, Langfuse не увидит запрос.
+
+### Langfuse Не Стартует Из-За ClickHouse
+
+Проверить, что ClickHouse жив:
+
+```bash
+curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
+  --data-binary 'SELECT 1'
+```
+
+Проверить, что database `langfuse` создана:
+
+```bash
+curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
+  --data-binary 'SHOW DATABASES'
+```
+
+В этом проекте database создает сервис `langfuse-clickhouse-init`.
+
+Если volume ClickHouse старый, это нормально: init-service выполняет `CREATE DATABASE IF NOT EXISTS` при каждом запуске.
+
+## 21. Порядок Первого Production Запуска
 
 1. Подготовить все машины.
 2. Настроить DNS или `/etc/hosts`.
@@ -2360,11 +2784,14 @@ GRAFANA_BASE_URL=https://grafana.example.com
 15. Поднять MCP server и проверить `/health`.
 16. Поднять LibreChat и зарегистрировать первого пользователя.
 17. Включить MCP tools в LibreChat.
-18. Задать тестовый вопрос модели.
-19. Настроить backups.
-20. Настроить monitoring и alerts.
+18. Поднять Langfuse.
+19. Войти в Langfuse, проверить organization, project и API keys.
+20. Задать вопрос в LibreChat и проверить trace в Langfuse.
+21. Задать тестовый вопрос модели.
+22. Настроить backups.
+23. Настроить monitoring и alerts.
 
-## 21. Что Обязательно Передать Следующей Смене
+## 22. Что Обязательно Передать Следующей Смене
 
 - Список машин и их роли.
 - Все внутренние DNS names и IP.
@@ -2378,4 +2805,6 @@ GRAFANA_BASE_URL=https://grafana.example.com
 - Где смотреть Grafana dashboards.
 - Как зайти в Airflow.
 - Как зайти в LibreChat.
+- Как зайти в Langfuse.
+- Как найти traces LLM-запросов.
 - Где backup и как восстановиться.

@@ -2,7 +2,7 @@
 
 Это локальный стек для аналитики данных, которые приходят из внешней БД через **Debezium** и попадают в **ClickHouse**.
 
-Идея простая: подключаемся к чужой source-БД, забираем изменения, складываем их в аналитическое хранилище, смотрим графики в **Grafana** и задаем вопросы данным через **LibreChat** + **MCP**.
+Идея простая: подключаемся к чужой source-БД, забираем изменения, складываем их в аналитическое хранилище, смотрим графики в **Grafana**, задаем вопросы данным через **LibreChat** + **MCP** и отслеживаем работу LLM через **Langfuse**.
 
 Локальный PostgreSQL в проекте оставлен только как demo-пример. В реальной работе чаще используется внешняя БД: чужой **host**, внешний **IP**, отдельный **user**, отдельный **password**, свои правила firewall/VPN/TLS.
 
@@ -49,6 +49,14 @@ CDC означает Change Data Capture. Это способ читать из�
 В этом проекте LibreChat подключен к локальной или облачной OpenAI-compatible модели через `agent-proxy`. Также LibreChat видит MCP tools и может просить их анализировать ClickHouse.
 
 В других проектах LibreChat часто используют как единый чат-интерфейс к нескольким LLM providers.
+
+**Langfuse** — observability-платформа для LLM.
+
+**Observability** означает наблюдаемость: мы видим не только итоговый ответ модели, но и trace запроса, latency, model name, input, output, usage tokens и ошибки.
+
+В этом проекте Langfuse получает traces от `agent-proxy`. LibreChat отправляет запрос в `agent-proxy`, `agent-proxy` вызывает локальную или облачную модель и параллельно отправляет trace в Langfuse.
+
+В других проектах Langfuse часто используют для debugging LLM-приложений, оценки качества ответов, анализа стоимости, prompt management и поиска “почему модель ответила именно так”.
 
 **MCP server** — мост между моделью и инструментами.
 
@@ -481,9 +489,65 @@ http://localhost:3080/login
 Визуализируй error rate по routes и дай ссылку на Grafana.
 ```
 
+## Langfuse
+
+Langfuse доступен здесь:
+
+```text
+http://localhost:3002
+```
+
+При первом запуске проект автоматически создает локального пользователя, organization, project и API keys.
+
+Значения для demo-режима находятся в `.env`:
+
+```env
+LANGFUSE_INIT_USER_EMAIL=admin@example.com
+LANGFUSE_INIT_USER_PASSWORD=admin123456
+LANGFUSE_INIT_ORG_NAME=Agentic Data Stack
+LANGFUSE_INIT_PROJECT_NAME=Agentic Data Stack LLM
+LANGFUSE_PUBLIC_KEY=pk-lf-agentic-data-stack-local
+LANGFUSE_SECRET_KEY=sk-lf-agentic-data-stack-local
+```
+
+Для production замените `LANGFUSE_NEXTAUTH_SECRET`, `LANGFUSE_SALT`, `LANGFUSE_ENCRYPTION_KEY`, `LANGFUSE_INIT_USER_PASSWORD`, `LANGFUSE_PUBLIC_KEY` и `LANGFUSE_SECRET_KEY`.
+
+`LANGFUSE_INIT_USER_PASSWORD` должен быть не короче 8 символов.
+
+Сгенерировать секреты можно так:
+
+```bash
+openssl rand -base64 32
+openssl rand -hex 32
+```
+
+Чтобы увидеть traces:
+
+1. Откройте `http://localhost:3002`.
+2. Войдите под пользователем из `LANGFUSE_INIT_USER_EMAIL`.
+3. Откройте project `Agentic Data Stack LLM`.
+4. В LibreChat задайте любой вопрос модели.
+5. Вернитесь в Langfuse и откройте раздел `Traces`.
+
+Если traces не появляются, проверьте:
+
+```bash
+curl http://localhost:3002/api/public/health
+docker compose logs agent-proxy
+docker compose logs langfuse-web
+docker compose logs langfuse-worker
+```
+
 ## Локальная Или Облачная Модель
 
 LibreChat ходит в модель через `agent-proxy`.
+
+`agent-proxy` также отправляет traces в Langfuse, если включено:
+
+```env
+LANGFUSE_ENABLED=true
+LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
+```
 
 Для Ollama на macOS обычно используется:
 
@@ -508,6 +572,10 @@ OPENAI_MODEL_SMART=qwen2.5:14b
 - `http://localhost:8081` — Airflow Web UI.
 - `http://localhost:3001` — Grafana UI.
 - `http://localhost:3001/d/agentic-data-stack-events/agentic-data-stack-events` — dashboard `Agentic Data Stack Events`.
+- `http://localhost:3002` — Langfuse Web UI.
+- `http://localhost:3002/api/public/health` — healthcheck Langfuse Web.
+- `http://localhost:9090` — MinIO S3 API для Langfuse events/media.
+- `http://localhost:9091` — MinIO console.
 - `http://localhost:3333/health` — healthcheck MCP server.
 - `http://localhost:3333/mcp` — MCP endpoint. Внутри Docker LibreChat использует `http://mcp-server:3333/mcp`.
 - `http://localhost:3344/health` — healthcheck `agent-proxy`.
@@ -533,6 +601,7 @@ Grafana внутри Docker работает на `grafana:3000`.
 docker compose ps
 curl http://localhost:3333/health
 curl http://localhost:3344/health
+curl http://localhost:3002/api/public/health
 curl http://localhost:8083/connectors
 ```
 
@@ -562,6 +631,12 @@ Debezium не может читать любую чужую БД только п
 Файл `.env` находится в `.gitignore`. В `.env.example` должны быть только placeholders.
 
 Если внешняя БД использует self-signed TLS certificates, потребуется добавить доверенные CA/certs в Debezium container или настроить SSL-параметры под конкретную БД.
+
+Langfuse сохраняет LLM inputs и outputs.
+
+Если в prompts могут попадать персональные данные, токены, коммерческая тайна или данные клиента, нужно заранее определить правила masking/redaction.
+
+Для production Langfuse лучше закрывать за VPN, reverse proxy или corporate SSO.
 
 Текущий ClickHouse sink настроен на одну таблицу `app_events_raw`.
 
