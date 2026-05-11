@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    lab: synthetic-prometheus-lab
+    environment: synthetic-prod
+
+scrape_configs:
+  - job_name: synthetic-infra
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - synthetic-exporter:9201
+        labels:
+          source: synthetic-exporter

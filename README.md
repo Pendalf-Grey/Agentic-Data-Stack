@@ -12,6 +12,14 @@
 docs/JUNIOR_DEVOPS_DEPLOYMENT_GUIDE.md
 ```
 
+Для отдельной Prometheus demo-БД с синтетическими метриками используйте:
+
+```text
+prometheus-synthetic-lab/README.md
+```
+
+Она имитирует мониторинг 1 PostgreSQL, 2 MySQL, 2 MongoDB и 5 сервисов, включая нормальную работу и аварии.
+
 ## Что Делают Сервисы
 
 **Airflow** — планировщик.
@@ -145,6 +153,25 @@ ClickHouse хранит аналитическую копию, которая д
 ## Prometheus В ClickHouse
 
 Prometheus подключается не через Debezium.
+
+Если нужен готовый Prometheus с реалистичными synthetic metrics, запустите отдельное приложение:
+
+```bash
+cd prometheus-synthetic-lab
+docker compose up -d --build
+```
+
+Prometheus будет доступен по адресу:
+
+```text
+http://localhost:9095
+```
+
+Для подключения из Agentic-Data-Stack:
+
+```env
+PROMETHEUS_BASE_URL=http://host.docker.internal:9095
+```
 
 Для него используется сервис:
 
