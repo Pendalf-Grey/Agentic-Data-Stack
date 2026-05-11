@@ -61,7 +61,7 @@ AIRFLOW_ADMIN_PASSWORD=admin
 docker compose up -d --build
 ```
 
-Если заняты порты `3001`, `3002`, `3030`, `3080`, `3333`, `3344`, `5432`, `8081`, `8083`, `8123`, `9000`, `9090`, `9091`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
+Если заняты порты `3001`, `3002`, `3030`, `3080`, `3333`, `3344`, `3355`, `5432`, `8081`, `8083`, `8123`, `9000`, `9090`, `9091`, `9092` или `9644`, остановите другой локальный стек или поменяйте published ports в `docker-compose.yml`.
 
 ## 4. Проверка
 
@@ -70,6 +70,7 @@ docker compose ps
 curl http://localhost:3333/health
 curl http://localhost:3344/health
 curl http://localhost:3002/api/public/health
+curl http://localhost:3355/health
 curl http://localhost:8083/connectors
 ```
 
@@ -95,6 +96,9 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 - MinIO console для Langfuse: `http://localhost:9091`
 - ClickHouse UI: `http://localhost:8123/play`
 - Debezium REST: `http://localhost:8083/connectors`
+- Prometheus connector health: `http://localhost:3355/health`
+- Prometheus remote_write receiver: `http://localhost:3355/api/v1/write`
+- Prometheus backfill: `http://localhost:3355/backfill`
 - MCP health: `http://localhost:3333/health`
 - Agent proxy health: `http://localhost:3344/health`
 
@@ -147,4 +151,55 @@ Agentic Data Stack LLM
 
 ```env
 LANGFUSE_ENABLED=true
+```
+
+## 8. Prometheus Connector
+
+Prometheus подключается не через Debezium.
+
+Debezium читает CDC-журналы транзакционных БД: PostgreSQL WAL, MySQL binlog, MongoDB change streams.
+
+Prometheus отдает метрики иначе:
+
+- историю через HTTP API `query_range`;
+- realtime samples через `remote_write`.
+
+Для realtime добавьте в `prometheus.yml`:
+
+```yaml
+remote_write:
+  - url: http://prometheus-connector:3355/api/v1/write
+```
+
+Если Prometheus запущен вне Docker network, используйте адрес хоста:
+
+```yaml
+remote_write:
+  - url: http://localhost:3355/api/v1/write
+```
+
+Для historical backfill:
+
+```bash
+curl http://localhost:3355/backfill \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "queries": ["up"],
+    "start": "2026-05-11T00:00:00Z",
+    "end": "2026-05-11T01:00:00Z",
+    "step": "60s"
+  }'
+```
+
+Проверить строки:
+
+```bash
+curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
+  --data-binary 'SELECT count() FROM analytics.prometheus_samples'
+```
+
+В LibreChat можно спрашивать:
+
+```text
+Проанализируй Prometheus targets: какие instance сейчас down?
 ```

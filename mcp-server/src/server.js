@@ -84,6 +84,76 @@ const tools = [
     },
   },
   {
+    name: 'prometheus_metric_summary',
+    description: 'Analyze Prometheus metrics stored in ClickHouse by metric_name over recent time buckets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of rows to return.',
+          default: 50,
+        },
+      },
+    },
+  },
+  {
+    name: 'prometheus_targets',
+    description: 'Return Prometheus up target health from ClickHouse, sorted with problematic targets first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of targets to return.',
+          default: 50,
+        },
+      },
+    },
+  },
+  {
+    name: 'sample_prometheus_metrics',
+    description: 'Return recent Prometheus samples for one metric_name from ClickHouse.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metric_name: {
+          type: 'string',
+          description: 'Prometheus metric name, for example up or http_requests_total.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of samples to return.',
+          default: 50,
+        },
+      },
+      required: ['metric_name'],
+    },
+  },
+  {
+    name: 'prometheus_label_values',
+    description: 'Return frequent label values for a Prometheus metric stored in ClickHouse.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metric_name: {
+          type: 'string',
+          description: 'Prometheus metric name.',
+        },
+        label: {
+          type: 'string',
+          description: 'Label name, for example job, instance, route, service, pod, namespace.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of values to return.',
+          default: 50,
+        },
+      },
+      required: ['metric_name', 'label'],
+    },
+  },
+  {
     name: 'error_trends',
     description: 'Analyze hourly errors by route and status code from migrated ClickHouse events.',
     inputSchema: {
@@ -185,6 +255,22 @@ function boundedLimit(value, fallback = 50, maximum = 500) {
 
 function safeChoice(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback;
+}
+
+function safeIdentifier(value, fallback = '') {
+  const text = String(value || fallback);
+  if (!/^[A-Za-z_:][A-Za-z0-9_:]*$/.test(text)) {
+    throw new Error(`Unsafe identifier-like value: ${text}`);
+  }
+  return text;
+}
+
+function safeLabelName(value) {
+  const text = String(value || '');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+    throw new Error(`Unsafe Prometheus label name: ${text}`);
+  }
+  return text;
 }
 
 function numberValue(value) {
@@ -471,7 +557,13 @@ async function handleRpc(payload) {
           default_expression
         FROM system.columns
         WHERE database = 'analytics'
-          AND table IN ('app_events_raw', 'v_event_summary')
+          AND table IN (
+            'app_events_raw',
+            'v_event_summary',
+            'prometheus_samples',
+            'v_prometheus_metric_summary',
+            'v_prometheus_targets'
+          )
         ORDER BY table, position
       `);
       return jsonRpc(id, {
@@ -551,6 +643,88 @@ async function handleRpc(payload) {
         WHERE model_name IS NOT NULL
         GROUP BY model_name
         ORDER BY total_cost_usd DESC, total_tokens DESC
+        LIMIT ${limit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'prometheus_metric_summary') {
+      const limit = boundedLimit(args.limit, 50, 500);
+      const rows = await runQuery(`
+        SELECT
+          minute,
+          metric_name,
+          samples,
+          min_value,
+          max_value,
+          round(avg_value, 4) AS avg_value,
+          round(p95_value, 4) AS p95_value
+        FROM analytics.v_prometheus_metric_summary
+        ORDER BY minute DESC, metric_name ASC
+        LIMIT ${limit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'prometheus_targets') {
+      const limit = boundedLimit(args.limit, 50, 500);
+      const rows = await runQuery(`
+        SELECT
+          job,
+          instance,
+          last_sample_time,
+          last_up,
+          min_up,
+          round(avg_up, 4) AS avg_up
+        FROM analytics.v_prometheus_targets
+        ORDER BY last_up ASC, min_up ASC, job ASC, instance ASC
+        LIMIT ${limit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'sample_prometheus_metrics') {
+      const metricName = safeIdentifier(args.metric_name);
+      const limit = boundedLimit(args.limit, 50, 500);
+      const rows = await runQuery(`
+        SELECT
+          metric_name,
+          labels_json,
+          sample_time,
+          value,
+          source,
+          ingest_mode,
+          ingest_time
+        FROM analytics.prometheus_samples
+        WHERE metric_name = '${metricName}'
+        ORDER BY sample_time DESC
+        LIMIT ${limit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'prometheus_label_values') {
+      const metricName = safeIdentifier(args.metric_name);
+      const label = safeLabelName(args.label);
+      const limit = boundedLimit(args.limit, 50, 500);
+      const rows = await runQuery(`
+        SELECT
+          JSONExtractString(labels_json, '${label}') AS label_value,
+          count() AS samples,
+          max(sample_time) AS last_sample_time
+        FROM analytics.prometheus_samples
+        WHERE metric_name = '${metricName}'
+          AND label_value != ''
+        GROUP BY label_value
+        ORDER BY samples DESC, label_value ASC
         LIMIT ${limit}
       `);
       return jsonRpc(id, {

@@ -4,7 +4,7 @@
 
 Он написан так, будто инфраструктуру разворачивает junior DevOps, который видит проект впервые.
 
-Цель: развернуть отказоустойчивую систему, где компоненты находятся на разных машинах, а данные из внешней БД попадают в ClickHouse через Debezium и Redpanda.
+Цель: развернуть отказоустойчивую систему, где компоненты находятся на разных машинах, данные из внешней БД попадают в ClickHouse через Debezium и Redpanda, а метрики Prometheus попадают в ClickHouse через отдельный Prometheus connector.
 
 ## 1. Что Мы Строим
 
@@ -30,6 +30,16 @@ External Database
   -> Langfuse traces for LLM requests
 ```
 
+Для Prometheus цепочка другая:
+
+```text
+Prometheus
+  -> remote_write или HTTP API query_range
+  -> Prometheus connector
+  -> ClickHouse
+  -> MCP / LibreChat
+```
+
 По-человечески:
 
 1. **Debezium** подключается к внешней БД и читает изменения.
@@ -40,6 +50,7 @@ External Database
 6. **LibreChat** дает человеку web UI для общения с моделью.
 7. **Airflow** запускает регистрацию или обновление коннекторов по расписанию.
 8. **Langfuse** показывает traces LLM-запросов: что отправили в модель, что получили, какая модель отвечала и сколько времени занял вызов.
+9. **Prometheus connector** переносит метрики Prometheus в ClickHouse для анализа через LibreChat.
 
 ## 2. Что Делает Каждый Компонент
 
@@ -64,6 +75,57 @@ External Database
 **Change stream** — API MongoDB, который позволяет подписаться на изменения документов.
 
 В этом проекте Debezium работает внутри Kafka Connect runtime.
+
+Важно: Debezium не подходит для Prometheus.
+
+Prometheus — не транзакционная БД с WAL/binlog/change stream.
+
+У Prometheus другой способ интеграции:
+
+- HTTP API `query_range` для исторической выгрузки;
+- `remote_write` для потоковой отправки новых samples.
+
+Поэтому для Prometheus в этом проекте используется отдельный `prometheus-connector`.
+
+### Prometheus Connector
+
+**Prometheus connector** — Node.js сервис, который переносит метрики Prometheus в ClickHouse.
+
+Он умеет работать в двух режимах.
+
+**Backfill** — единоразовая или периодическая выгрузка истории.
+
+Connector ходит в Prometheus HTTP API:
+
+```text
+/api/v1/query_range
+```
+
+**Remote write** — потоковая выгрузка почти в realtime.
+
+Prometheus сам отправляет новые samples в endpoint:
+
+```text
+prometheus-connector:3355/api/v1/write
+```
+
+**Sample** — одно значение метрики в конкретный момент времени.
+
+Например:
+
+```text
+up{job="api",instance="10.10.0.10:8080"} 1 1778500800000
+```
+
+В ClickHouse samples сохраняются в таблицу:
+
+```text
+analytics.prometheus_samples
+```
+
+Labels Prometheus сохраняются в поле `labels_json`.
+
+Это сделано намеренно: у разных метрик разные labels, и жесткая таблица с колонками `job`, `instance`, `pod`, `namespace`, `route` быстро стала бы неудобной.
 
 ### Redpanda
 
@@ -469,6 +531,7 @@ sudo nano /etc/hosts
 | ClickHouse HTTP | `8123` | Grafana, MCP, sink | SQL по HTTP |
 | ClickHouse native | `9000` | ops/admin | native client |
 | Grafana | `3001` или `3000` | users/admin | dashboards |
+| Prometheus connector | `3355` | Prometheus, ops/admin | remote_write и backfill |
 | Langfuse UI | `3002` или `3000` | users/admin | LLM traces и observability |
 | Langfuse worker | `3030` | internal only | background jobs |
 | Langfuse PostgreSQL | `5432` | Langfuse only | users/projects/settings |
@@ -485,6 +548,10 @@ sudo nano /etc/hosts
 Внешнюю source-БД открывайте только для `connect-1` и `connect-2`.
 
 Например, если source PostgreSQL находится у клиента, в allowlist должны попасть IP адреса Debezium workers.
+
+Prometheus должен иметь доступ к `prometheus-connector:3355`, если используется `remote_write`.
+
+Если Prometheus находится вне Docker network, откройте внешний порт `3355` только для IP адреса Prometheus.
 
 ## 6. Подготовка Ubuntu На Каждой Машине
 
@@ -567,6 +634,8 @@ mkdir -p \
   grafana/dashboards \
   librechat \
   mcp-server/src \
+  prometheus-connector/src \
+  prometheus-connector/proto \
   postgres/init \
   docs
 ```
@@ -581,6 +650,7 @@ mkdir -p \
 - `grafana/provisioning` — автоматическое подключение datasource и dashboards.
 - `librechat` — шаблон конфигурации LibreChat.
 - `mcp-server` — tools для модели.
+- `prometheus-connector` — прием `remote_write` и backfill из Prometheus HTTP API.
 - `postgres/init` — demo PostgreSQL seed.
 
 ### 7.1 Создать `.gitignore`
@@ -658,6 +728,15 @@ CLICKHOUSE_DB=analytics
 CLICKHOUSE_USER=analytics
 CLICKHOUSE_PASSWORD=analytics_password
 CLICKHOUSE_SINK_TABLE=app_events_raw
+
+PROMETHEUS_BASE_URL=http://prometheus:9090
+PROMETHEUS_BEARER_TOKEN=
+PROMETHEUS_BASIC_USER=
+PROMETHEUS_BASIC_PASSWORD=
+PROMETHEUS_BACKFILL_QUERY=up
+PROMETHEUS_BACKFILL_STEP=60s
+PROMETHEUS_SOURCE_NAME=prometheus
+PROMETHEUS_DEBUG_JSON_ENABLED=true
 
 GRAFANA_ADMIN_USER=admin
 GRAFANA_ADMIN_PASSWORD=admin
@@ -998,6 +1077,47 @@ SELECT
 FROM analytics.app_events_raw
 GROUP BY hour, event_type
 ORDER BY hour DESC, event_type;
+
+CREATE TABLE IF NOT EXISTS analytics.prometheus_samples
+(
+  metric_name LowCardinality(String),
+  labels_json String,
+  fingerprint FixedString(64),
+  sample_time DateTime64(3, 'UTC'),
+  value Float64,
+  source LowCardinality(String) DEFAULT 'prometheus',
+  ingest_mode LowCardinality(String) DEFAULT 'remote_write',
+  ingest_time DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(ingest_time)
+PARTITION BY toYYYYMM(sample_time)
+ORDER BY (metric_name, fingerprint, sample_time, source, ingest_mode);
+
+CREATE VIEW IF NOT EXISTS analytics.v_prometheus_metric_summary AS
+SELECT
+  toStartOfMinute(sample_time) AS minute,
+  metric_name,
+  count() AS samples,
+  min(value) AS min_value,
+  max(value) AS max_value,
+  avg(value) AS avg_value,
+  quantile(0.95)(value) AS p95_value
+FROM analytics.prometheus_samples
+GROUP BY minute, metric_name
+ORDER BY minute DESC, metric_name ASC;
+
+CREATE VIEW IF NOT EXISTS analytics.v_prometheus_targets AS
+SELECT
+  JSONExtractString(labels_json, 'job') AS job,
+  JSONExtractString(labels_json, 'instance') AS instance,
+  max(sample_time) AS last_sample_time,
+  argMax(value, sample_time) AS last_up,
+  min(value) AS min_up,
+  avg(value) AS avg_up
+FROM analytics.prometheus_samples
+WHERE metric_name = 'up'
+GROUP BY job, instance
+ORDER BY last_up ASC, job ASC, instance ASC;
 EOF
 ```
 
@@ -2237,7 +2357,143 @@ GRAFANA_BASE_URL=https://grafana.example.com
 
 Если Grafana стоит за reverse proxy, `GRAFANA_BASE_URL` должен быть публичным URL для браузера пользователя.
 
-## 15. Развертывание Langfuse
+## 15. Развертывание Prometheus Connector
+
+Prometheus connector нужен для метрик Prometheus.
+
+Не используйте Debezium для Prometheus.
+
+Debezium читает CDC-журналы транзакционных БД.
+
+Prometheus отдает данные через свои API:
+
+- `query_range` для historical backfill;
+- `remote_write` для realtime-потока.
+
+### 15.1 Realtime Через Remote Write
+
+В `prometheus.yml` добавить:
+
+```yaml
+remote_write:
+  - url: http://prometheus-connector:3355/api/v1/write
+```
+
+Если Prometheus находится на другой машине:
+
+```yaml
+remote_write:
+  - url: http://app-1.internal:3355/api/v1/write
+```
+
+После этого Prometheus начнет отправлять новые samples в connector.
+
+Connector пишет их в ClickHouse:
+
+```text
+analytics.prometheus_samples
+```
+
+### 15.2 Historical Backfill
+
+Backfill нужен, когда нужно забрать историю.
+
+Например, последние сутки или последнюю неделю.
+
+Вызов:
+
+```bash
+curl http://app-1.internal:3355/backfill \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "queries": ["up", "http_requests_total"],
+    "start": "2026-05-11T00:00:00Z",
+    "end": "2026-05-11T01:00:00Z",
+    "step": "60s"
+  }'
+```
+
+`queries` — список PromQL-запросов.
+
+**PromQL** — язык запросов Prometheus.
+
+`start` и `end` задают период.
+
+`step` задает шаг между точками.
+
+Например, `60s` означает “одна точка в минуту”.
+
+### 15.3 Переменные Prometheus Connector
+
+В `.env`:
+
+```env
+PROMETHEUS_BASE_URL=http://prometheus:9090
+PROMETHEUS_BEARER_TOKEN=
+PROMETHEUS_BASIC_USER=
+PROMETHEUS_BASIC_PASSWORD=
+PROMETHEUS_BACKFILL_QUERY=up
+PROMETHEUS_BACKFILL_STEP=60s
+PROMETHEUS_SOURCE_NAME=prometheus
+PROMETHEUS_DEBUG_JSON_ENABLED=false
+```
+
+`PROMETHEUS_BASE_URL` нужен только для backfill.
+
+Для `remote_write` Prometheus сам приходит в connector, поэтому connector не обязан ходить в Prometheus API.
+
+`PROMETHEUS_DEBUG_JSON_ENABLED` в production лучше выключить.
+
+Текущая реализация принимает обычные Prometheus samples из remote write.
+
+Native histograms, exemplars и metadata можно добавить позже отдельным расширением.
+
+### 15.4 Проверка
+
+Healthcheck:
+
+```bash
+curl http://app-1.internal:3355/health
+```
+
+Проверить строки:
+
+```bash
+curl 'http://ch-1.internal:8123/?user=analytics&password=change-me' \
+  --data-binary 'SELECT count() FROM analytics.prometheus_samples'
+```
+
+Проверить targets:
+
+```bash
+curl 'http://ch-1.internal:8123/?user=analytics&password=change-me' \
+  --data-binary 'SELECT * FROM analytics.v_prometheus_targets LIMIT 20'
+```
+
+### 15.5 Анализ Через LibreChat
+
+После загрузки метрик LibreChat может использовать MCP tools:
+
+- `prometheus_metric_summary`;
+- `prometheus_targets`;
+- `sample_prometheus_metrics`;
+- `prometheus_label_values`.
+
+Примеры запросов:
+
+```text
+Проанализируй Prometheus targets: какие instance сейчас down?
+```
+
+```text
+Покажи последние samples метрики up и объясни, какие targets проблемные.
+```
+
+```text
+Какие значения label job есть у метрики http_requests_total?
+```
+
+## 16. Развертывание Langfuse
 
 Langfuse можно поднять рядом с app-слоем или на отдельной машине.
 
@@ -2258,7 +2514,7 @@ Langfuse можно поднять рядом с app-слоем или на от
 
 В локальном режиме S3-compatible storage — это MinIO.
 
-### 15.1 Переменные Langfuse
+### 16.1 Переменные Langfuse
 
 В `.env` должны быть эти значения:
 
@@ -2307,7 +2563,7 @@ LANGFUSE_SECRET_KEY=sk-lf-change-me
 Password needs to be at least 8 characters long.
 ```
 
-### 15.2 Первый Запуск Langfuse
+### 16.2 Первый Запуск Langfuse
 
 В локальном compose запуск общий:
 
@@ -2337,7 +2593,7 @@ LANGFUSE_INIT_USER_PASSWORD=admin123456
 
 В production пароль должен быть другим.
 
-### 15.3 Регистрация И Авторизация Пользователя
+### 16.3 Регистрация И Авторизация Пользователя
 
 В локальном режиме пользователь создается автоматически через `LANGFUSE_INIT_USER_EMAIL` и `LANGFUSE_INIT_USER_PASSWORD`.
 
@@ -2359,7 +2615,20 @@ docker compose logs langfuse-web
 docker compose logs langfuse-worker
 ```
 
-### 15.4 Создание Project И API Keys
+Проверить Prometheus connector:
+
+```bash
+curl http://app-1.internal:3355/health
+```
+
+Проверить Prometheus samples в ClickHouse:
+
+```bash
+curl 'http://ch-1.internal:8123/?user=analytics&password=change-me' \
+  --data-binary 'SELECT count() FROM analytics.prometheus_samples'
+```
+
+### 16.4 Создание Project И API Keys
 
 Для локального запуска project создается автоматически.
 
@@ -2393,7 +2662,7 @@ LANGFUSE_SECRET_KEY=sk-lf-agentic-data-stack-local
 docker compose up -d --build agent-proxy
 ```
 
-### 15.5 Как Trace Попадает В Langfuse
+### 16.5 Как Trace Попадает В Langfuse
 
 В этой системе трассировка сделана на уровне `agent-proxy`.
 
@@ -2415,7 +2684,7 @@ agent-proxy
 
 Он пишет warning в logs и продолжает отдавать ответ LibreChat.
 
-### 15.6 Ограничения Langfuse В Этом Проекте
+### 16.6 Ограничения Langfuse В Этом Проекте
 
 Langfuse видит те LLM-запросы, которые проходят через `agent-proxy`.
 
@@ -2436,7 +2705,7 @@ Langfuse видит те LLM-запросы, которые проходят ч�
 
 Это нормально для локальных Ollama-compatible сценариев.
 
-### 15.7 Безопасность Langfuse
+### 16.7 Безопасность Langfuse
 
 Langfuse хранит prompts и outputs.
 
@@ -2452,7 +2721,7 @@ Langfuse хранит prompts и outputs.
 
 Для production не оставляйте Langfuse открытым в интернет без авторизации и TLS.
 
-## 16. Регистрация В LibreChat
+## 17. Регистрация В LibreChat
 
 Открыть:
 
@@ -2482,7 +2751,7 @@ Local OpenAI-compatible
 clickhouse-analytics
 ```
 
-## 17. Проверки После Развертывания
+## 18. Проверки После Развертывания
 
 Проверить Redpanda:
 
@@ -2550,11 +2819,12 @@ docker compose logs langfuse-web
 docker compose logs langfuse-worker
 ```
 
-## 18. Backup И Restore
+## 19. Backup И Restore
 
 Нужно делать backup:
 
 - ClickHouse data;
+- Prometheus samples в ClickHouse;
 - Airflow metadata DB;
 - LibreChat MongoDB;
 - Langfuse Postgres;
@@ -2604,7 +2874,7 @@ Langfuse MinIO:
 mc mirror minio/langfuse ./langfuse-minio-backup
 ```
 
-## 19. Monitoring
+## 20. Monitoring
 
 Минимально мониторить:
 
@@ -2619,6 +2889,9 @@ mc mirror minio/langfuse ./langfuse-minio-backup
 - Langfuse web/worker availability;
 - Langfuse ingestion errors;
 - Langfuse trace volume;
+- Prometheus connector `/health`;
+- количество Prometheus samples;
+- свежесть Prometheus samples;
 - MCP `/health`;
 - agent-proxy `/health`.
 
@@ -2634,7 +2907,7 @@ curl http://connect-1.internal:8083/connectors/<connector-name>/status
 docker logs <debezium-container>
 ```
 
-## 20. Типовые Проблемы
+## 21. Типовые Проблемы
 
 ### Debezium Не Может Подключиться К Source-БД
 
@@ -2765,7 +3038,55 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 
 Если volume ClickHouse старый, это нормально: init-service выполняет `CREATE DATABASE IF NOT EXISTS` при каждом запуске.
 
-## 21. Порядок Первого Production Запуска
+### Prometheus Connector Не Получает Samples
+
+Проверить health:
+
+```bash
+curl http://localhost:3355/health
+```
+
+Проверить Prometheus config:
+
+```yaml
+remote_write:
+  - url: http://prometheus-connector:3355/api/v1/write
+```
+
+Если Prometheus находится на другой машине, `prometheus-connector` может быть недоступен по Docker DNS name.
+
+Тогда использовать внешний адрес:
+
+```yaml
+remote_write:
+  - url: http://app-1.internal:3355/api/v1/write
+```
+
+Проверить firewall и allowlist IP.
+
+### Prometheus Backfill Не Работает
+
+Проверить `PROMETHEUS_BASE_URL`:
+
+```env
+PROMETHEUS_BASE_URL=http://prometheus:9090
+```
+
+Из контейнера connector должен открываться Prometheus HTTP API:
+
+```bash
+docker compose exec prometheus-connector wget -qO- http://prometheus:9090/api/v1/status/runtimeinfo
+```
+
+Если Prometheus защищен basic auth или bearer token, заполнить:
+
+```env
+PROMETHEUS_BEARER_TOKEN=
+PROMETHEUS_BASIC_USER=
+PROMETHEUS_BASIC_PASSWORD=
+```
+
+## 22. Порядок Первого Production Запуска
 
 1. Подготовить все машины.
 2. Настроить DNS или `/etc/hosts`.
@@ -2781,17 +3102,20 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 12. Поднять Airflow.
 13. Настроить `AIRFLOW_MIGRATION_CRON`.
 14. Поднять Grafana и проверить dashboard.
-15. Поднять MCP server и проверить `/health`.
-16. Поднять LibreChat и зарегистрировать первого пользователя.
-17. Включить MCP tools в LibreChat.
-18. Поднять Langfuse.
-19. Войти в Langfuse, проверить organization, project и API keys.
-20. Задать вопрос в LibreChat и проверить trace в Langfuse.
-21. Задать тестовый вопрос модели.
-22. Настроить backups.
-23. Настроить monitoring и alerts.
+15. Поднять Prometheus connector.
+16. Настроить Prometheus `remote_write` или выполнить `/backfill`.
+17. Проверить строки в `analytics.prometheus_samples`.
+18. Поднять MCP server и проверить `/health`.
+19. Поднять LibreChat и зарегистрировать первого пользователя.
+20. Включить MCP tools в LibreChat.
+21. Поднять Langfuse.
+22. Войти в Langfuse, проверить organization, project и API keys.
+23. Задать вопрос в LibreChat и проверить trace в Langfuse.
+24. Задать тестовый вопрос модели.
+25. Настроить backups.
+26. Настроить monitoring и alerts.
 
-## 22. Что Обязательно Передать Следующей Смене
+## 23. Что Обязательно Передать Следующей Смене
 
 - Список машин и их роли.
 - Все внутренние DNS names и IP.
@@ -2802,6 +3126,8 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 - Какой `AIRFLOW_MIGRATION_CRON` сейчас активен.
 - Как проверить Debezium connector status.
 - Как проверить ClickHouse row count.
+- Как настроен Prometheus `remote_write`.
+- Какие PromQL-запросы используются для backfill.
 - Где смотреть Grafana dashboards.
 - Как зайти в Airflow.
 - Как зайти в LibreChat.

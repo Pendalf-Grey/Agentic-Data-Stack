@@ -1,6 +1,6 @@
 # Agentic Data Stack
 
-Это локальный стек для аналитики данных, которые приходят из внешней БД через **Debezium** и попадают в **ClickHouse**.
+Это локальный стек для аналитики данных, которые приходят из внешней БД через **Debezium** или из **Prometheus** через отдельный Prometheus connector и попадают в **ClickHouse**.
 
 Идея простая: подключаемся к чужой source-БД, забираем изменения, складываем их в аналитическое хранилище, смотрим графики в **Grafana**, задаем вопросы данным через **LibreChat** + **MCP** и отслеживаем работу LLM через **Langfuse**.
 
@@ -25,6 +25,17 @@ docs/JUNIOR_DEVOPS_DEPLOYMENT_GUIDE.md
 CDC означает Change Data Capture. Это способ читать изменения из БД: новые строки, обновления и удаления. Debezium читает журнал изменений source-БД и отправляет события дальше.
 
 В других проектах Debezium часто используют для репликации данных, аудита, realtime-аналитики и синхронизации микросервисов.
+
+**Prometheus connector** — сервис для переноса метрик Prometheus в ClickHouse.
+
+Для Prometheus Debezium не подходит: Prometheus не является транзакционной БД с WAL/binlog/change stream для CDC.
+
+В этом проекте есть два режима:
+
+- **backfill** — единоразово или по расписанию забрать историю через Prometheus HTTP API `query_range`;
+- **remote_write** — принимать новые samples почти в realtime через Prometheus remote write protocol.
+
+В других проектах такой connector используют, когда Prometheus хорош для scraping и alerting, а ClickHouse нужен для долгого хранения, дешевой аналитики и запросов через LLM.
 
 **Redpanda** — Kafka-compatible брокер сообщений.
 
@@ -130,6 +141,88 @@ ClickHouse хранит аналитическую копию, которая д
 Важно: это лучше делать отдельным шагом, а не считать обязанностью ClickHouse sink.
 
 Официальный ClickHouse Kafka Connect sink обычно ожидает, что target table уже существует. Поэтому auto-create в этой системе должен быть отдельным pre-step: `schema-bootstrap`.
+
+## Prometheus В ClickHouse
+
+Prometheus подключается не через Debezium.
+
+Для него используется сервис:
+
+```text
+prometheus-connector
+```
+
+Потоковая выгрузка:
+
+```text
+Prometheus remote_write
+  -> prometheus-connector /api/v1/write
+  -> ClickHouse analytics.prometheus_samples
+  -> MCP
+  -> LibreChat
+```
+
+Историческая выгрузка:
+
+```text
+prometheus-connector /backfill
+  -> Prometheus /api/v1/query_range
+  -> ClickHouse analytics.prometheus_samples
+```
+
+В `prometheus.yml` для realtime-режима добавьте:
+
+```yaml
+remote_write:
+  - url: http://prometheus-connector:3355/api/v1/write
+```
+
+Если Prometheus находится вне Docker network, используйте внешний адрес connector:
+
+```yaml
+remote_write:
+  - url: http://agentic-data-stack-host:3355/api/v1/write
+```
+
+Для backfill:
+
+```bash
+curl http://localhost:3355/backfill \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "queries": ["up", "http_requests_total"],
+    "start": "2026-05-11T00:00:00Z",
+    "end": "2026-05-11T01:00:00Z",
+    "step": "60s"
+  }'
+```
+
+Метрики пишутся в таблицу:
+
+```text
+analytics.prometheus_samples
+```
+
+Для LibreChat доступны MCP tools:
+
+- `prometheus_metric_summary`;
+- `prometheus_targets`;
+- `sample_prometheus_metrics`;
+- `prometheus_label_values`.
+
+Примеры запросов в LibreChat:
+
+```text
+Проанализируй Prometheus targets: какие instance сейчас down?
+```
+
+```text
+Покажи последние samples метрики up и объясни, где проблема.
+```
+
+```text
+Какие значения label job есть у метрики up?
+```
 
 ## External PostgreSQL
 
@@ -576,6 +669,9 @@ OPENAI_MODEL_SMART=qwen2.5:14b
 - `http://localhost:3002/api/public/health` — healthcheck Langfuse Web.
 - `http://localhost:9090` — MinIO S3 API для Langfuse events/media.
 - `http://localhost:9091` — MinIO console.
+- `http://localhost:3355/health` — healthcheck `prometheus-connector`.
+- `http://localhost:3355/api/v1/write` — Prometheus remote_write receiver.
+- `http://localhost:3355/backfill` — historical backfill из Prometheus HTTP API.
 - `http://localhost:3333/health` — healthcheck MCP server.
 - `http://localhost:3333/mcp` — MCP endpoint. Внутри Docker LibreChat использует `http://mcp-server:3333/mcp`.
 - `http://localhost:3344/health` — healthcheck `agent-proxy`.
@@ -602,6 +698,7 @@ docker compose ps
 curl http://localhost:3333/health
 curl http://localhost:3344/health
 curl http://localhost:3002/api/public/health
+curl http://localhost:3355/health
 curl http://localhost:8083/connectors
 ```
 
@@ -641,3 +738,17 @@ Langfuse сохраняет LLM inputs и outputs.
 Текущий ClickHouse sink настроен на одну таблицу `app_events_raw`.
 
 Для нескольких таблиц или другой схемы данных нужно добавить новые ClickHouse tables и расширить `topic2TableMap`.
+
+Prometheus connector хранит labels в `labels_json`.
+
+Это гибко, потому что разные метрики имеют разные labels: `job`, `instance`, `pod`, `namespace`, `route`, `service` и так далее.
+
+Текущая реализация принимает обычные Prometheus samples из remote write.
+
+Native histograms, exemplars и metadata можно добавить отдельным расширением, если они понадобятся.
+
+Для production отключите debug endpoint:
+
+```env
+PROMETHEUS_DEBUG_JSON_ENABLED=false
+```

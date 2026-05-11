@@ -123,6 +123,31 @@ services:
     command: node /register-connectors.mjs
     restart: "no"
 
+  prometheus-connector:
+    build:
+      context: ./prometheus-connector
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PORT: 3355
+      CLICKHOUSE_HOST: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
+      PROMETHEUS_BASE_URL: ${PROMETHEUS_BASE_URL:-http://prometheus:9090}
+      PROMETHEUS_BEARER_TOKEN: ${PROMETHEUS_BEARER_TOKEN:-}
+      PROMETHEUS_BASIC_USER: ${PROMETHEUS_BASIC_USER:-}
+      PROMETHEUS_BASIC_PASSWORD: ${PROMETHEUS_BASIC_PASSWORD:-}
+      PROMETHEUS_BACKFILL_QUERY: ${PROMETHEUS_BACKFILL_QUERY:-up}
+      PROMETHEUS_BACKFILL_STEP: ${PROMETHEUS_BACKFILL_STEP:-60s}
+      PROMETHEUS_SOURCE_NAME: ${PROMETHEUS_SOURCE_NAME:-prometheus}
+      PROMETHEUS_DEBUG_JSON_ENABLED: ${PROMETHEUS_DEBUG_JSON_ENABLED:-true}
+    ports:
+      - "3355:3355"
+
   airflow-db:
     image: postgres:16-alpine
     environment:
