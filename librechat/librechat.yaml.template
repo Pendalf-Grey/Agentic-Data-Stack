@@ -40,6 +40,7 @@ mcpServers:
       Use these tools when the user asks about application events, logs, users, routes, latency, errors, model usage, token usage, cost, or data migrated through Debezium.
       Use these tools when the user asks about Prometheus metrics, targets, samples, incidents, synthetic monitoring data, or data in ClickHouse.
       The primary ClickHouse objects are analytics.app_events_raw for raw migrated events and analytics.v_event_summary for hourly aggregates.
+      PostgreSQL demo car inventory is stored in analytics.car_inventory_raw, with warehouse, brand, and city aggregates in analytics.v_car_inventory_summary.
       Prometheus metrics are stored in analytics.prometheus_samples, with summaries in analytics.v_prometheus_metric_summary and target health in analytics.v_prometheus_targets.
       Start with describe_analytics_schema when you need the available columns. Use sample_app_events for examples of raw migrated rows.
       Prefer the purpose-built tools route_performance, model_usage, error_trends, and event_summary for common analytical questions.

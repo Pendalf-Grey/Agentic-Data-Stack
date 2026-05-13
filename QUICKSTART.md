@@ -11,7 +11,15 @@ cp .env.example .env
 
 Если подключаетесь к внешней БД, заполните **host**, **port**, **user**, **password** и параметры active source-БД.
 
-Если хотите просто проверить стек локально, включите demo-режим:
+Если хотите просто проверить стек локально, загрузите demo-данные PostgreSQL в ClickHouse одной командой:
+
+```bash
+sh tools/postgres-demo-to-clickhouse.sh
+```
+
+Команда сама включает demo-настройки для PostgreSQL, регистрирует Debezium connectors и ждёт строки в `analytics.car_inventory_raw`.
+
+Если настраиваете demo-режим вручную, используйте:
 
 ```env
 SOURCE_MODE=demo
@@ -21,8 +29,10 @@ POSTGRES_SOURCE_HOST=postgres
 POSTGRES_SOURCE_USER=app
 POSTGRES_SOURCE_PASSWORD=app_password
 POSTGRES_SOURCE_DB=app_logs
-POSTGRES_SOURCE_TOPIC=pg_flat.public.app_events
+POSTGRES_SOURCE_TABLE=car_inventory
+POSTGRES_SOURCE_TOPIC=pg_flat.public.car_inventory
 POSTGRES_SOURCE_SSL_MODE=disable
+CLICKHOUSE_SINK_TABLE=car_inventory_raw
 ```
 
 ## 2. Расписание Миграции
@@ -82,7 +92,7 @@ ClickHouse:
 
 ```bash
 curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
-  --data-binary 'SELECT count() FROM analytics.app_events_raw'
+  --data-binary 'SELECT count() FROM analytics.car_inventory_raw'
 ```
 
 Все таблицы ClickHouse одной командой:
@@ -91,7 +101,7 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 sh tools/clickhouse-tables.sh
 ```
 
-В demo-режиме после initial snapshot ожидается `1000`.
+После `sh tools/postgres-demo-to-clickhouse.sh` ожидается минимум `3000` строк в `analytics.car_inventory_raw`.
 
 ## 5. UI
 

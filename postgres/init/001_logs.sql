@@ -20,6 +20,32 @@ CREATE INDEX IF NOT EXISTS idx_app_events_event_type ON app_events(event_type);
 
 ALTER TABLE app_events REPLICA IDENTITY FULL;
 
+CREATE TABLE IF NOT EXISTS car_inventory (
+  id BIGSERIAL PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  inventory_time TIMESTAMPTZ NOT NULL DEFAULT now(),
+  city TEXT NOT NULL,
+  warehouse_name TEXT NOT NULL,
+  brand TEXT NOT NULL,
+  model TEXT NOT NULL,
+  model_year INTEGER NOT NULL,
+  body_type TEXT NOT NULL,
+  color TEXT NOT NULL,
+  vin TEXT NOT NULL UNIQUE,
+  stock_status TEXT NOT NULL,
+  price_usd NUMERIC(12, 2) NOT NULL,
+  mileage_km INTEGER NOT NULL,
+  arrived_at TIMESTAMPTZ NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_car_inventory_city ON car_inventory(city);
+CREATE INDEX IF NOT EXISTS idx_car_inventory_brand ON car_inventory(brand);
+CREATE INDEX IF NOT EXISTS idx_car_inventory_status ON car_inventory(stock_status);
+CREATE INDEX IF NOT EXISTS idx_car_inventory_batch_id ON car_inventory(batch_id);
+
+ALTER TABLE car_inventory REPLICA IDENTITY FULL;
+
 INSERT INTO app_events (
   event_time,
   user_id,

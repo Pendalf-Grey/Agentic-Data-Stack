@@ -365,7 +365,21 @@ Debezium использует **change stream**. Это API MongoDB, через 
 
 Demo-режим нужен только для проверки проекта без внешней БД.
 
-Он запускает локальный PostgreSQL с тестовыми логами `public.app_events`.
+Он запускает локальный PostgreSQL и может наполнить его осмысленным складским набором `public.car_inventory`: машины разных марок на складах в Токио, Москве и Минске.
+
+Наполнить ClickHouse demo-данными из PostgreSQL одной командой:
+
+```bash
+sh tools/postgres-demo-to-clickhouse.sh
+```
+
+Команда поднимает demo PostgreSQL, Redpanda, Debezium и ClickHouse, регистрирует connectors, вставляет свежую пачку строк в `public.car_inventory` и ждёт, пока они появятся в `analytics.car_inventory_raw`.
+
+По умолчанию вставляется 3000 строк. Количество можно изменить:
+
+```bash
+POSTGRES_DEMO_ROWS=5000 sh tools/postgres-demo-to-clickhouse.sh
+```
 
 ```env
 SOURCE_MODE=demo
@@ -383,11 +397,11 @@ POSTGRES_SOURCE_PASSWORD=app_password
 POSTGRES_SOURCE_DB=app_logs
 POSTGRES_SOURCE_TOPIC_PREFIX=pg_flat
 POSTGRES_SOURCE_SCHEMA=public
-POSTGRES_SOURCE_TABLE=app_events
-POSTGRES_SOURCE_SLOT=app_events_slot
-POSTGRES_SOURCE_PUBLICATION=app_events_publication
+POSTGRES_SOURCE_TABLE=car_inventory
+POSTGRES_SOURCE_SLOT=car_inventory_slot
+POSTGRES_SOURCE_PUBLICATION=car_inventory_publication
 POSTGRES_SOURCE_SSL_MODE=disable
-POSTGRES_SOURCE_TOPIC=pg_flat.public.app_events
+POSTGRES_SOURCE_TOPIC=pg_flat.public.car_inventory
 ```
 
 ## Как Работает Миграция
@@ -401,10 +415,12 @@ ClickHouse sink connector тоже создается автоматически
 Он читает **topic** активной source-БД и пишет строки в таблицу ClickHouse:
 
 ```env
-CLICKHOUSE_SINK_TABLE=app_events_raw
+CLICKHOUSE_SINK_TABLE=car_inventory_raw
 ```
 
-Текущие Grafana dashboards и MCP tools рассчитаны на таблицу `analytics.app_events_raw`.
+Складской demo-набор пишет в таблицу `analytics.car_inventory_raw`.
+
+Старые demo-логи приложения по-прежнему могут жить в `analytics.app_events_raw`, но новая PostgreSQL demo-команда использует автомобильный складской домен.
 
 Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema, `CLICKHOUSE_SINK_TABLE`, Grafana panels и MCP-запросы.
 
@@ -423,7 +439,7 @@ External DB / demo PostgreSQL
   -> Debezium source connector
   -> Redpanda topic
   -> ClickHouse sink connector
-  -> ClickHouse table analytics.app_events_raw
+  -> ClickHouse table analytics.car_inventory_raw
 ```
 
 То есть **Debezium source connector** отвечает за чтение source-БД.
@@ -456,10 +472,10 @@ debezium/connectors/clickhouse-sink.json
 В demo-режиме это превращается примерно в такую связь:
 
 ```text
-pg_flat.public.app_events -> analytics.app_events_raw
+pg_flat.public.car_inventory -> analytics.car_inventory_raw
 ```
 
-Поэтому фраза “текущий ClickHouse sink настроен на одну таблицу `app_events_raw`” верна.
+Поэтому фраза “текущий ClickHouse sink настроен на одну таблицу” верна, но конкретная таблица задается через `CLICKHOUSE_SINK_TABLE`.
 
 Сейчас один source topic складывается в одну ClickHouse table.
 
@@ -794,7 +810,7 @@ curl http://localhost:8083/connectors
 
 ```bash
 curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
-  --data-binary 'SELECT count() FROM analytics.app_events_raw'
+  --data-binary 'SELECT count() FROM analytics.car_inventory_raw'
 ```
 
 Вывести все таблицы ClickHouse:
@@ -803,10 +819,10 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 sh tools/clickhouse-tables.sh
 ```
 
-Для demo-режима после initial snapshot ожидается:
+После `sh tools/postgres-demo-to-clickhouse.sh` ожидается:
 
 ```text
-1000
+3000 или больше
 ```
 
 ## Ограничения И Безопасность
@@ -829,7 +845,7 @@ Langfuse сохраняет LLM inputs и outputs.
 
 Для production Langfuse лучше закрывать за VPN, reverse proxy или corporate SSO.
 
-Текущий ClickHouse sink настроен на одну таблицу `app_events_raw`.
+Текущий ClickHouse sink настроен на одну таблицу, заданную через `CLICKHOUSE_SINK_TABLE`.
 
 Для нескольких таблиц или другой схемы данных нужно добавить новые ClickHouse tables и расширить `topic2TableMap`.
 

@@ -32,6 +32,45 @@ FROM analytics.app_events_raw
 GROUP BY hour, event_type
 ORDER BY hour DESC, event_type;
 
+CREATE TABLE IF NOT EXISTS analytics.car_inventory_raw
+(
+  id UInt64,
+  batch_id String,
+  inventory_time String,
+  city LowCardinality(String),
+  warehouse_name LowCardinality(String),
+  brand LowCardinality(String),
+  model String,
+  model_year UInt16,
+  body_type LowCardinality(String),
+  color LowCardinality(String),
+  vin String,
+  stock_status LowCardinality(String),
+  price_usd Decimal(12, 2),
+  mileage_km UInt32,
+  arrived_at String,
+  metadata String,
+  ingest_time DateTime DEFAULT now()
+)
+ENGINE = MergeTree
+ORDER BY (city, brand, model, id);
+
+CREATE VIEW IF NOT EXISTS analytics.v_car_inventory_summary AS
+SELECT
+  city,
+  warehouse_name,
+  brand,
+  count() AS cars,
+  countIf(stock_status = 'available') AS available_cars,
+  countIf(stock_status = 'reserved') AS reserved_cars,
+  countIf(stock_status = 'maintenance') AS maintenance_cars,
+  round(avg(price_usd), 2) AS avg_price_usd,
+  min(model_year) AS oldest_model_year,
+  max(model_year) AS newest_model_year
+FROM analytics.car_inventory_raw
+GROUP BY city, warehouse_name, brand
+ORDER BY city ASC, cars DESC, brand ASC;
+
 CREATE TABLE IF NOT EXISTS analytics.prometheus_samples
 (
   metric_name LowCardinality(String),

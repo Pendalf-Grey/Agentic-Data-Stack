@@ -593,6 +593,8 @@ async function handleRpc(payload) {
           AND table IN (
             'app_events_raw',
             'v_event_summary',
+            'car_inventory_raw',
+            'v_car_inventory_summary',
             'prometheus_samples',
             'v_prometheus_metric_summary',
             'v_prometheus_targets'
