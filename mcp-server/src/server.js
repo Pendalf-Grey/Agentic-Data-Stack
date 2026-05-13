@@ -43,7 +43,7 @@ const tools = [
   },
   {
     name: 'list_non_empty_analytics_tables',
-    description: 'List only real non-empty tables in the ClickHouse analytics database. Use this when the user asks for non-empty ClickHouse tables. Do not infer tables from Prometheus metric names.',
+    description: 'Live authoritative list of real non-empty tables in the ClickHouse analytics database. Use this every time the user asks which ClickHouse tables are non-empty. Return only the rows from this tool; do not answer from memory and do not use Prometheus metric tools for table inventory.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -640,14 +640,7 @@ async function handleRpc(payload) {
         ORDER BY database, name
       `);
       return jsonRpc(id, {
-        content: [{
-          type: 'text',
-          text: [
-            'These are real non-empty ClickHouse tables in database analytics.',
-            'Prometheus metric names such as synthetic_log_events_total are values inside analytics.prometheus_samples, not tables.',
-            JSON.stringify(rows, null, 2),
-          ].join('\n'),
-        }],
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
       });
     }
 

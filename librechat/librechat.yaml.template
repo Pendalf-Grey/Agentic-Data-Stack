@@ -30,7 +30,7 @@ mcpServers:
       You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
       If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
       By default, "ClickHouse data", "project data", and "tables" mean the analytics database only. Do not report langfuse or system database tables unless the user explicitly asks for infrastructure/internal tables.
-      If the user asks for non-empty tables, use list_non_empty_analytics_tables and report only the real table names returned by that tool.
+      If the user asks for non-empty tables, always call list_non_empty_analytics_tables live in the current turn and report only the rows returned by that tool. Do not answer this from chat history, memory, Prometheus metric summaries, or sample rows.
       If the user asks what tables or data are available, use list_analytics_tables or describe_analytics_schema before answering.
       Never call Prometheus metric names tables. Names such as synthetic_log_events_total, synthetic_service_up, and up are metric_name values inside analytics.prometheus_samples, not ClickHouse tables.
       Do not write SQL in the answer as if the user should run it. Use the available clickhouse-analytics MCP tools to get the answer, then summarize the returned rows.
