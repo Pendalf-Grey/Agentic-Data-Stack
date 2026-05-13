@@ -28,6 +28,20 @@ const tools = [
     },
   },
   {
+    name: 'list_analytics_tables',
+    description: 'List tables and views in the ClickHouse analytics database, including row and size estimates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_empty: {
+          type: 'boolean',
+          description: 'Include empty analytics tables.',
+          default: true,
+        },
+      },
+    },
+  },
+  {
     name: 'sample_app_events',
     description: 'Return recent rows migrated from PostgreSQL to ClickHouse by Debezium.',
     inputSchema: {
@@ -528,6 +542,17 @@ async function runQuery(query) {
   return result.json();
 }
 
+async function runUserQuery(query) {
+  const normalized = query.trim().replace(/;+$/, '');
+  if (/\b(system|information_schema|INFORMATION_SCHEMA|langfuse)\s*\./i.test(normalized)) {
+    throw new Error('Generic queries are limited to the analytics database. Use analytics tables/views or a purpose-built tool.');
+  }
+  if (/\bFROM\s+(?!analytics\.|\()/i.test(normalized) || /\bJOIN\s+(?!analytics\.|\()/i.test(normalized)) {
+    throw new Error('Use fully qualified analytics.* tables/views in run_readonly_query.');
+  }
+  return runQuery(normalized);
+}
+
 async function handleRpc(payload) {
   const { id, method, params } = payload;
 
@@ -565,6 +590,25 @@ async function handleRpc(payload) {
             'v_prometheus_targets'
           )
         ORDER BY table, position
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'list_analytics_tables') {
+      const includeEmpty = args.include_empty !== false;
+      const rows = await runQuery(`
+        SELECT
+          database,
+          name AS table,
+          engine,
+          total_rows AS rows,
+          formatReadableSize(total_bytes) AS bytes
+        FROM system.tables
+        WHERE database = 'analytics'
+          ${includeEmpty ? '' : 'AND ifNull(total_rows, 0) > 0'}
+        ORDER BY database, name
       `);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
@@ -842,7 +886,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'run_readonly_query') {
-      const rows = await runQuery(args.query);
+      const rows = await runUserQuery(args.query);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
       });

@@ -29,7 +29,8 @@ mcpServers:
     serverInstructions: |
       You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
       If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
-      If the user asks what tables or data are available, use describe_analytics_schema or run_readonly_query to check ClickHouse before answering.
+      By default, "ClickHouse data", "project data", and "tables" mean the analytics database only. Do not report langfuse or system database tables unless the user explicitly asks for infrastructure/internal tables.
+      If the user asks what tables or data are available, use list_analytics_tables or describe_analytics_schema before answering.
       Use these tools when the user asks about application events, logs, users, routes, latency, errors, model usage, token usage, cost, or data migrated through Debezium.
       Use these tools when the user asks about Prometheus metrics, targets, samples, incidents, synthetic monitoring data, or data in ClickHouse.
       The primary ClickHouse objects are analytics.app_events_raw for raw migrated events and analytics.v_event_summary for hourly aggregates.
@@ -39,4 +40,4 @@ mcpServers:
       When the user asks to visualize, plot, chart, graph, draw, or show trends, use visualize_event_volume, visualize_route_performance, or visualize_model_usage.
       Visualization tools return a browser-ready Grafana short URL and a fallback panel URL. Include the browserShortUrl exactly in your answer, then explain the chart from the returned rows.
       Never rewrite Grafana links, never invent d-solo URLs, and never use made-up dashboard UIDs. The user's browser must use http://localhost:3001. Do not use grafana:3000, grafana-server:3000, or localhost:3000.
-      Use run_readonly_query only for SELECT queries. Prefer grouped aggregations and explicit LIMIT clauses for exploratory analysis.
+      Use run_readonly_query only for SELECT queries against analytics.* tables/views. Prefer grouped aggregations and explicit LIMIT clauses for exploratory analysis.
