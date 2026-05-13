@@ -242,15 +242,6 @@ async function clickHouseSchema() {
       type
     FROM system.columns
     WHERE database = 'analytics'
-      AND table IN (
-        'app_events_raw',
-        'car_inventory_raw',
-        'prometheus_samples',
-        'v_event_summary',
-        'v_car_inventory_summary',
-        'v_prometheus_metric_summary',
-        'v_prometheus_targets'
-      )
     ORDER BY table, position
     FORMAT JSONEachRow
   `);
@@ -278,14 +269,6 @@ function formatTableRows(title, rows) {
   ].join('\n');
 }
 
-function tablePurpose(table) {
-  return {
-    app_events_raw: 'старые демо-события приложения из Debezium/PostgreSQL',
-    car_inventory_raw: 'демо-инвентарь автомобилей из PostgreSQL: склады, города, бренды, модели, цены, статусы',
-    prometheus_samples: 'Prometheus samples; metric_name хранится внутри строк, это не отдельные таблицы',
-  }[table] || 'таблица analytics';
-}
-
 async function clickHouseInventoryAnswer({ nonEmptyOnly }) {
   const rows = await clickHouseTables(!nonEmptyOnly);
   const title = nonEmptyOnly
@@ -295,10 +278,7 @@ async function clickHouseInventoryAnswer({ nonEmptyOnly }) {
   return [
     body,
     '',
-    'Что есть что:',
-    ...rows.map((row) => `- \`${row.table}\`: ${tablePurpose(row.table)}`),
-    '',
-    'Это live-ответ из ClickHouse через agent-proxy. Модель не строила догадки.',
+    'Это live-ответ из ClickHouse через agent-proxy. Список таблиц, строки, размеры и движки взяты из system.tables.',
   ].join('\n');
 }
 
