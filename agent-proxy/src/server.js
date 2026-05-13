@@ -113,7 +113,7 @@ function isClickHouseQuestion(text) {
 function asksForTables(text) {
   const normalized = text.toLowerCase();
   const mentionsTables = /таблиц|table/.test(normalized);
-  const asksDataInventory = /что\s+(есть|лежит)|какие\s+(есть\s+)?данн|что\s+в\s+(бд|базе)/.test(normalized);
+  const asksDataInventory = /что\s+(есть|лежит|содерж)|что\s+.*содерж|что\s+внутри|какие\s+(есть\s+)?данн|что\s+в\s+(бд|базе)/.test(normalized);
   return mentionsTables || asksDataInventory;
 }
 
@@ -371,17 +371,27 @@ async function answerFromClickHouseRows(body, userText, plan, rows) {
 }
 
 async function clickHouseQuestionAnswer(body, userText) {
-  const schemaRows = await clickHouseSchema();
-  const plan = await planClickHouseQuery(body, userText, schemaRows);
-  const rows = await queryClickHouseRows(`${plan.query}\nFORMAT JSONEachRow`);
-  const answer = await answerFromClickHouseRows(body, userText, plan, rows);
-  return answer || [
-    'ClickHouse вернул результат:',
-    '',
-    JSON.stringify(rows, null, 2),
-    '',
-    `SQL: ${plan.query}`,
-  ].join('\n');
+  try {
+    const schemaRows = await clickHouseSchema();
+    const plan = await planClickHouseQuery(body, userText, schemaRows);
+    const rows = await queryClickHouseRows(`${plan.query}\nFORMAT JSONEachRow`);
+    const answer = await answerFromClickHouseRows(body, userText, plan, rows);
+    return answer || [
+      'ClickHouse вернул результат:',
+      '',
+      JSON.stringify(rows, null, 2),
+      '',
+      `SQL: ${plan.query}`,
+    ].join('\n');
+  } catch (error) {
+    return [
+      'Не буду строить догадки по ClickHouse.',
+      '',
+      `Не удалось построить и выполнить безопасный live-запрос: ${error.message}`,
+      '',
+      'Можно спросить про таблицы, схему, строки, агрегаты или значения колонок в `analytics.*`; agent-proxy выполнит только read-only SELECT.',
+    ].join('\n');
+  }
 }
 
 async function clickHouseGuardedAnswer(body, text) {
