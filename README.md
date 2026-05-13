@@ -27,7 +27,7 @@ prometheus-synthetic-lab/README.md
 Он нужен, когда миграцию надо запускать не сразу, а в определенное **время**, **день недели** или по регулярному расписанию. В этом проекте Airflow запускает DAG `scheduled_debezium_migration`, который регистрирует или обновляет Debezium connectors.
 
 В других проектах Airflow чаще всего используют для ETL/ELT-процессов: загрузить данные, преобразовать, проверить качество, запустить отчет, отправить уведомление.
-
+___
 **Debezium** — CDC-инструмент.
 
 CDC означает Change Data Capture. Это способ читать изменения из БД: новые строки, обновления и удаления. Debezium читает журнал изменений source-БД и отправляет события дальше.
@@ -44,31 +44,31 @@ CDC означает Change Data Capture. Это способ читать из�
 - `sh tools/prometheus-batch-to-clickhouse.sh` — выполняет пакетную загрузку истории через Prometheus HTTP API `query_range`.
 
 В других проектах такой connector используют, когда Prometheus хорош для scraping и alerting, а ClickHouse нужен для долгого хранения, дешевой аналитики и запросов через LLM.
-
+___
 **Redpanda** — Kafka-compatible брокер сообщений.
 
 Здесь он работает как транспорт между Debezium и ClickHouse sink connector. Debezium пишет изменения в **topic**, а ClickHouse sink читает этот **topic**.
 
 В других проектах Redpanda или Kafka обычно используют как надежную “шину событий” между сервисами.
-
+___
 **ClickHouse** — аналитическая БД.
 
 Она хранит данные в формате, удобном для быстрых агрегатов: count, group by, latency, error rate, временные ряды.
 
 В других проектах ClickHouse часто используют для логов, продуктовой аналитики, метрик, observability и дешевых быстрых отчетов по большим объемам данных.
-
+___
 **Grafana** — интерфейс для графиков.
 
 Она читает данные из ClickHouse и показывает dashboards. В этом проекте MCP tools возвращают ссылки на Grafana, чтобы модель не пыталась рисовать SVG-картинки внутри LibreChat.
 
 В других проектах Grafana обычно используют для мониторинга, алертов, метрик и операционных dashboards.
-
+___
 **LibreChat** — web UI для общения с моделью.
 
 В этом проекте LibreChat подключен к локальной или облачной OpenAI-compatible модели через `agent-proxy`. Также LibreChat видит MCP tools и может просить их анализировать ClickHouse.
 
 В других проектах LibreChat часто используют как единый чат-интерфейс к нескольким LLM providers.
-
+___
 **Langfuse** — observability-платформа для LLM.
 
 **Observability** означает наблюдаемость: мы видим не только итоговый ответ модели, но и trace запроса, latency, model name, input, output, usage tokens и ошибки.
@@ -76,7 +76,7 @@ CDC означает Change Data Capture. Это способ читать из�
 В этом проекте Langfuse получает traces от `agent-proxy`. LibreChat отправляет запрос в `agent-proxy`, `agent-proxy` вызывает локальную или облачную модель и параллельно отправляет trace в Langfuse.
 
 В других проектах Langfuse часто используют для debugging LLM-приложений, оценки качества ответов, анализа стоимости, prompt management и поиска “почему модель ответила именно так”.
-
+___
 **MCP server** — мост между моделью и инструментами.
 
 MCP означает Model Context Protocol. Это способ дать модели безопасные tools: посмотреть схему ClickHouse, выполнить read-only запрос, получить ссылку на Grafana panel.
