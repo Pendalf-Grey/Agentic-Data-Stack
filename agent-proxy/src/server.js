@@ -110,24 +110,6 @@ function isClickHouseQuestion(text) {
   return /clickhouse|кликхаус|кликхауз|клик хаус/.test(normalized);
 }
 
-function asksForTables(text) {
-  const normalized = text.toLowerCase();
-  const mentionsTables = /таблиц|table/.test(normalized);
-  const asksDataInventory = /что\s+(есть|лежит|содерж)|что\s+.*содерж|что\s+внутри|какие\s+(есть\s+)?данн|что\s+в\s+(бд|базе)/.test(normalized);
-  return mentionsTables || asksDataInventory;
-}
-
-function asksForNonEmptyTables(text) {
-  const normalized = text.toLowerCase();
-  const mentionsNonEmpty = /не\s*пуст|непуст|non[-\s]?empty|with\s+data|с\s+данн/.test(normalized);
-  return asksForTables(text) && mentionsNonEmpty;
-}
-
-function asksForSchema(text) {
-  const normalized = text.toLowerCase();
-  return /схем|колон|столбц|column|schema|describe/.test(normalized);
-}
-
 function stripCodeFence(text) {
   return text
     .replace(/^```(?:json|sql)?\s*/i, '')
@@ -140,10 +122,16 @@ function parseJsonObject(text) {
   try {
     return JSON.parse(cleaned);
   } catch {
+    try {
+      return JSON.parse(cleaned.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']'));
+    } catch {
+      // Continue to extracting the first object below.
+    }
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      return JSON.parse(cleaned.slice(start, end + 1));
+      const objectText = cleaned.slice(start, end + 1).replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
+      return JSON.parse(objectText);
     }
     throw new Error(`Model did not return a JSON object: ${text}`);
   }
@@ -184,14 +172,26 @@ function validateReadOnlyAnalyticsQuery(query) {
   if (!/^select\b/i.test(normalized)) {
     throw new Error('Only SELECT queries are allowed for ClickHouse questions.');
   }
-  if (/\b(insert|update|delete|alter|drop|truncate|create|grant|revoke|optimize|attach|detach|system)\b/i.test(normalized)) {
+  if (/\b(insert|update|delete|alter|drop|truncate|create|grant|revoke|optimize|attach|detach)\b/i.test(normalized)) {
     throw new Error('Only read-only SELECT queries are allowed for ClickHouse questions.');
   }
-  if (/\b(system|information_schema|INFORMATION_SCHEMA|langfuse)\s*\./i.test(normalized)) {
-    throw new Error('ClickHouse content questions are limited to the analytics database.');
+  if (/\b(information_schema|INFORMATION_SCHEMA|langfuse)\s*\./i.test(normalized)) {
+    throw new Error('ClickHouse questions are limited to analytics data and analytics metadata.');
   }
-  if (/\bFROM\s+(?!analytics\.|\()/i.test(normalized) || /\bJOIN\s+(?!analytics\.|\()/i.test(normalized)) {
-    throw new Error('ClickHouse queries must use fully qualified analytics.* tables/views.');
+
+  const referencesSystem = /\bsystem\s*\./i.test(normalized);
+  if (referencesSystem) {
+    if (/\bsystem\s*\.(?!tables\b|columns\b)/i.test(normalized)) {
+      throw new Error('Only system.tables and system.columns metadata are allowed.');
+    }
+    if (!/\bdatabase\s*=\s*'analytics'/i.test(normalized)) {
+      throw new Error("Metadata queries must include database = 'analytics'.");
+    }
+  }
+
+  if (/\bFROM\s+(?!analytics\.|system\.(?:tables|columns)\b|\()/i.test(normalized)
+    || /\bJOIN\s+(?!analytics\.|system\.(?:tables|columns)\b|\()/i.test(normalized)) {
+    throw new Error('ClickHouse queries must use fully qualified analytics.* tables/views or allowed system metadata.');
   }
   return normalized;
 }
@@ -215,23 +215,6 @@ async function callUpstreamJson(body) {
     throw new Error(`Upstream returned HTTP ${response.status}: ${JSON.stringify(data)}`);
   }
   return data;
-}
-
-async function clickHouseTables(includeEmpty) {
-  return queryClickHouseRows(`
-    SELECT
-      database,
-      name AS table,
-      engine,
-      total_rows AS rows,
-      formatReadableSize(total_bytes) AS bytes
-    FROM system.tables
-    WHERE database = 'analytics'
-      AND engine NOT LIKE '%View'
-      ${includeEmpty ? '' : 'AND ifNull(total_rows, 0) > 0'}
-    ORDER BY database, name
-    FORMAT JSONEachRow
-  `);
 }
 
 async function clickHouseSchema() {
@@ -258,87 +241,81 @@ function schemaPrompt(rows) {
   return Array.from(grouped, ([table, columns]) => `analytics.${table}(${columns.join(', ')})`).join('\n');
 }
 
-function formatTableRows(title, rows) {
-  if (rows.length === 0) {
-    return `${title}\n\nНет таблиц.`;
-  }
-  return [
-    title,
-    '',
-    ...rows.map((row) => `- \`${row.database}.${row.table}\` — ${row.rows} строк, ${row.bytes}, engine: ${row.engine}`),
-  ].join('\n');
-}
+async function planClickHouseQuery(body, userText, schemaRows, repair = null) {
+  const repairPrompt = repair
+    ? [
+      '',
+      'Previous query failed. Build a corrected query using the schema.',
+      `Failed query: ${repair.query}`,
+      `ClickHouse error: ${repair.error}`,
+    ].join('\n')
+    : '';
+  const messages = [
+    {
+      role: 'system',
+      content: [
+        'You translate user questions into one safe ClickHouse SQL SELECT.',
+        'Return only compact valid JSON with keys: query, intent.',
+        'Do not use Markdown. Do not add comments. Do not use trailing commas.',
+        'Use analytics.* tables and views shown in the schema for data questions.',
+        "For inventory/schema questions, use only system.tables or system.columns and always include database = 'analytics'.",
+        "For view/list of views questions, use system.tables with database = 'analytics' and engine LIKE '%View%'.",
+        'Use fully qualified table names.',
+        'Do not use INSERT, UPDATE, DELETE, ALTER, DROP, TRUNCATE, CREATE, information_schema, langfuse, or multiple statements.',
+        'For exploratory content questions, include a sensible LIMIT unless the query is aggregate or DISTINCT.',
+        'Examples:',
+        'User: "что содержится в ClickHouse" -> {"query":"SELECT database, name AS table, engine, total_rows AS rows, formatReadableSize(total_bytes) AS bytes FROM system.tables WHERE database = \'analytics\' ORDER BY name","intent":"analytics inventory"}',
+        'User: "какие непустые таблицы в кликхаус" -> {"query":"SELECT database, name AS table, engine, total_rows AS rows, formatReadableSize(total_bytes) AS bytes FROM system.tables WHERE database = \'analytics\' AND engine NOT LIKE \'%View\' AND ifNull(total_rows, 0) > 0 ORDER BY name","intent":"non-empty analytics tables"}',
+        'User: "какие представления есть в ClickHouse" -> {"query":"SELECT database, name AS view, engine FROM system.tables WHERE database = \'analytics\' AND engine LIKE \'%View%\' ORDER BY name","intent":"analytics views"}',
+        'User: "какая схема в ClickHouse" -> {"query":"SELECT table, name, type FROM system.columns WHERE database = \'analytics\' ORDER BY table, position","intent":"analytics schema"}',
+        'User: "найди все уникальные марки машин" -> {"query":"SELECT DISTINCT brand FROM analytics.car_inventory_raw ORDER BY brand","intent":"unique car brands"}',
+        'User: "сколько машин по городам" -> {"query":"SELECT city, count() AS cars FROM analytics.car_inventory_raw GROUP BY city ORDER BY city","intent":"cars by city"}',
+        'User: "сколько доступных машин по брендам" -> {"query":"SELECT brand, sum(available_cars) AS available_cars FROM analytics.v_car_inventory_summary GROUP BY brand ORDER BY brand","intent":"available cars by brand"}',
+        'User: "сколько машин сейчас в maintenance" -> {"query":"SELECT count() AS maintenance_cars FROM analytics.car_inventory_raw WHERE stock_status = \'maintenance\'","intent":"maintenance cars"}',
+        'User: "сколько Toyota в Tokyo" -> {"query":"SELECT count() AS cars FROM analytics.car_inventory_raw WHERE brand = \'Toyota\' AND city = \'Tokyo\'","intent":"Toyota cars in Tokyo"}',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: [
+        'ClickHouse analytics schema:',
+        schemaPrompt(schemaRows),
+        '',
+        `User question: ${userText}`,
+        repairPrompt,
+      ].join('\n'),
+    },
+  ];
 
-async function clickHouseInventoryAnswer({ nonEmptyOnly }) {
-  const rows = await clickHouseTables(!nonEmptyOnly);
-  const title = nonEmptyOnly
-    ? 'Непустые таблицы в ClickHouse database `analytics`:'
-    : 'Таблицы в ClickHouse database `analytics`:';
-  const body = formatTableRows(title, rows);
-  return [
-    body,
-    '',
-    'Это live-ответ из ClickHouse через agent-proxy. Список таблиц, строки, размеры и движки взяты из system.tables.',
-  ].join('\n');
-}
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const data = await callUpstreamJson({
+      model: body.model,
+      messages,
+    });
 
-async function clickHouseSchemaAnswer() {
-  const rows = await clickHouseSchema();
-  const grouped = new Map();
-  for (const row of rows) {
-    if (!grouped.has(row.table)) {
-      grouped.set(row.table, []);
-    }
-    grouped.get(row.table).push(`${row.name} ${row.type}`);
-  }
-  return [
-    'Схема объектов ClickHouse `analytics`:',
-    '',
-    ...Array.from(grouped, ([table, columns]) => `- \`${table}\`: ${columns.join(', ')}`),
-    '',
-    'Это live-ответ из ClickHouse через agent-proxy. Модель не строила догадки.',
-  ].join('\n');
-}
-
-async function planClickHouseQuery(body, userText, schemaRows) {
-  const data = await callUpstreamJson({
-    model: body.model,
-    messages: [
-      {
-        role: 'system',
-        content: [
-          'You translate user questions into one safe ClickHouse SQL SELECT.',
-          'Return only compact JSON with keys: query, intent.',
-          'Use only analytics.* tables and views shown in the schema.',
-          'Use fully qualified table names.',
-          'Do not use INSERT, UPDATE, DELETE, ALTER, DROP, TRUNCATE, CREATE, system.*, information_schema, langfuse, or multiple statements.',
-          'For exploratory content questions, include a sensible LIMIT unless the query is aggregate or DISTINCT.',
-          'Examples:',
-          'User: "найди все уникальные марки машин" -> {"query":"SELECT DISTINCT brand FROM analytics.car_inventory_raw ORDER BY brand","intent":"unique car brands"}',
-          'User: "сколько машин по городам" -> {"query":"SELECT city, count() AS cars FROM analytics.car_inventory_raw GROUP BY city ORDER BY city","intent":"cars by city"}',
-        ].join('\n'),
-      },
-      {
+    const content = extractCompletionText(data);
+    try {
+      const plan = parseJsonObject(content);
+      if (!plan?.query || typeof plan.query !== 'string') {
+        throw new Error(`Model did not return a query: ${content}`);
+      }
+      return {
+        query: validateReadOnlyAnalyticsQuery(plan.query),
+        intent: typeof plan.intent === 'string' ? plan.intent : 'ClickHouse data question',
+      };
+    } catch (error) {
+      if (attempt === 1) {
+        throw error;
+      }
+      messages.push({ role: 'assistant', content });
+      messages.push({
         role: 'user',
-        content: [
-          'ClickHouse analytics schema:',
-          schemaPrompt(schemaRows),
-          '',
-          `User question: ${userText}`,
-        ].join('\n'),
-      },
-    ],
-  });
-
-  const content = extractCompletionText(data);
-  const plan = parseJsonObject(content);
-  if (!plan?.query || typeof plan.query !== 'string') {
-    throw new Error(`Model did not return a query: ${content}`);
+        content: 'Your previous response was not valid compact JSON. Return only valid JSON with exactly keys "query" and "intent".',
+      });
+    }
   }
-  return {
-    query: validateReadOnlyAnalyticsQuery(plan.query),
-    intent: typeof plan.intent === 'string' ? plan.intent : 'ClickHouse data question',
-  };
+
+  throw new Error('Model did not return a valid ClickHouse query plan.');
 }
 
 async function answerFromClickHouseRows(body, userText, plan, rows) {
@@ -349,6 +326,7 @@ async function answerFromClickHouseRows(body, userText, plan, rows) {
         role: 'system',
         content: [
           'Answer the user in Russian.',
+          'Use only Russian language except SQL/table/column names and literal values from the query result.',
           'Use only the provided ClickHouse query result rows.',
           'Do not add facts that are not present in the rows.',
           'Do not mention that you cannot access the database; the query has already been executed.',
@@ -373,8 +351,17 @@ async function answerFromClickHouseRows(body, userText, plan, rows) {
 async function clickHouseQuestionAnswer(body, userText) {
   try {
     const schemaRows = await clickHouseSchema();
-    const plan = await planClickHouseQuery(body, userText, schemaRows);
-    const rows = await queryClickHouseRows(`${plan.query}\nFORMAT JSONEachRow`);
+    let plan = await planClickHouseQuery(body, userText, schemaRows);
+    let rows;
+    try {
+      rows = await queryClickHouseRows(`${plan.query}\nFORMAT JSONEachRow`);
+    } catch (error) {
+      plan = await planClickHouseQuery(body, userText, schemaRows, {
+        query: plan.query,
+        error: error.message,
+      });
+      rows = await queryClickHouseRows(`${plan.query}\nFORMAT JSONEachRow`);
+    }
     const answer = await answerFromClickHouseRows(body, userText, plan, rows);
     return answer || [
       'ClickHouse вернул результат:',
@@ -397,15 +384,6 @@ async function clickHouseQuestionAnswer(body, userText) {
 async function clickHouseGuardedAnswer(body, text) {
   if (!isClickHouseQuestion(text)) {
     return null;
-  }
-  if (asksForSchema(text)) {
-    return clickHouseSchemaAnswer();
-  }
-  if (asksForNonEmptyTables(text)) {
-    return clickHouseInventoryAnswer({ nonEmptyOnly: true });
-  }
-  if (asksForTables(text)) {
-    return clickHouseInventoryAnswer({ nonEmptyOnly: false });
   }
   return clickHouseQuestionAnswer(body, text);
 }
