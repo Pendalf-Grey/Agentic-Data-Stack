@@ -4,6 +4,9 @@ import { randomUUID } from 'node:crypto';
 const port = Number(process.env.PORT || 3344);
 const upstreamBaseUrl = (process.env.UPSTREAM_OPENAI_BASE_URL || 'http://host.docker.internal:11434/v1').replace(/\/$/, '');
 const upstreamApiKey = process.env.UPSTREAM_OPENAI_API_KEY || 'local-dev-key';
+const clickhouseUrl = (process.env.CLICKHOUSE_HOST || 'http://clickhouse:8123').replace(/\/$/, '');
+const clickhouseUser = process.env.CLICKHOUSE_USER || 'analytics';
+const clickhousePassword = process.env.CLICKHOUSE_PASSWORD || 'analytics_password';
 const langfuseEnabled = (process.env.LANGFUSE_ENABLED || 'false').toLowerCase() === 'true';
 const langfuseBaseUrl = (process.env.LANGFUSE_BASE_URL || '').replace(/\/$/, '');
 const langfusePublicKey = process.env.LANGFUSE_PUBLIC_KEY || '';
@@ -77,6 +80,228 @@ function parseStreamingContent(chunk) {
       }
     })
     .join('');
+}
+
+function messageText(message) {
+  const content = message?.content;
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .filter(Boolean)
+      .join('\n');
+  }
+  return '';
+}
+
+function latestUserText(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      return messageText(messages[index]);
+    }
+  }
+  return '';
+}
+
+function isClickHouseQuestion(text) {
+  const normalized = text.toLowerCase();
+  return /clickhouse|кликхаус|кликхауз|клик хаус/.test(normalized);
+}
+
+function asksForTables(text) {
+  const normalized = text.toLowerCase();
+  const mentionsTables = /таблиц|table/.test(normalized);
+  const asksDataInventory = /что\s+(есть|лежит)|какие\s+(есть\s+)?данн|что\s+в\s+(бд|базе)/.test(normalized);
+  return mentionsTables || asksDataInventory;
+}
+
+function asksForNonEmptyTables(text) {
+  const normalized = text.toLowerCase();
+  const mentionsNonEmpty = /не\s*пуст|непуст|non[-\s]?empty|with\s+data|с\s+данн/.test(normalized);
+  return asksForTables(text) && mentionsNonEmpty;
+}
+
+function asksForSchema(text) {
+  const normalized = text.toLowerCase();
+  return /схем|колон|столбц|column|schema|describe/.test(normalized);
+}
+
+async function queryClickHouseRows(query) {
+  const response = await fetch(clickhouseUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clickhouseUser}:${clickhousePassword}`).toString('base64')}`,
+      'Content-Type': 'text/plain; charset=utf-8',
+    },
+    body: query,
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`ClickHouse returned HTTP ${response.status}: ${text}`);
+  }
+
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+async function clickHouseTables(includeEmpty) {
+  return queryClickHouseRows(`
+    SELECT
+      database,
+      name AS table,
+      engine,
+      total_rows AS rows,
+      formatReadableSize(total_bytes) AS bytes
+    FROM system.tables
+    WHERE database = 'analytics'
+      AND engine NOT LIKE '%View'
+      ${includeEmpty ? '' : 'AND ifNull(total_rows, 0) > 0'}
+    ORDER BY database, name
+    FORMAT JSONEachRow
+  `);
+}
+
+async function clickHouseSchema() {
+  return queryClickHouseRows(`
+    SELECT
+      table,
+      name,
+      type
+    FROM system.columns
+    WHERE database = 'analytics'
+      AND table IN (
+        'app_events_raw',
+        'car_inventory_raw',
+        'prometheus_samples',
+        'v_event_summary',
+        'v_car_inventory_summary',
+        'v_prometheus_metric_summary',
+        'v_prometheus_targets'
+      )
+    ORDER BY table, position
+    FORMAT JSONEachRow
+  `);
+}
+
+function formatTableRows(title, rows) {
+  if (rows.length === 0) {
+    return `${title}\n\nНет таблиц.`;
+  }
+  return [
+    title,
+    '',
+    ...rows.map((row) => `- \`${row.database}.${row.table}\` — ${row.rows} строк, ${row.bytes}, engine: ${row.engine}`),
+  ].join('\n');
+}
+
+function tablePurpose(table) {
+  return {
+    app_events_raw: 'старые демо-события приложения из Debezium/PostgreSQL',
+    car_inventory_raw: 'демо-инвентарь автомобилей из PostgreSQL: склады, города, бренды, модели, цены, статусы',
+    prometheus_samples: 'Prometheus samples; metric_name хранится внутри строк, это не отдельные таблицы',
+  }[table] || 'таблица analytics';
+}
+
+async function clickHouseInventoryAnswer({ nonEmptyOnly }) {
+  const rows = await clickHouseTables(!nonEmptyOnly);
+  const title = nonEmptyOnly
+    ? 'Непустые таблицы в ClickHouse database `analytics`:'
+    : 'Таблицы в ClickHouse database `analytics`:';
+  const body = formatTableRows(title, rows);
+  return [
+    body,
+    '',
+    'Что есть что:',
+    ...rows.map((row) => `- \`${row.table}\`: ${tablePurpose(row.table)}`),
+    '',
+    'Это live-ответ из ClickHouse через agent-proxy. Модель не строила догадки.',
+  ].join('\n');
+}
+
+async function clickHouseSchemaAnswer() {
+  const rows = await clickHouseSchema();
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.table)) {
+      grouped.set(row.table, []);
+    }
+    grouped.get(row.table).push(`${row.name} ${row.type}`);
+  }
+  return [
+    'Схема объектов ClickHouse `analytics`:',
+    '',
+    ...Array.from(grouped, ([table, columns]) => `- \`${table}\`: ${columns.join(', ')}`),
+    '',
+    'Это live-ответ из ClickHouse через agent-proxy. Модель не строила догадки.',
+  ].join('\n');
+}
+
+async function clickHouseGuardedAnswer(text) {
+  if (!isClickHouseQuestion(text)) {
+    return null;
+  }
+  if (asksForSchema(text)) {
+    return clickHouseSchemaAnswer();
+  }
+  if (asksForNonEmptyTables(text)) {
+    return clickHouseInventoryAnswer({ nonEmptyOnly: true });
+  }
+  if (asksForTables(text)) {
+    return clickHouseInventoryAnswer({ nonEmptyOnly: false });
+  }
+  return [
+    'Я не буду строить догадки по ClickHouse.',
+    '',
+    'Для этого вопроса нужен live-запрос к данным. Сейчас agent-proxy гарантированно отвечает без догадок на:',
+    '- какие таблицы есть в ClickHouse',
+    '- какие таблицы непустые',
+    '- какая схема/колонки у объектов analytics',
+    '',
+    'Сформулируйте вопрос в одном из этих видов, и ответ будет получен напрямую из ClickHouse.',
+  ].join('\n');
+}
+
+function completionResponse(body, content) {
+  return {
+    id: `chatcmpl-${randomUUID()}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: body.model || 'agentic-data-stack-direct-clickhouse',
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content },
+        finish_reason: 'stop',
+      },
+    ],
+    usage: {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    },
+  };
+}
+
+function sendStreamingCompletion(res, body, content) {
+  const id = `chatcmpl-${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const model = body.model || 'agentic-data-stack-direct-clickhouse';
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+  res.write('data: [DONE]\n\n');
+  res.end();
 }
 
 async function sendLangfuseTrace({ body, output, usage, startedAt, endedAt, status }) {
@@ -169,6 +394,26 @@ async function sendLangfuseTrace({ body, output, usage, startedAt, endedAt, stat
 async function proxyChatCompletions(req, res) {
   const body = await readBody(req);
   const startedAt = new Date().toISOString();
+
+  const guardedClickHouseAnswer = await clickHouseGuardedAnswer(latestUserText(body.messages));
+  if (guardedClickHouseAnswer) {
+    const output = guardedClickHouseAnswer;
+    if (body.stream) {
+      sendStreamingCompletion(res, body, output);
+    } else {
+      sendJson(res, 200, completionResponse(body, output));
+    }
+    void sendLangfuseTrace({
+      body,
+      output,
+      usage: { input: 0, output: 0, total: 0, unit: 'TOKENS' },
+      startedAt,
+      endedAt: new Date().toISOString(),
+      status: 200,
+    });
+    return;
+  }
+
   const upstream = await fetch(`${upstreamBaseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
