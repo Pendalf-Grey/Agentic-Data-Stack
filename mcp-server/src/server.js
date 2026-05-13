@@ -29,7 +29,7 @@ const tools = [
   },
   {
     name: 'list_analytics_tables',
-    description: 'List tables and views in the ClickHouse analytics database, including row and size estimates.',
+    description: 'List real tables and views in the ClickHouse analytics database, including row and size estimates. This returns table names only, not Prometheus metric_name values.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -39,6 +39,14 @@ const tools = [
           default: true,
         },
       },
+    },
+  },
+  {
+    name: 'list_non_empty_analytics_tables',
+    description: 'List only real non-empty tables in the ClickHouse analytics database. Use this when the user asks for non-empty ClickHouse tables. Do not infer tables from Prometheus metric names.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
     },
   },
   {
@@ -612,6 +620,32 @@ async function handleRpc(payload) {
       `);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'list_non_empty_analytics_tables') {
+      const rows = await runQuery(`
+        SELECT
+          database,
+          name AS table,
+          engine,
+          total_rows AS rows,
+          formatReadableSize(total_bytes) AS bytes
+        FROM system.tables
+        WHERE database = 'analytics'
+          AND engine NOT LIKE '%View'
+          AND ifNull(total_rows, 0) > 0
+        ORDER BY database, name
+      `);
+      return jsonRpc(id, {
+        content: [{
+          type: 'text',
+          text: [
+            'These are real non-empty ClickHouse tables in database analytics.',
+            'Prometheus metric names such as synthetic_log_events_total are values inside analytics.prometheus_samples, not tables.',
+            JSON.stringify(rows, null, 2),
+          ].join('\n'),
+        }],
       });
     }
 

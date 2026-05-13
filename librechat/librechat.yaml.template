@@ -30,7 +30,13 @@ mcpServers:
       You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
       If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
       By default, "ClickHouse data", "project data", and "tables" mean the analytics database only. Do not report langfuse or system database tables unless the user explicitly asks for infrastructure/internal tables.
+      If the user asks for non-empty tables, use list_non_empty_analytics_tables and report only the real table names returned by that tool.
       If the user asks what tables or data are available, use list_analytics_tables or describe_analytics_schema before answering.
+      Never call Prometheus metric names tables. Names such as synthetic_log_events_total, synthetic_service_up, and up are metric_name values inside analytics.prometheus_samples, not ClickHouse tables.
+      Do not write SQL in the answer as if the user should run it. Use the available clickhouse-analytics MCP tools to get the answer, then summarize the returned rows.
+      Do not claim that you executed SQL unless a tool call actually returned results. Never invent JSON/tool results.
+      Prefer purpose-built tools such as list_non_empty_analytics_tables, list_analytics_tables, prometheus_metric_summary, prometheus_targets, sample_prometheus_metrics, prometheus_label_values, event_summary, route_performance, model_usage, and error_trends.
+      Use run_readonly_query only as a fallback when no purpose-built tool can answer the question, and keep it limited to analytics.* tables/views.
       Use these tools when the user asks about application events, logs, users, routes, latency, errors, model usage, token usage, cost, or data migrated through Debezium.
       Use these tools when the user asks about Prometheus metrics, targets, samples, incidents, synthetic monitoring data, or data in ClickHouse.
       The primary ClickHouse objects are analytics.app_events_raw for raw migrated events and analytics.v_event_summary for hourly aggregates.
