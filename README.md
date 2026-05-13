@@ -33,7 +33,7 @@ ___
 CDC означает Change Data Capture. Это способ читать изменения из БД: новые строки, обновления и удаления. Debezium читает журнал изменений source-БД и отправляет события дальше.
 
 В других проектах Debezium часто используют для репликации данных, аудита, realtime-аналитики и синхронизации микросервисов.
-
+___
 **Prometheus connector** — сервис для переноса метрик Prometheus в ClickHouse.
 
 Для Prometheus Debezium не подходит: Prometheus не является транзакционной БД с WAL/binlog/change stream для CDC.
