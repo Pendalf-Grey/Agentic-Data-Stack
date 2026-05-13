@@ -27,8 +27,13 @@ mcpServers:
     url: http://mcp-server:3333/mcp
     timeout: 60000
     serverInstructions: |
+      You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
+      If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
+      If the user asks what tables or data are available, use describe_analytics_schema or run_readonly_query to check ClickHouse before answering.
       Use these tools when the user asks about application events, logs, users, routes, latency, errors, model usage, token usage, cost, or data migrated through Debezium.
+      Use these tools when the user asks about Prometheus metrics, targets, samples, incidents, synthetic monitoring data, or data in ClickHouse.
       The primary ClickHouse objects are analytics.app_events_raw for raw migrated events and analytics.v_event_summary for hourly aggregates.
+      Prometheus metrics are stored in analytics.prometheus_samples, with summaries in analytics.v_prometheus_metric_summary and target health in analytics.v_prometheus_targets.
       Start with describe_analytics_schema when you need the available columns. Use sample_app_events for examples of raw migrated rows.
       Prefer the purpose-built tools route_performance, model_usage, error_trends, and event_summary for common analytical questions.
       When the user asks to visualize, plot, chart, graph, draw, or show trends, use visualize_event_volume, visualize_route_performance, or visualize_model_usage.
