@@ -44,6 +44,8 @@ docker compose up -d --build
 http://localhost:9095
 ```
 
+![Prometheus targets](../docs/images/img_15.png)
+
 В UI Prometheus можно сразу попробовать запрос:
 
 ```promql
@@ -249,56 +251,28 @@ PROMETHEUS_BACKFILL_STEP=60s
 PROMETHEUS_SOURCE_NAME=synthetic-prometheus-lab
 ```
 
-Запустите в Agentic-Data-Stack:
+Запустите потоковую загрузку в ClickHouse из корня Agentic-Data-Stack:
 
 ```bash
-docker compose up -d --build clickhouse prometheus-connector mcp-server
+sh tools/prometheus-stream-to-clickhouse.sh
 ```
 
-Сделайте backfill:
+Или выполните пакетную загрузку истории в ClickHouse:
 
 ```bash
-curl http://localhost:3355/backfill \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "queries": [
-      "synthetic_service_up",
-      "synthetic_incident_active",
-      "synthetic_log_events_total",
-      "synthetic_http_requests_total",
-      "synthetic_http_request_duration_seconds_p95",
-      "synthetic_db_connections",
-      "synthetic_db_query_duration_seconds_p95",
-      "synthetic_db_replication_lag_seconds",
-      "synthetic_db_disk_usage_ratio",
-      "synthetic_process_restarts_total"
-    ],
-    "start": "2026-05-08T00:00:00Z",
-    "end": "2026-05-11T00:00:00Z",
-    "step": "60s"
-  }'
+sh tools/prometheus-batch-to-clickhouse.sh
 ```
 
 Проверить в ClickHouse Agentic-Data-Stack:
 
 ```bash
-curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
-  --data-binary 'SELECT metric_name, count() FROM analytics.prometheus_samples GROUP BY metric_name ORDER BY metric_name'
+sh tools/clickhouse-tables.sh
 ```
 
-## Realtime Remote Write
-
-Если хотите, чтобы эта Prometheus БД сама отправляла новые samples в Agentic-Data-Stack, добавьте в `prometheus/prometheus.yml`:
-
-```yaml
-remote_write:
-  - url: http://host.docker.internal:3355/api/v1/write
-```
-
-После изменения config перезапустите:
+Для быстрой очистки ClickHouse analytics database:
 
 ```bash
-docker compose restart prometheus
+sh tools/clickhouse-clear.sh
 ```
 
 ## Что Спросить В LibreChat
@@ -308,6 +282,8 @@ docker compose restart prometheus
 ```text
 Проанализируй Prometheus targets: какие instance сейчас down?
 ```
+
+![LibreChat Prometheus answer](../docs/images/img_16.png)
 
 ```text
 Найди интервалы, где payment-service деградировал: сравни latency, 5xx и synthetic_log_events_total.

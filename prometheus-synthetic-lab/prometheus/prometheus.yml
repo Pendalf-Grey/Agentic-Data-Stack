@@ -13,3 +13,6 @@ scrape_configs:
           - synthetic-exporter:9201
         labels:
           source: synthetic-exporter
+
+remote_write:
+  - url: http://host.docker.internal:3355/api/v1/write

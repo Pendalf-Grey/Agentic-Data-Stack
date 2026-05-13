@@ -38,10 +38,10 @@ CDC означает Change Data Capture. Это способ читать из�
 
 Для Prometheus Debezium не подходит: Prometheus не является транзакционной БД с WAL/binlog/change stream для CDC.
 
-В этом проекте есть два режима:
+В этом проекте Prometheus переносится в ClickHouse двумя командами:
 
-- **backfill** — единоразово или по расписанию забрать историю через Prometheus HTTP API `query_range`;
-- **remote_write** — принимать новые samples почти в realtime через Prometheus remote write protocol.
+- `sh tools/prometheus-stream-to-clickhouse.sh` — включает потоковую загрузку через `remote_write`;
+- `sh tools/prometheus-batch-to-clickhouse.sh` — выполняет пакетную загрузку истории через Prometheus HTTP API `query_range`.
 
 В других проектах такой connector используют, когда Prometheus хорош для scraping и alerting, а ClickHouse нужен для долгого хранения, дешевой аналитики и запросов через LLM.
 
@@ -167,6 +167,8 @@ Prometheus будет доступен по адресу:
 http://localhost:9095
 ```
 
+![img_15.png](docs/images/img_15.png)
+
 Для подключения из Agentic-Data-Stack:
 
 ```env
@@ -179,7 +181,15 @@ PROMETHEUS_BASE_URL=http://host.docker.internal:9095
 prometheus-connector
 ```
 
-Потоковая выгрузка:
+Потоковая загрузка в ClickHouse одной командой:
+
+```bash
+sh tools/prometheus-stream-to-clickhouse.sh
+```
+
+Команда поднимает `clickhouse`, `prometheus-connector`, `mcp-server` и запускает synthetic lab Prometheus с уже подготовленным `remote_write`.
+
+Схема потока:
 
 ```text
 Prometheus remote_write
@@ -189,7 +199,21 @@ Prometheus remote_write
   -> LibreChat
 ```
 
-Историческая выгрузка:
+Пакетная загрузка истории в ClickHouse одной командой:
+
+```bash
+sh tools/prometheus-batch-to-clickhouse.sh
+```
+
+По умолчанию команда забирает последние 72 часа synthetic Prometheus metrics. Интервал можно переопределить без изменения кода:
+
+```bash
+PROMETHEUS_BACKFILL_START=2026-05-11T00:00:00Z \
+PROMETHEUS_BACKFILL_END=2026-05-11T01:00:00Z \
+sh tools/prometheus-batch-to-clickhouse.sh
+```
+
+Схема пакетной загрузки:
 
 ```text
 prometheus-connector /backfill
@@ -197,37 +221,28 @@ prometheus-connector /backfill
   -> ClickHouse analytics.prometheus_samples
 ```
 
-В `prometheus.yml` для realtime-режима добавьте:
-
-```yaml
-remote_write:
-  - url: http://prometheus-connector:3355/api/v1/write
-```
-
-Если Prometheus находится вне Docker network, используйте внешний адрес connector:
-
-```yaml
-remote_write:
-  - url: http://agentic-data-stack-host:3355/api/v1/write
-```
-
-Для backfill:
-
-```bash
-curl http://localhost:3355/backfill \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "queries": ["up", "http_requests_total"],
-    "start": "2026-05-11T00:00:00Z",
-    "end": "2026-05-11T01:00:00Z",
-    "step": "60s"
-  }'
-```
-
 Метрики пишутся в таблицу:
 
 ```text
 analytics.prometheus_samples
+```
+
+Посмотреть все таблицы ClickHouse одной командой:
+
+```bash
+sh tools/clickhouse-tables.sh
+```
+
+Очистить данные в базе `analytics`, не удаляя схему, одной командой:
+
+```bash
+sh tools/clickhouse-clear.sh
+```
+
+Если нужно очистить другую database, укажите ее явно:
+
+```bash
+CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 ```
 
 Для LibreChat доступны MCP tools:
@@ -470,6 +485,30 @@ pg.public.users=users_raw,pg.public.orders=orders_raw,pg.public.payments=payment
 
 Без такого mapping sink connector не будет понимать, в какие ClickHouse tables складывать разные topics.
 
+
+## Запуск
+
+```bash
+cd Agentic-Data-Stack
+cp .env.example .env
+```
+
+Перед запуском отредактируйте `.env`.
+
+Если подключаетесь к внешней БД, заполните **host**, **port**, **user**, **password** и остальные переменные активного блока `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
+
+Если внешней БД пока нет и нужно проверить проект на demo-данных, включите `SOURCE_MODE=demo` и `COMPOSE_PROFILES=postgres-source`.
+
+После этого запускайте стек:
+
+```bash
+docker compose up -d --build
+```
+
+Если нужные **ports** уже заняты другим локальным стеком, остановите тот стек или поменяйте published ports в `docker-compose.yml`.
+
+
+
 ## Airflow: Запуск Миграции По Расписанию
 
 Airflow доступен здесь:
@@ -477,6 +516,9 @@ Airflow доступен здесь:
 ```text
 http://localhost:8081
 ```
+
+![img_13.png](docs/images/img_13.png)
+
 
 Логин и пароль задаются в `.env`:
 
@@ -487,6 +529,8 @@ AIRFLOW_ADMIN_EMAIL=admin@example.com
 ```
 
 При первом запуске `airflow-init` создает локального пользователя Airflow.
+
+![img_12.png](docs/images/img_12.png)
 
 После входа в Airflow найдите DAG:
 
@@ -536,9 +580,12 @@ AIRFLOW_DAG_PAUSED=true
 1. Откройте `http://localhost:8081`.
 2. Войдите под `AIRFLOW_ADMIN_USER` и `AIRFLOW_ADMIN_PASSWORD`.
 3. Найдите DAG `scheduled_debezium_migration`.
-4. Нажмите toggle, чтобы снять DAG с паузы.
+4. Нажмите переключатель, чтобы снять DAG с паузы.
+
 
 Чтобы запустить миграцию вручную, нажмите кнопку Trigger DAG в Airflow UI.
+
+![img_14.png](docs/images/img_14.png)
 
 Если меняете `AIRFLOW_MIGRATION_CRON`, перезапустите Airflow scheduler:
 
@@ -550,26 +597,6 @@ docker compose up -d airflow-scheduler airflow-webserver
 
 Airflow в этом проекте отвечает за момент регистрации или обновления connectors. Если нужен строгий “миграционный интервал”, например запускать в 02:00 и останавливать в 03:00, нужно добавить отдельный DAG для pause/resume или delete connectors.
 
-## Запуск
-
-```bash
-cd /Users/subbotaevgenij/PycharmProjects/Clicker/CascadeProjects/Agentic-Data-Stack
-cp .env.example .env
-```
-
-Перед запуском отредактируйте `.env`.
-
-Если подключаетесь к внешней БД, заполните **host**, **port**, **user**, **password** и остальные переменные активного блока `POSTGRES_SOURCE_*`, `MYSQL_SOURCE_*` или `MONGODB_SOURCE_*`.
-
-Если внешней БД пока нет и нужно проверить проект на demo-данных, включите `SOURCE_MODE=demo` и `COMPOSE_PROFILES=postgres-source`.
-
-После этого запускайте стек:
-
-```bash
-docker compose up -d --build
-```
-
-Если нужные **ports** уже заняты другим локальным стеком, остановите тот стек или поменяйте published ports в `docker-compose.yml`.
 
 ## LibreChat
 
@@ -579,11 +606,14 @@ LibreChat доступен здесь:
 http://localhost:3080
 ```
 
+![img.png](docs/images/img.png)
+
 Сначала нужно зарегистрироваться:
 
 ```text
 http://localhost:3080/register
 ```
+![img_1.png](docs/images/img_1.png)
 
 Первый зарегистрированный пользователь становится администратором LibreChat.
 
@@ -593,7 +623,21 @@ http://localhost:3080/register
 http://localhost:3080/login
 ```
 
-В LibreChat выберите endpoint `Local OpenAI-compatible` и включите MCP tools `clickhouse-analytics`.
+Введите email и пароль, затем нажмите "Продолжить".
+
+Откроется LibreChat.
+
+![img_2.png](docs/images/img_2.png)
+
+В LibreChat в левом верхнем углу выберите `My Agents` -> `Local OpenAI-compatible`, затем выберите модель.
+
+
+![img_3.png](docs/images/img_3.png)
+
+Затем в окне чата включите `MCP Сервисы` -> `clickhouse-analytics`.
+
+
+![img_4.png](docs/images/img_4.png)
 
 Примеры запросов:
 
@@ -609,6 +653,8 @@ http://localhost:3080/login
 Визуализируй error rate по routes и дай ссылку на Grafana.
 ```
 
+![LibreChat response example](docs/images/img_9.png)
+
 ## Langfuse
 
 Langfuse доступен здесь:
@@ -616,8 +662,7 @@ Langfuse доступен здесь:
 ```text
 http://localhost:3002
 ```
-
-При первом запуске проект автоматически создает локального пользователя, organization, project и API keys.
+![img_5.png](docs/images/img_5.png)
 
 Значения для demo-режима находятся в `.env`:
 
@@ -641,14 +686,26 @@ openssl rand -base64 32
 openssl rand -hex 32
 ```
 
-Чтобы увидеть traces:
+При первом запуске проект автоматически создает локального пользователя, organization, project и API keys.
+
+![Langfuse organizations](docs/images/img_6.png)
+
+![img_7.png](docs/images/img_7.png)
+
+Чтобы увидеть tracing:
 
 1. Откройте `http://localhost:3002`.
 2. Войдите под пользователем из `LANGFUSE_INIT_USER_EMAIL`.
 3. Откройте project `Agentic Data Stack LLM`.
 4. В LibreChat задайте любой вопрос модели.
-5. Вернитесь в Langfuse и откройте раздел `Traces`.
 
+![img_10.png](docs/images/img_10.png)
+
+5. Вернитесь в Langfuse и откройте раздел `Tracing`.
+
+![img_8.png](docs/images/img_8.png)
+
+![img_11.png](docs/images/img_11.png)
 Если traces не появляются, проверьте:
 
 ```bash
@@ -683,6 +740,10 @@ LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.2-vision:latest
 OPENAI_MODEL=qwen2.5:7b
 OPENAI_MODEL_SMART=qwen2.5:14b
 ```
+
+Моделей может быть сколько угодно.
+
+Эти представлены для примера
 
 ## Endpoints
 
@@ -734,6 +795,12 @@ curl http://localhost:8083/connectors
 ```bash
 curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
   --data-binary 'SELECT count() FROM analytics.app_events_raw'
+```
+
+Вывести все таблицы ClickHouse:
+
+```bash
+sh tools/clickhouse-tables.sh
 ```
 
 Для demo-режима после initial snapshot ожидается:

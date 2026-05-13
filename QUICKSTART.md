@@ -44,6 +44,8 @@ AIRFLOW_DAG_PAUSED=true
 http://localhost:8081
 ```
 
+![Airflow DAG list](docs/images/img_13.png)
+
 Логин и пароль:
 
 ```env
@@ -54,6 +56,8 @@ AIRFLOW_ADMIN_PASSWORD=admin
 Включите DAG toggle, если хотите, чтобы расписание начало работать.
 
 Для ручного запуска нажмите Trigger DAG.
+
+![Airflow trigger button](docs/images/img_14.png)
 
 ## 3. Запуск
 
@@ -79,6 +83,12 @@ ClickHouse:
 ```bash
 curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
   --data-binary 'SELECT count() FROM analytics.app_events_raw'
+```
+
+Все таблицы ClickHouse одной командой:
+
+```bash
+sh tools/clickhouse-tables.sh
 ```
 
 В demo-режиме после initial snapshot ожидается `1000`.
@@ -113,7 +123,13 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 
 Первый зарегистрированный пользователь становится администратором LibreChat.
 
+![LibreChat registration](docs/images/img_1.png)
+
 После входа выберите `Local OpenAI-compatible` endpoint и включите MCP tools `clickhouse-analytics`.
+
+![LibreChat model selector](docs/images/img_3.png)
+
+![LibreChat MCP tools](docs/images/img_4.png)
 
 ## 7. Langfuse
 
@@ -126,6 +142,8 @@ Langfuse нужен для наблюдаемости LLM.
 ```text
 http://localhost:3002
 ```
+
+![Langfuse login](docs/images/img_5.png)
 
 Локальный пользователь создается автоматически при первом запуске:
 
@@ -140,12 +158,16 @@ LANGFUSE_INIT_USER_PASSWORD=admin123456
 Agentic Data Stack LLM
 ```
 
+![Langfuse project](docs/images/img_7.png)
+
 Чтобы появились traces:
 
 1. Откройте LibreChat.
 2. Задайте вопрос модели.
 3. Вернитесь в Langfuse.
 4. Откройте раздел `Traces`.
+
+![Langfuse trace](docs/images/img_11.png)
 
 `agent-proxy` отправляет traces в Langfuse автоматически, если в `.env` включено:
 
@@ -159,36 +181,18 @@ Prometheus подключается не через Debezium.
 
 Debezium читает CDC-журналы транзакционных БД: PostgreSQL WAL, MySQL binlog, MongoDB change streams.
 
-Prometheus отдает метрики иначе:
+Prometheus отдает метрики иначе, поэтому в проекте оставлены две рабочие команды.
 
-- историю через HTTP API `query_range`;
-- realtime samples через `remote_write`.
-
-Для realtime добавьте в `prometheus.yml`:
-
-```yaml
-remote_write:
-  - url: http://prometheus-connector:3355/api/v1/write
-```
-
-Если Prometheus запущен вне Docker network, используйте адрес хоста:
-
-```yaml
-remote_write:
-  - url: http://localhost:3355/api/v1/write
-```
-
-Для historical backfill:
+Потоковая загрузка в ClickHouse:
 
 ```bash
-curl http://localhost:3355/backfill \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "queries": ["up"],
-    "start": "2026-05-11T00:00:00Z",
-    "end": "2026-05-11T01:00:00Z",
-    "step": "60s"
-  }'
+sh tools/prometheus-stream-to-clickhouse.sh
+```
+
+Пакетная загрузка истории в ClickHouse:
+
+```bash
+sh tools/prometheus-batch-to-clickhouse.sh
 ```
 
 Проверить строки:
@@ -203,3 +207,5 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 ```text
 Проанализируй Prometheus targets: какие instance сейчас down?
 ```
+
+![LibreChat Prometheus answer](docs/images/img_16.png)

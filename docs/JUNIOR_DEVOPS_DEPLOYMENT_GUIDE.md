@@ -40,6 +40,8 @@ Prometheus
   -> MCP / LibreChat
 ```
 
+![Prometheus UI](images/img_15.png)
+
 По-человечески:
 
 1. **Debezium** подключается к внешней БД и читает изменения.
@@ -80,10 +82,10 @@ Prometheus
 
 Prometheus — не транзакционная БД с WAL/binlog/change stream.
 
-У Prometheus другой способ интеграции:
+У Prometheus другой способ интеграции, и в локальном проекте он сведен к двум командам:
 
-- HTTP API `query_range` для исторической выгрузки;
-- `remote_write` для потоковой отправки новых samples.
+- `sh tools/prometheus-stream-to-clickhouse.sh` — потоковая отправка новых samples;
+- `sh tools/prometheus-batch-to-clickhouse.sh` — пакетная загрузка истории.
 
 Поэтому для Prometheus в этом проекте используется отдельный `prometheus-connector`.
 
@@ -91,9 +93,9 @@ Prometheus — не транзакционная БД с WAL/binlog/change strea
 
 **Prometheus connector** — Node.js сервис, который переносит метрики Prometheus в ClickHouse.
 
-Он умеет работать в двух режимах.
+В локальном compose-стеке его не нужно настраивать руками через длинные `curl` или ручное редактирование `prometheus.yml`: используйте две команды из `tools/`.
 
-**Backfill** — единоразовая или периодическая выгрузка истории.
+**Batch command** — единоразовая или периодическая выгрузка истории.
 
 Connector ходит в Prometheus HTTP API:
 
@@ -101,7 +103,7 @@ Connector ходит в Prometheus HTTP API:
 /api/v1/query_range
 ```
 
-**Remote write** — потоковая выгрузка почти в realtime.
+**Streaming command** — потоковая выгрузка почти в realtime.
 
 Prometheus сам отправляет новые samples в endpoint:
 
@@ -2365,28 +2367,17 @@ Prometheus connector нужен для метрик Prometheus.
 
 Debezium читает CDC-журналы транзакционных БД.
 
-Prometheus отдает данные через свои API:
+Prometheus отдает данные через свои API, но для локального проекта оставьте пользователю две понятные команды.
 
-- `query_range` для historical backfill;
-- `remote_write` для realtime-потока.
+### 15.1 Потоковая Загрузка В ClickHouse
 
-### 15.1 Realtime Через Remote Write
+Из корня проекта:
 
-В `prometheus.yml` добавить:
-
-```yaml
-remote_write:
-  - url: http://prometheus-connector:3355/api/v1/write
+```bash
+sh tools/prometheus-stream-to-clickhouse.sh
 ```
 
-Если Prometheus находится на другой машине:
-
-```yaml
-remote_write:
-  - url: http://app-1.internal:3355/api/v1/write
-```
-
-После этого Prometheus начнет отправлять новые samples в connector.
+Команда поднимает нужные сервисы и запускает synthetic lab Prometheus с уже подготовленным `remote_write`.
 
 Connector пишет их в ClickHouse:
 
@@ -2394,34 +2385,25 @@ Connector пишет их в ClickHouse:
 analytics.prometheus_samples
 ```
 
-### 15.2 Historical Backfill
+### 15.2 Пакетная Загрузка В ClickHouse
 
-Backfill нужен, когда нужно забрать историю.
+Пакетная загрузка нужна, когда нужно забрать историю.
 
 Например, последние сутки или последнюю неделю.
 
-Вызов:
+Из корня проекта:
 
 ```bash
-curl http://app-1.internal:3355/backfill \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "queries": ["up", "http_requests_total"],
-    "start": "2026-05-11T00:00:00Z",
-    "end": "2026-05-11T01:00:00Z",
-    "step": "60s"
-  }'
+sh tools/prometheus-batch-to-clickhouse.sh
 ```
 
-`queries` — список PromQL-запросов.
+По умолчанию команда забирает последние 72 часа synthetic metrics. Интервал можно переопределить переменными:
 
-**PromQL** — язык запросов Prometheus.
-
-`start` и `end` задают период.
-
-`step` задает шаг между точками.
-
-Например, `60s` означает “одна точка в минуту”.
+```bash
+PROMETHEUS_BACKFILL_START=2026-05-11T00:00:00Z \
+PROMETHEUS_BACKFILL_END=2026-05-11T01:00:00Z \
+sh tools/prometheus-batch-to-clickhouse.sh
+```
 
 ### 15.3 Переменные Prometheus Connector
 
@@ -2463,11 +2445,16 @@ curl 'http://ch-1.internal:8123/?user=analytics&password=change-me' \
   --data-binary 'SELECT count() FROM analytics.prometheus_samples'
 ```
 
-Проверить targets:
+Для локального проекта вывести все таблицы:
 
 ```bash
-curl 'http://ch-1.internal:8123/?user=analytics&password=change-me' \
-  --data-binary 'SELECT * FROM analytics.v_prometheus_targets LIMIT 20'
+sh tools/clickhouse-tables.sh
+```
+
+Очистить локальную analytics database:
+
+```bash
+sh tools/clickhouse-clear.sh
 ```
 
 ### 15.5 Анализ Через LibreChat
@@ -2484,6 +2471,8 @@ curl 'http://ch-1.internal:8123/?user=analytics&password=change-me' \
 ```text
 Проанализируй Prometheus targets: какие instance сейчас down?
 ```
+
+![LibreChat Prometheus analysis](images/img_16.png)
 
 ```text
 Покажи последние samples метрики up и объясни, какие targets проблемные.
@@ -3046,25 +3035,15 @@ curl 'http://localhost:8123/?user=analytics&password=analytics_password' \
 curl http://localhost:3355/health
 ```
 
-Проверить Prometheus config:
+Перезапустить потоковую загрузку одной командой:
 
-```yaml
-remote_write:
-  - url: http://prometheus-connector:3355/api/v1/write
+```bash
+sh tools/prometheus-stream-to-clickhouse.sh
 ```
 
-Если Prometheus находится на другой машине, `prometheus-connector` может быть недоступен по Docker DNS name.
+Если Prometheus находится на другой машине, проверьте firewall и allowlist IP до `prometheus-connector:3355`.
 
-Тогда использовать внешний адрес:
-
-```yaml
-remote_write:
-  - url: http://app-1.internal:3355/api/v1/write
-```
-
-Проверить firewall и allowlist IP.
-
-### Prometheus Backfill Не Работает
+### Prometheus Batch Load Не Работает
 
 Проверить `PROMETHEUS_BASE_URL`:
 
@@ -3086,6 +3065,12 @@ PROMETHEUS_BASIC_USER=
 PROMETHEUS_BASIC_PASSWORD=
 ```
 
+Повторить пакетную загрузку одной командой:
+
+```bash
+sh tools/prometheus-batch-to-clickhouse.sh
+```
+
 ## 22. Порядок Первого Production Запуска
 
 1. Подготовить все машины.
@@ -3103,7 +3088,7 @@ PROMETHEUS_BASIC_PASSWORD=
 13. Настроить `AIRFLOW_MIGRATION_CRON`.
 14. Поднять Grafana и проверить dashboard.
 15. Поднять Prometheus connector.
-16. Настроить Prometheus `remote_write` или выполнить `/backfill`.
+16. Выполнить `sh tools/prometheus-stream-to-clickhouse.sh` или `sh tools/prometheus-batch-to-clickhouse.sh`.
 17. Проверить строки в `analytics.prometheus_samples`.
 18. Поднять MCP server и проверить `/health`.
 19. Поднять LibreChat и зарегистрировать первого пользователя.
@@ -3126,8 +3111,8 @@ PROMETHEUS_BASIC_PASSWORD=
 - Какой `AIRFLOW_MIGRATION_CRON` сейчас активен.
 - Как проверить Debezium connector status.
 - Как проверить ClickHouse row count.
-- Как настроен Prometheus `remote_write`.
-- Какие PromQL-запросы используются для backfill.
+- Какая команда используется для потоковой загрузки Prometheus в ClickHouse.
+- Какая команда используется для пакетной загрузки Prometheus в ClickHouse.
 - Где смотреть Grafana dashboards.
 - Как зайти в Airflow.
 - Как зайти в LibreChat.
