@@ -32,20 +32,31 @@ async function readConnectorName(path) {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`${connectUrl}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-  });
+  const method = options.method || 'GET';
 
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`${options.method || 'GET'} ${path} failed with ${response.status}: ${text}`);
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    const response = await fetch(`${connectUrl}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
+
+    const text = await response.text();
+    if (response.ok) {
+      return text ? JSON.parse(text) : null;
+    }
+
+    const isRebalance = text.includes('rebalance') || text.includes('Rebalance');
+    if (isRebalance && attempt < 12) {
+      console.log(`${method} ${path} is waiting for Kafka Connect rebalance; retry ${attempt}/12`);
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      continue;
+    }
+
+    throw new Error(`${method} ${path} failed with ${response.status}: ${text}`);
   }
-
-  return text ? JSON.parse(text) : null;
 }
 
 async function waitForConnect() {
