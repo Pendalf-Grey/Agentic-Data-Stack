@@ -4,12 +4,16 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
+env_value() {
+  key="$1"
+  if [ -f .env ]; then
+    grep -E "^${key}=" .env | tail -n 1 | cut -d '=' -f 2-
+  fi
+}
 
+CLICKHOUSE_DB=${CLICKHOUSE_DB:-$(env_value CLICKHOUSE_DB)}
+CLICKHOUSE_USER=${CLICKHOUSE_USER:-$(env_value CLICKHOUSE_USER)}
+CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-$(env_value CLICKHOUSE_PASSWORD)}
 CLICKHOUSE_DB=${CLICKHOUSE_DB:-analytics}
 CLICKHOUSE_USER=${CLICKHOUSE_USER:-analytics}
 CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-analytics_password}

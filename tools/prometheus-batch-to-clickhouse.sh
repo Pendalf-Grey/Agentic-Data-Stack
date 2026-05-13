@@ -19,10 +19,38 @@ iso_now() {
 PROMETHEUS_BACKFILL_START=${PROMETHEUS_BACKFILL_START:-$(iso_hours_ago 72)}
 PROMETHEUS_BACKFILL_END=${PROMETHEUS_BACKFILL_END:-$(iso_now)}
 PROMETHEUS_BACKFILL_STEP=${PROMETHEUS_BACKFILL_STEP:-60s}
+PROMETHEUS_BASE_URL=${PROMETHEUS_BASE_URL:-http://host.docker.internal:9095}
+PROMETHEUS_IMPORT_SYNTHETIC_HISTORY=${PROMETHEUS_IMPORT_SYNTHETIC_HISTORY:-true}
 
 cd "$ROOT_DIR"
 
-docker compose up -d --build clickhouse prometheus-connector mcp-server
+if [ -f "$ROOT_DIR/prometheus-synthetic-lab/docker-compose.yml" ]; then
+  (
+    cd "$ROOT_DIR/prometheus-synthetic-lab"
+    if [ "$PROMETHEUS_BASE_URL" = "http://host.docker.internal:9095" ] && [ "$PROMETHEUS_IMPORT_SYNTHETIC_HISTORY" = "true" ]; then
+      docker compose down
+      HISTORY_HOURS=${PROMETHEUS_HISTORY_HOURS:-72} \
+        HISTORY_STEP_SECONDS=${PROMETHEUS_HISTORY_STEP_SECONDS:-60} \
+        sh scripts/import-history.sh
+    fi
+    docker compose up -d --build
+  )
+fi
+
+export PROMETHEUS_BASE_URL
+docker compose up -d --build clickhouse mcp-server
+docker compose up -d --build --force-recreate prometheus-connector
+
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -fsS http://localhost:3355/health >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$attempt" -eq 10 ]; then
+    echo "prometheus-connector did not become healthy at http://localhost:3355/health" >&2
+    exit 1
+  fi
+  sleep 2
+done
 
 curl -fsS http://localhost:3355/backfill \
   -H 'Content-Type: application/json' \

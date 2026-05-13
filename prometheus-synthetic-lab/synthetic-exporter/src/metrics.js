@@ -25,7 +25,8 @@ function labels(object) {
 
 function sample(name, labelObject, value, timestampMs) {
   const renderedLabels = labels(labelObject);
-  return `${name}{${renderedLabels}} ${Number(value).toFixed(6)} ${timestampMs}`;
+  const timestamp = timestampMs === undefined ? '' : ` ${timestampMs}`;
+  return `${name}{${renderedLabels}} ${Number(value).toFixed(6)}${timestamp}`;
 }
 
 function counterValue(baseRatePerMinute, date, salt = 0) {
@@ -34,7 +35,7 @@ function counterValue(baseRatePerMinute, date, salt = 0) {
 }
 
 export function renderMetrics(date = new Date(), includeTimestamp = true) {
-  const ts = includeTimestamp ? date.getTime() : undefined;
+  const ts = includeTimestamp ? Math.floor(date.getTime() / 1000) : undefined;
   const lines = [
     '# HELP synthetic_service_up Whether the monitored target is up.',
     '# TYPE synthetic_service_up gauge',
