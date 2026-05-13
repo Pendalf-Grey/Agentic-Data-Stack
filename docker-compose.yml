@@ -417,9 +417,6 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentic-data-stack-local}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentic-data-stack-local}
       LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
-      CLICKHOUSE_HOST: http://clickhouse:8123
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     ports:
       - "3344:3344"
 

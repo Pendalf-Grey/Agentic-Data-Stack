@@ -50,6 +50,112 @@ const tools = [
     },
   },
   {
+    name: 'describe_analytics_table',
+    description: 'Describe one analytics table or view by name. Use this before answering questions about columns or table contents.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: {
+          type: 'string',
+          description: 'Table or view name in the analytics database, without database prefix.',
+        },
+      },
+      required: ['table'],
+    },
+  },
+  {
+    name: 'sample_analytics_table',
+    description: 'Return live sample rows from any analytics table or view. Use this when the user asks what data is inside a table.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: {
+          type: 'string',
+          description: 'Table or view name in the analytics database, without database prefix.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of rows to return.',
+          default: 10,
+        },
+      },
+      required: ['table'],
+    },
+  },
+  {
+    name: 'profile_analytics_table',
+    description: 'Profile any analytics table or view: metadata, columns, row count, and sample rows. Use this to explain what kind of data a table contains.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: {
+          type: 'string',
+          description: 'Table or view name in the analytics database, without database prefix.',
+        },
+        sample_limit: {
+          type: 'number',
+          description: 'Maximum number of sample rows to return.',
+          default: 5,
+        },
+      },
+      required: ['table'],
+    },
+  },
+  {
+    name: 'distinct_analytics_values',
+    description: 'Return distinct values from one column in any analytics table or view. Use this for questions like unique brands, cities, statuses, metric names, or labels.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: {
+          type: 'string',
+          description: 'Table or view name in the analytics database, without database prefix.',
+        },
+        column: {
+          type: 'string',
+          description: 'Column name.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of values to return.',
+          default: 100,
+        },
+      },
+      required: ['table', 'column'],
+    },
+  },
+  {
+    name: 'count_analytics_by',
+    description: 'Count rows in any analytics table grouped by one to three columns, with optional equality filters. Use this for distribution and "how many by ..." questions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: {
+          type: 'string',
+          description: 'Table or view name in the analytics database, without database prefix.',
+        },
+        dimensions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'One to three column names to group by.',
+        },
+        filters: {
+          type: 'object',
+          description: 'Optional equality filters by column name.',
+          additionalProperties: {
+            type: ['string', 'number', 'boolean'],
+          },
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of grouped rows to return.',
+          default: 100,
+        },
+      },
+      required: ['table', 'dimensions'],
+    },
+  },
+  {
     name: 'sample_app_events',
     description: 'Return recent rows migrated from PostgreSQL to ClickHouse by Debezium.',
     inputSchema: {
@@ -243,20 +349,6 @@ const tools = [
       },
     },
   },
-  {
-    name: 'run_readonly_query',
-    description: 'Run a read-only SELECT query against ClickHouse analytics database.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'SELECT query to execute.',
-        },
-      },
-      required: ['query'],
-    },
-  },
 ];
 
 function jsonRpc(id, result) {
@@ -285,6 +377,61 @@ function safeIdentifier(value, fallback = '') {
     throw new Error(`Unsafe identifier-like value: ${text}`);
   }
   return text;
+}
+
+function safeSqlIdentifier(value, fallback = '') {
+  const text = String(value || fallback);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+    throw new Error(`Unsafe SQL identifier: ${text}`);
+  }
+  return text;
+}
+
+function quoteIdent(value) {
+  return `\`${String(value).replaceAll('`', '``')}\``;
+}
+
+function quoteString(value) {
+  return `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+async function analyticsTableExists(table) {
+  const tableName = safeSqlIdentifier(table);
+  const rows = await runQuery(`
+    SELECT name
+    FROM system.tables
+    WHERE database = 'analytics'
+      AND name = ${quoteString(tableName)}
+    LIMIT 1
+  `);
+  if (rows.length === 0) {
+    throw new Error(`Unknown analytics table or view: ${tableName}`);
+  }
+  return tableName;
+}
+
+async function analyticsColumns(table) {
+  const tableName = await analyticsTableExists(table);
+  const rows = await runQuery(`
+    SELECT
+      name,
+      type,
+      position
+    FROM system.columns
+    WHERE database = 'analytics'
+      AND table = ${quoteString(tableName)}
+    ORDER BY position
+  `);
+  return { tableName, columns: rows };
+}
+
+async function analyticsColumnExists(table, column) {
+  const columnName = safeSqlIdentifier(column);
+  const { tableName, columns } = await analyticsColumns(table);
+  if (!columns.some(row => row.name === columnName)) {
+    throw new Error(`Unknown column ${columnName} in analytics.${tableName}`);
+  }
+  return { tableName, columnName, columns };
 }
 
 function safeLabelName(value) {
@@ -550,17 +697,6 @@ async function runQuery(query) {
   return result.json();
 }
 
-async function runUserQuery(query) {
-  const normalized = query.trim().replace(/;+$/, '');
-  if (/\b(system|information_schema|INFORMATION_SCHEMA|langfuse)\s*\./i.test(normalized)) {
-    throw new Error('Generic queries are limited to the analytics database. Use analytics tables/views or a purpose-built tool.');
-  }
-  if (/\bFROM\s+(?!analytics\.|\()/i.test(normalized) || /\bJOIN\s+(?!analytics\.|\()/i.test(normalized)) {
-    throw new Error('Use fully qualified analytics.* tables/views in run_readonly_query.');
-  }
-  return runQuery(normalized);
-}
-
 async function handleRpc(payload) {
   const { id, method, params } = payload;
 
@@ -590,15 +726,6 @@ async function handleRpc(payload) {
           default_expression
         FROM system.columns
         WHERE database = 'analytics'
-          AND table IN (
-            'app_events_raw',
-            'v_event_summary',
-            'car_inventory_raw',
-            'v_car_inventory_summary',
-            'prometheus_samples',
-            'v_prometheus_metric_summary',
-            'v_prometheus_targets'
-          )
         ORDER BY table, position
       `);
       return jsonRpc(id, {
@@ -638,6 +765,115 @@ async function handleRpc(payload) {
           AND engine NOT LIKE '%View'
           AND ifNull(total_rows, 0) > 0
         ORDER BY database, name
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'describe_analytics_table') {
+      const { tableName, columns } = await analyticsColumns(args.table);
+      const metadata = await runQuery(`
+        SELECT
+          database,
+          name AS table,
+          engine,
+          total_rows AS rows,
+          formatReadableSize(total_bytes) AS bytes
+        FROM system.tables
+        WHERE database = 'analytics'
+          AND name = ${quoteString(tableName)}
+        LIMIT 1
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify({ metadata: metadata[0] || null, columns }, null, 2) }],
+      });
+    }
+
+    if (name === 'sample_analytics_table') {
+      const tableName = await analyticsTableExists(args.table);
+      const limit = boundedLimit(args.limit, 10, 100);
+      const rows = await runQuery(`
+        SELECT *
+        FROM analytics.${quoteIdent(tableName)}
+        LIMIT ${limit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'profile_analytics_table') {
+      const { tableName, columns } = await analyticsColumns(args.table);
+      const sampleLimit = boundedLimit(args.sample_limit, 5, 50);
+      const metadata = await runQuery(`
+        SELECT
+          database,
+          name AS table,
+          engine,
+          total_rows AS rows,
+          formatReadableSize(total_bytes) AS bytes
+        FROM system.tables
+        WHERE database = 'analytics'
+          AND name = ${quoteString(tableName)}
+        LIMIT 1
+      `);
+      const sampleRows = await runQuery(`
+        SELECT *
+        FROM analytics.${quoteIdent(tableName)}
+        LIMIT ${sampleLimit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify({ metadata: metadata[0] || null, columns, sampleRows }, null, 2) }],
+      });
+    }
+
+    if (name === 'distinct_analytics_values') {
+      const { tableName, columnName } = await analyticsColumnExists(args.table, args.column);
+      const limit = boundedLimit(args.limit, 100, 500);
+      const rows = await runQuery(`
+        SELECT
+          ${quoteIdent(columnName)} AS value,
+          count() AS rows
+        FROM analytics.${quoteIdent(tableName)}
+        GROUP BY value
+        ORDER BY rows DESC, value ASC
+        LIMIT ${limit}
+      `);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'count_analytics_by') {
+      const tableName = await analyticsTableExists(args.table);
+      const dimensions = Array.isArray(args.dimensions) ? args.dimensions.slice(0, 3) : [];
+      if (dimensions.length === 0) {
+        throw new Error('count_analytics_by requires at least one dimension.');
+      }
+      const validatedDimensions = [];
+      for (const dimension of dimensions) {
+        const { columnName } = await analyticsColumnExists(tableName, dimension);
+        validatedDimensions.push(columnName);
+      }
+      const filters = args.filters && typeof args.filters === 'object' ? args.filters : {};
+      const whereParts = [];
+      for (const [column, value] of Object.entries(filters)) {
+        const { columnName } = await analyticsColumnExists(tableName, column);
+        whereParts.push(`${quoteIdent(columnName)} = ${typeof value === 'number' ? String(value) : quoteString(value)}`);
+      }
+      const limit = boundedLimit(args.limit, 100, 500);
+      const groupBy = validatedDimensions.map(quoteIdent).join(', ');
+      const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
+      const rows = await runQuery(`
+        SELECT
+          ${groupBy},
+          count() AS rows
+        FROM analytics.${quoteIdent(tableName)}
+        ${whereClause}
+        GROUP BY ${groupBy}
+        ORDER BY rows DESC
+        LIMIT ${limit}
       `);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
@@ -911,13 +1147,6 @@ async function handleRpc(payload) {
         metric,
         groupBy: 'model_name',
         source: 'analytics.app_events_raw',
-      });
-    }
-
-    if (name === 'run_readonly_query') {
-      const rows = await runUserQuery(args.query);
-      return jsonRpc(id, {
-        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
       });
     }
 
