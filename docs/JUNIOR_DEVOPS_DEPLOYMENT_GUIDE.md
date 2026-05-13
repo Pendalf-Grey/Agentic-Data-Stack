@@ -40,8 +40,6 @@ Prometheus
   -> MCP / LibreChat
 ```
 
-![Prometheus UI](images/img_15.png)
-
 По-человечески:
 
 1. **Debezium** подключается к внешней БД и читает изменения.
@@ -55,7 +53,7 @@ Prometheus
 9. **Prometheus connector** переносит метрики Prometheus в ClickHouse для анализа через LibreChat.
 
 ## 2. Что Делает Каждый Компонент
-
+___
 ### Debezium
 
 **Debezium** — это CDC-сервис.
@@ -88,6 +86,7 @@ Prometheus — не транзакционная БД с WAL/binlog/change strea
 - `sh tools/prometheus-batch-to-clickhouse.sh` — пакетная загрузка истории.
 
 Поэтому для Prometheus в этом проекте используется отдельный `prometheus-connector`.
+___
 
 ### Prometheus Connector
 
@@ -128,7 +127,7 @@ analytics.prometheus_samples
 Labels Prometheus сохраняются в поле `labels_json`.
 
 Это сделано намеренно: у разных метрик разные labels, и жесткая таблица с колонками `job`, `instance`, `pod`, `namespace`, `route` быстро стала бы неудобной.
-
+___
 ### Redpanda
 
 **Redpanda** — Kafka-compatible брокер сообщений.
@@ -146,7 +145,7 @@ Debezium пишет события в topic.
 ClickHouse sink читает этот topic.
 
 Redpanda нужен, чтобы система не зависела от мгновенной доступности ClickHouse. Если ClickHouse временно недоступен, поток событий может ждать в Redpanda.
-
+___
 ### ClickHouse
 
 **ClickHouse** — аналитическая БД.
@@ -178,7 +177,7 @@ ClickHouse — это аналитическая копия или аналит�
 Если у source-БД другая таблица, другие поля или другие типы данных, нельзя считать `app_events_raw` универсальной истиной.
 
 Нужно либо создать ClickHouse tables под реальную source schema, либо автоматически сгенерировать их перед запуском sink connector.
-
+___
 ### ClickHouse Sink
 
 **ClickHouse sink** — это Kafka Connect connector.
@@ -221,7 +220,7 @@ pg.public.users=users_raw,pg.public.orders=orders_raw
 2. **Auto schema bootstrap mode** — отдельный bootstrap job сначала читает source schema и создает ClickHouse tables, а уже потом включается ClickHouse sink.
 
 Второй вариант полезен, когда source-БД чужая и заранее неизвестно, какие таблицы и поля придется мигрировать.
-
+___
 ### Grafana
 
 **Grafana** — web UI для графиков.
@@ -231,7 +230,7 @@ pg.public.users=users_raw,pg.public.orders=orders_raw
 В проекте Grafana также нужна потому, что LLM-модель не всегда хорошо рисует картинки сама.
 
 Лучше, чтобы модель возвращала ссылку на Grafana panel.
-
+___
 ### MCP Server
 
 **MCP** означает **Model Context Protocol**.
@@ -250,7 +249,7 @@ MCP server дает модели набор tools.
 - возвращать ссылки на Grafana.
 
 Сырой SQL-tool в LibreChat не публикуется. Модель должна понять вопрос пользователя, выбрать подходящий ClickHouse MCP tool, дождаться live-ответа ClickHouse и только после этого сформулировать ответ. Это важно, потому что таблицы и данные могут измениться после написания документации.
-
+___
 ### LibreChat
 
 **LibreChat** — web UI для общения с LLM-моделью.
@@ -258,7 +257,7 @@ MCP server дает модели набор tools.
 Пользователь задает вопрос в LibreChat.
 
 Модель через MCP tools обращается к ClickHouse и Grafana.
-
+___
 ### Agent Proxy
 
 **agent-proxy** — маленький OpenAI-compatible proxy.
@@ -274,7 +273,7 @@ OpenAI-compatible означает, что сервис выглядит для 
 Во-вторых, `agent-proxy` отправляет trace каждого LLM-запроса в Langfuse.
 
 Это удобная точка интеграции, потому что почти все запросы LibreChat к модели проходят через этот proxy.
-
+___
 ### Langfuse
 
 **Langfuse** — observability-платформа для LLM-приложений.
@@ -312,20 +311,24 @@ agent-proxy
   -> ClickHouse/Postgres/MinIO/Redis
 ```
 
-Langfuse использует несколько внутренних хранилищ.
+Langfuse использует несколько внутренних хранилищ:
 
-**Postgres** хранит пользователей, organization, projects, API keys и настройки.
+- **Postgres** хранит пользователей, organization, projects, API keys и настройки.
 
-**ClickHouse** хранит traces, observations и score-сущности, потому что это аналитические данные.
 
-**Redis** используется для очередей и cache.
+- **ClickHouse** хранит traces, observations и score-сущности, потому что это аналитические данные.
 
-**MinIO** используется как S3-compatible object storage.
 
-**S3-compatible** означает, что сервис говорит тем же API, что Amazon S3. Для локального запуска удобно использовать MinIO.
+- **Redis** используется для очередей и cache.
+
+
+- **MinIO** используется как S3-compatible object storage.
+
+
+- **S3-compatible** означает, что сервис говорит тем же API, что Amazon S3. Для локального запуска удобно использовать MinIO.
 
 В production Langfuse часто ставят отдельно от основного приложения, чтобы команда могла анализировать качество LLM, debug-ить плохие ответы, смотреть latency, считать стоимость и сравнивать разные модели.
-
+___
 ### Airflow
 
 **Airflow** — планировщик задач.
@@ -361,7 +364,7 @@ apply_active_connectors
 Первая — минимальная, чтобы поднять проект на ноутбуке и спокойно проверить всю цепочку.
 
 Вторая — рекомендованная production-like схема, когда компоненты раскладываются по разным машинам для отказоустойчивости.
-
+___
 ### Минимальная Схема Для Ноутбука
 
 Эта схема подходит для локального запуска на MacBook с Apple Silicon, например M4, 10 CPU cores и 24 GB RAM.
@@ -370,9 +373,7 @@ apply_active_connectors
 
 **HA** означает **High Availability**, то есть отказоустойчивость. В минимальной схеме отказоустойчивости нет: если ноутбук или VM упали, вся система остановится.
 
-Зато такая схема удобна для разработки, демонстрации и проверки, что все компоненты вообще умеют работать вместе.
-
-#### Вариант A: Все На Одной Машине
+- ### Вариант A: Все На Одной Машине
 
 Самый простой вариант — создать локальный all-in-one `docker-compose.yml` по этому документу и запустить его прямо на ноутбуке.
 
@@ -389,9 +390,6 @@ Swap: 2-4 GB
 Disk image: 120 GB или больше
 ```
 
-Почему не все 24 GB RAM?
-
-macOS тоже нужна память. Если отдать Docker все 24 GB, ноутбук начнет активно swap-ить и станет медленным.
 
 Команда запуска:
 
@@ -409,7 +407,7 @@ ACTIVE_SOURCE_DB=postgres
 COMPOSE_PROFILES=postgres-source
 ```
 
-#### Вариант B: Несколько Маленьких VM На Ноутбуке
+- ### Вариант B: Несколько Маленьких VM На Ноутбуке
 
 Если нужно приблизиться к настоящей инфраструктуре, можно поднять несколько VM через UTM, Lima, Multipass или другой локальный virtualization tool.
 
@@ -437,7 +435,7 @@ COMPOSE_PROFILES=postgres-source
 Важно: даже если сервисы разнесены по VM, это все еще не полноценная HA-схема.
 
 Если одна VM упала, часть системы остановится.
-
+___
 ### Рекомендованная HA-Схема
 
 | Машина | Компоненты | CPU | RAM | Disk | Комментарий |
@@ -458,28 +456,19 @@ COMPOSE_PROFILES=postgres-source
 
 ### Почему Так
 
-Redpanda лучше запускать минимум в 3 узла.
+Redpanda лучше запускать минимум в 3 узла, так кластер может пережить потерю одного broker.
 
-Так кластер может пережить потерю одного broker.
+ClickHouse лучше держать минимум в 2 реплики - так можно читать аналитику даже при проблеме на одной машине.
 
-ClickHouse лучше держать минимум в 2 реплики.
-
-Так можно читать аналитику даже при проблеме на одной машине.
-
-Debezium/Kafka Connect можно запускать в 2 worker.
-
-Если один worker упадет, второй сможет забрать задачи.
+Debezium/Kafka Connect можно запускать в 2 worker. Если один worker упадет, второй сможет забрать задачи.
 
 Airflow metadata DB лучше держать отдельно.
-
 Airflow webserver и scheduler не должны хранить state только внутри контейнера.
 
 LibreChat и Grafana можно сначала поставить на одну app-машину.
-
 Если нагрузка вырастет, их можно разнести.
 
 Langfuse можно сначала поставить рядом с app-компонентами.
-
 Для production лучше выделить Langfuse отдельно, потому что traces могут быстро расти.
 
 Langfuse ClickHouse database можно держать в том же ClickHouse cluster, но обязательно в отдельной database, например `langfuse`.
@@ -613,9 +602,7 @@ docker compose version
 
 ## 7. Создание Проекта С Нуля
 
-В этом разделе мы не используем готовый GitHub-репозиторий.
-
-Мы создаем проект руками: директории, `.env`, `docker-compose.yml`, Debezium connector templates, ClickHouse schema, Airflow DAG и минимальные Node.js сервисы.
+Создаем проект руками: директории, `.env`, `docker-compose.yml`, Debezium connector templates, ClickHouse schema, Airflow DAG и минимальные Node.js сервисы.
 
 Сначала создаем базовую директорию.
 
@@ -847,7 +834,7 @@ ClickHouse schema должна быть следствием source schema.
 
 Есть два варианта работы.
 
-#### Вариант A: Manual Schema
+- ### Вариант A: Manual Schema
 
 DevOps заранее создает ClickHouse tables SQL-файлами.
 
@@ -864,7 +851,9 @@ DevOps заранее создает ClickHouse tables SQL-файлами.
 
 - нужно руками поддерживать ClickHouse schema при изменениях source-БД.
 
-#### Вариант B: Auto Schema Bootstrap
+Не подходит для продакшн-среды
+
+- ### Вариант B: Auto Schema Bootstrap
 
 Мы можем вообще не создавать ClickHouse structure руками.
 
@@ -1133,6 +1122,10 @@ EOF
 Этот файл нужен только для demo-режима.
 
 Он создает таблицу `app_events` и наполняет ее тестовыми логами.
+
+Сначала - тестовые логи.
+
+Уже после того как соберете проект - подтянете нормальную БД.
 
 ```bash
 cat > postgres/init/001_logs.sql <<'EOF'
@@ -1723,6 +1716,429 @@ mcp-server/Dockerfile
 mcp-server/src/server.js
 ```
 
+Создать минимальную рабочую версию с generic ClickHouse tools:
+
+```bash
+cat > mcp-server/package.json <<'EOF'
+{
+  "name": "mcp-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.12.1"
+  }
+}
+EOF
+
+cat > mcp-server/Dockerfile <<'EOF'
+FROM node:22-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY src ./src
+EXPOSE 3333
+CMD ["npm", "start"]
+EOF
+
+mkdir -p mcp-server/src
+cat > mcp-server/src/server.js <<'EOF'
+import http from 'node:http';
+
+import { createClient } from '@clickhouse/client';
+
+const port = Number(process.env.PORT || 3333);
+const database = process.env.CLICKHOUSE_DATABASE || 'analytics';
+
+const clickhouse = createClient({
+  url: process.env.CLICKHOUSE_HOST || 'http://clickhouse:8123',
+  username: process.env.CLICKHOUSE_USER || 'analytics',
+  password: process.env.CLICKHOUSE_PASSWORD || 'analytics_password',
+  database,
+});
+
+const tools = [
+  {
+    name: 'describe_analytics_schema',
+    description: 'Describe ClickHouse analytics tables and views available for analysis.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'list_analytics_tables',
+    description: 'List real tables and views in the ClickHouse analytics database, including row and size estimates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_empty: {
+          type: 'boolean',
+          description: 'Include empty analytics tables.',
+          default: true,
+        },
+      },
+    },
+  },
+  {
+    name: 'list_non_empty_analytics_tables',
+    description: 'Live authoritative list of real non-empty tables in the ClickHouse analytics database.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'describe_analytics_table',
+    description: 'Describe one analytics table or view by name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: 'Table or view name without database prefix.' },
+      },
+      required: ['table'],
+    },
+  },
+  {
+    name: 'sample_analytics_table',
+    description: 'Return live sample rows from any analytics table or view.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: 'Table or view name without database prefix.' },
+        limit: { type: 'number', description: 'Maximum number of rows to return.', default: 10 },
+      },
+      required: ['table'],
+    },
+  },
+  {
+    name: 'profile_analytics_table',
+    description: 'Profile one analytics table: metadata, columns, row count, and sample rows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: 'Table or view name without database prefix.' },
+        sample_limit: { type: 'number', description: 'Maximum number of sample rows.', default: 5 },
+      },
+      required: ['table'],
+    },
+  },
+  {
+    name: 'distinct_analytics_values',
+    description: 'Return distinct values from one column in any analytics table or view.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: 'Table or view name without database prefix.' },
+        column: { type: 'string', description: 'Column name.' },
+        limit: { type: 'number', description: 'Maximum number of values to return.', default: 100 },
+      },
+      required: ['table', 'column'],
+    },
+  },
+  {
+    name: 'count_analytics_by',
+    description: 'Count rows in any analytics table grouped by one to three columns.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: 'Table or view name without database prefix.' },
+        dimensions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'One to three column names to group by.',
+        },
+        filters: {
+          type: 'object',
+          description: 'Optional equality filters by column name.',
+          additionalProperties: { type: ['string', 'number', 'boolean'] },
+        },
+        limit: { type: 'number', description: 'Maximum number of grouped rows.', default: 100 },
+      },
+      required: ['table', 'dimensions'],
+    },
+  },
+];
+
+function jsonRpc(id, result) {
+  return JSON.stringify({ jsonrpc: '2.0', id, result });
+}
+
+function jsonRpcError(id, code, message) {
+  return JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } });
+}
+
+function quoteString(value) {
+  return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+function quoteIdent(value) {
+  const text = String(value || '');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+    throw new Error(`Unsafe SQL identifier: ${text}`);
+  }
+  return `\`${text}\``;
+}
+
+function boundedLimit(value, fallback, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(Math.floor(parsed), max);
+}
+
+async function runQuery(query) {
+  const result = await clickhouse.query({ query, format: 'JSONEachRow' });
+  return result.json();
+}
+
+async function analyticsTableExists(table) {
+  const tableName = String(table || '').trim();
+  quoteIdent(tableName);
+  const rows = await runQuery(`
+    SELECT name
+    FROM system.tables
+    WHERE database = ${quoteString(database)}
+      AND name = ${quoteString(tableName)}
+    LIMIT 1
+  `);
+  if (rows.length === 0) {
+    throw new Error(`Unknown analytics table: ${tableName}`);
+  }
+  return tableName;
+}
+
+async function analyticsColumns(table) {
+  const tableName = await analyticsTableExists(table);
+  const columns = await runQuery(`
+    SELECT
+      name,
+      type,
+      default_kind,
+      default_expression
+    FROM system.columns
+    WHERE database = ${quoteString(database)}
+      AND table = ${quoteString(tableName)}
+    ORDER BY position
+  `);
+  return { tableName, columns };
+}
+
+async function analyticsColumnExists(table, column) {
+  const { tableName, columns } = await analyticsColumns(table);
+  const columnName = String(column || '').trim();
+  quoteIdent(columnName);
+  if (!columns.some(item => item.name === columnName)) {
+    throw new Error(`Unknown analytics column: ${tableName}.${columnName}`);
+  }
+  return { tableName, columnName };
+}
+
+async function handleRpc(payload) {
+  const { id, method, params } = payload;
+
+  if (method === 'initialize') {
+    return jsonRpc(id, {
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'clickhouse-analytics-mcp', version: '0.1.0' },
+    });
+  }
+
+  if (method === 'tools/list') {
+    return jsonRpc(id, { tools });
+  }
+
+  if (method !== 'tools/call') {
+    return method === 'notifications/initialized' ? '' : jsonRpcError(id, -32601, `Unknown method: ${method}`);
+  }
+
+  const name = params?.name;
+  const args = params?.arguments || {};
+
+  if (name === 'describe_analytics_schema') {
+    const rows = await runQuery(`
+      SELECT
+        table,
+        name,
+        type,
+        default_kind,
+        default_expression
+      FROM system.columns
+      WHERE database = ${quoteString(database)}
+      ORDER BY table, position
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] });
+  }
+
+  if (name === 'list_analytics_tables') {
+    const includeEmpty = args.include_empty !== false;
+    const rows = await runQuery(`
+      SELECT
+        database,
+        name AS table,
+        engine,
+        total_rows AS rows,
+        formatReadableSize(total_bytes) AS bytes
+      FROM system.tables
+      WHERE database = ${quoteString(database)}
+        ${includeEmpty ? '' : 'AND ifNull(total_rows, 0) > 0'}
+      ORDER BY database, name
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] });
+  }
+
+  if (name === 'list_non_empty_analytics_tables') {
+    const rows = await runQuery(`
+      SELECT
+        database,
+        name AS table,
+        engine,
+        total_rows AS rows,
+        formatReadableSize(total_bytes) AS bytes
+      FROM system.tables
+      WHERE database = ${quoteString(database)}
+        AND engine NOT LIKE '%View'
+        AND ifNull(total_rows, 0) > 0
+      ORDER BY database, name
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] });
+  }
+
+  if (name === 'describe_analytics_table') {
+    const { tableName, columns } = await analyticsColumns(args.table);
+    const metadata = await runQuery(`
+      SELECT
+        database,
+        name AS table,
+        engine,
+        total_rows AS rows,
+        formatReadableSize(total_bytes) AS bytes
+      FROM system.tables
+      WHERE database = ${quoteString(database)}
+        AND name = ${quoteString(tableName)}
+      LIMIT 1
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify({ metadata: metadata[0] || null, columns }, null, 2) }] });
+  }
+
+  if (name === 'sample_analytics_table') {
+    const tableName = await analyticsTableExists(args.table);
+    const limit = boundedLimit(args.limit, 10, 100);
+    const rows = await runQuery(`
+      SELECT *
+      FROM ${quoteIdent(database)}.${quoteIdent(tableName)}
+      LIMIT ${limit}
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] });
+  }
+
+  if (name === 'profile_analytics_table') {
+    const { tableName, columns } = await analyticsColumns(args.table);
+    const sampleLimit = boundedLimit(args.sample_limit, 5, 50);
+    const metadata = await runQuery(`
+      SELECT
+        database,
+        name AS table,
+        engine,
+        total_rows AS rows,
+        formatReadableSize(total_bytes) AS bytes
+      FROM system.tables
+      WHERE database = ${quoteString(database)}
+        AND name = ${quoteString(tableName)}
+      LIMIT 1
+    `);
+    const sampleRows = await runQuery(`
+      SELECT *
+      FROM ${quoteIdent(database)}.${quoteIdent(tableName)}
+      LIMIT ${sampleLimit}
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify({ metadata: metadata[0] || null, columns, sampleRows }, null, 2) }] });
+  }
+
+  if (name === 'distinct_analytics_values') {
+    const { tableName, columnName } = await analyticsColumnExists(args.table, args.column);
+    const limit = boundedLimit(args.limit, 100, 500);
+    const rows = await runQuery(`
+      SELECT
+        ${quoteIdent(columnName)} AS value,
+        count() AS rows
+      FROM ${quoteIdent(database)}.${quoteIdent(tableName)}
+      GROUP BY value
+      ORDER BY rows DESC, value ASC
+      LIMIT ${limit}
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] });
+  }
+
+  if (name === 'count_analytics_by') {
+    const tableName = await analyticsTableExists(args.table);
+    const dimensions = Array.isArray(args.dimensions) ? args.dimensions.slice(0, 3) : [];
+    if (dimensions.length === 0) {
+      throw new Error('count_analytics_by requires at least one dimension.');
+    }
+    const validatedDimensions = [];
+    for (const dimension of dimensions) {
+      const { columnName } = await analyticsColumnExists(tableName, dimension);
+      validatedDimensions.push(columnName);
+    }
+    const filters = args.filters && typeof args.filters === 'object' ? args.filters : {};
+    const whereParts = [];
+    for (const [column, value] of Object.entries(filters)) {
+      const { columnName } = await analyticsColumnExists(tableName, column);
+      whereParts.push(`${quoteIdent(columnName)} = ${typeof value === 'number' ? String(value) : quoteString(value)}`);
+    }
+    const limit = boundedLimit(args.limit, 100, 500);
+    const groupBy = validatedDimensions.map(quoteIdent).join(', ');
+    const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
+    const rows = await runQuery(`
+      SELECT
+        ${groupBy},
+        count() AS rows
+      FROM ${quoteIdent(database)}.${quoteIdent(tableName)}
+      ${whereClause}
+      GROUP BY ${groupBy}
+      ORDER BY rows DESC
+      LIMIT ${limit}
+    `);
+    return jsonRpc(id, { content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }] });
+  }
+
+  return jsonRpcError(id, -32602, `Unknown tool: ${name}`);
+}
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (req.method !== 'POST' || req.url !== '/mcp') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+    return;
+  }
+
+  let body = '';
+  req.on('data', chunk => {
+    body += chunk;
+  });
+
+  req.on('end', async () => {
+    try {
+      const payload = JSON.parse(body || '{}');
+      const response = await handleRpc(payload);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(response);
+    } catch (error) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(jsonRpcError(null, -32000, error.message));
+    }
+  });
+});
+
+server.listen(port, '0.0.0.0', () => {
+  console.log(`ClickHouse MCP server listening on ${port}`);
+});
+EOF
+```
+
 Проверка синтаксиса:
 
 ```bash
@@ -1834,28 +2250,103 @@ exec npm run backend
 EOF
 ```
 
-Добавить новую Ollama-модель в LibreChat:
+### 7.13 Добавить Модель В LibreChat
+
+LibreChat в этом проекте не ходит напрямую в Ollama или внешний LLM API.
+
+Цепочка такая:
+
+```text
+LibreChat
+  -> agent-proxy
+  -> UPSTREAM_OPENAI_BASE_URL
+```
+
+`agent-proxy` нужен, чтобы все запросы к модели проходили через одну точку и попадали в Langfuse traces.
+
+#### Вариант A: Добавить Локальную Ollama-Модель
+
+Сначала скачайте модель в Ollama на host-машине:
 
 ```bash
 ollama pull qwen3:14b
 ```
 
-В `.env` добавьте точный tag модели:
+Проверьте, что Ollama отдает модель через OpenAI-compatible endpoint:
+
+```bash
+curl http://localhost:11434/v1/models
+```
+
+В `.env` укажите Ollama как upstream для `agent-proxy`:
+
+```env
+UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+UPSTREAM_OPENAI_API_KEY=local-dev-key
+```
+
+`host.docker.internal` нужен на macOS, потому что LibreChat и `agent-proxy` работают внутри Docker, а Ollama обычно запущена на host-машине.
+
+Добавьте точный tag модели в список LibreChat:
 
 ```env
 LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
 OPENAI_MODEL_SMART=qwen3:14b
 ```
 
-После изменения `.env` пересоздайте LibreChat:
+`LIBRECHAT_MODELS` управляет тем, какие модели видны в dropdown LibreChat.
 
-```bash
-docker compose up -d --force-recreate librechat
+`OPENAI_MODEL` удобно держать быстрым дефолтом, например `qwen2.5:7b`.
+
+`OPENAI_MODEL_SMART` можно указывать на более сильную модель, например `qwen3:14b`.
+
+#### Вариант B: Добавить Внешнюю OpenAI-Compatible Модель
+
+Если модель находится во внешнем API, укажите внешний base URL и API key:
+
+```env
+UPSTREAM_OPENAI_BASE_URL=https://api.openai.com/v1
+UPSTREAM_OPENAI_API_KEY=sk-change-me
+LIBRECHAT_MODELS=gpt-4.1-mini,gpt-4.1
+OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL_SMART=gpt-4.1
 ```
 
-`render-config.sh` перечитает `.env` при старте контейнера и соберет `/app/librechat.yaml` с новым списком моделей.
+Для другого провайдера используйте его OpenAI-compatible endpoint:
 
-### 7.13 Создать `docker-compose.yml`
+```env
+UPSTREAM_OPENAI_BASE_URL=https://provider.example.com/v1
+UPSTREAM_OPENAI_API_KEY=provider-api-key
+LIBRECHAT_MODELS=provider-fast-model,provider-smart-model
+OPENAI_MODEL=provider-fast-model
+OPENAI_MODEL_SMART=provider-smart-model
+```
+
+Важно: имена в `LIBRECHAT_MODELS` должны совпадать с model ids, которые реально поддерживает upstream API.
+
+После любого изменения `.env` пересоздайте LibreChat и `agent-proxy`:
+
+```bash
+docker compose up -d --force-recreate agent-proxy librechat
+```
+
+`agent-proxy` перечитает `UPSTREAM_OPENAI_BASE_URL` и `UPSTREAM_OPENAI_API_KEY`.
+
+`render-config.sh` внутри LibreChat перечитает `LIBRECHAT_MODELS` и соберет `/app/librechat.yaml` с новым списком моделей.
+
+Проверить, что `agent-proxy` видит upstream models:
+
+```bash
+curl http://localhost:3344/v1/models
+```
+
+Проверить, что LibreChat получил новый список:
+
+```bash
+docker compose exec -T librechat sed -n '12,30p' /app/librechat.yaml
+```
+
+### 7.14 Создать `docker-compose.yml`
 
 Для локального all-in-one запуска создайте `docker-compose.yml` самостоятельно.
 
