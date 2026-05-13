@@ -79,7 +79,9 @@ ___
 ___
 **MCP server** — мост между моделью и инструментами.
 
-MCP означает Model Context Protocol. Это способ дать модели безопасные tools: посмотреть схему ClickHouse, выполнить read-only запрос, получить ссылку на Grafana panel.
+MCP означает Model Context Protocol. Это способ дать модели безопасные tools: посмотреть актуальную схему ClickHouse, найти непустые таблицы, показать профиль таблицы, выбрать примеры строк, посчитать уникальные значения и распределения, получить ссылку на Grafana panel.
+
+Сырой SQL-инструмент в LibreChat намеренно не публикуется. Модель должна интерпретировать вопрос пользователя, вызвать подходящий ClickHouse MCP tool и уже по результату tool сформулировать ответ без догадок.
 
 В других проектах MCP используют, когда модели нужно не просто отвечать текстом, а работать с внешними системами: БД, API, файлами, задачами, dashboards.
 
@@ -245,14 +247,40 @@ sh tools/clickhouse-clear.sh
 CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 ```
 
-Для LibreChat доступны MCP tools:
+Для LibreChat доступны ClickHouse MCP tools:
 
+- `list_analytics_tables`;
+- `list_non_empty_analytics_tables`;
+- `describe_analytics_schema`;
+- `describe_analytics_table`;
+- `sample_analytics_table`;
+- `profile_analytics_table`;
+- `distinct_analytics_values`;
+- `count_analytics_by`;
 - `prometheus_metric_summary`;
 - `prometheus_targets`;
 - `sample_prometheus_metrics`;
 - `prometheus_label_values`.
 
+Модель не должна показывать пользователю SQL или JSON payload tool-call. Правильная схема такая: модель понимает вопрос, вызывает один или несколько MCP tools, получает live-ответ от ClickHouse и только потом формулирует короткий человеческий ответ.
+
 Примеры запросов в LibreChat:
+
+```text
+Какие есть непустые таблицы в ClickHouse?
+```
+
+```text
+Что содержится в таблице car_inventory_raw?
+```
+
+```text
+Сходи в ClickHouse и найди все уникальные марки машин.
+```
+
+```text
+Посчитай количество строк по brand и city в car_inventory_raw.
+```
 
 ```text
 Проанализируй Prometheus targets: какие instance сейчас down?
@@ -422,7 +450,7 @@ CLICKHOUSE_SINK_TABLE=car_inventory_raw
 
 Старые demo-логи приложения по-прежнему могут жить в `analytics.app_events_raw`, но новая PostgreSQL demo-команда использует автомобильный складской домен.
 
-Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema, `CLICKHOUSE_SINK_TABLE`, Grafana panels и MCP-запросы.
+Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema, `CLICKHOUSE_SINK_TABLE` и Grafana panels. Generic MCP tools (`describe_analytics_table`, `sample_analytics_table`, `profile_analytics_table`, `distinct_analytics_values`, `count_analytics_by`) читают актуальные таблицы и колонки из ClickHouse, поэтому их не нужно хардкодить под demo-набор.
 
 ### Ремарка Про ClickHouse Sink
 
@@ -658,6 +686,22 @@ http://localhost:3080/login
 Примеры запросов:
 
 ```text
+Какие есть непустые таблицы в ClickHouse?
+```
+
+```text
+Что содержится в таблице car_inventory_raw?
+```
+
+```text
+Сходи в ClickHouse и найди все уникальные марки машин.
+```
+
+```text
+Посчитай количество машин по brand и city.
+```
+
+```text
 Проанализируй данные, мигрированные в ClickHouse через Debezium: какие routes самые проблемные по error rate и latency?
 ```
 
@@ -752,14 +796,28 @@ UPSTREAM_OPENAI_API_KEY=local-dev-key
 Список моделей для UI:
 
 ```env
-LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.2-vision:latest
+LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
 OPENAI_MODEL=qwen2.5:7b
-OPENAI_MODEL_SMART=qwen2.5:14b
+OPENAI_MODEL_SMART=qwen3:14b
 ```
 
-Моделей может быть сколько угодно.
+`qwen3:14b` уже добавлен в пример конфигурации LibreChat.
 
-Эти представлены для примера
+Добавление любой новой Ollama-модели выглядит так:
+
+```bash
+ollama pull qwen3:14b
+```
+
+Затем добавьте точный tag модели в `LIBRECHAT_MODELS` в `.env` и пересоздайте LibreChat:
+
+```bash
+docker compose up -d --force-recreate librechat
+```
+
+Менять Docker image для этого не нужно: `librechat/render-config.sh` на старте собирает `/app/librechat.yaml` из `.env` и `librechat/librechat.yaml.template`.
+
+Моделей может быть сколько угодно. `OPENAI_MODEL` удобно держать быстрым для обычного чата, а `OPENAI_MODEL_SMART` указывать на более сильную модель вроде `qwen3:14b`.
 
 ## Endpoints
 

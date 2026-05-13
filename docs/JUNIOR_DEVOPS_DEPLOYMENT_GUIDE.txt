@@ -251,10 +251,15 @@ MCP server дает модели набор tools.
 В этом проекте tools умеют:
 
 - смотреть схему ClickHouse;
-- выполнять read-only SELECT-запросы;
+- находить все и непустые таблицы в базе analytics;
+- профилировать любую актуальную таблицу из analytics;
+- выбирать sample rows;
+- считать уникальные значения и распределения по указанным колонкам;
 - считать error rate;
 - считать latency;
 - возвращать ссылки на Grafana.
+
+Сырой SQL-tool в LibreChat не публикуется. Модель должна понять вопрос пользователя, выбрать подходящий ClickHouse MCP tool, дождаться live-ответа ClickHouse и только после этого сформулировать ответ. Это важно, потому что таблицы и данные могут измениться после написания документации.
 
 LibreChat
 ---------
@@ -816,10 +821,10 @@ UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 
 OPENAI_MODEL=qwen2.5:7b
 OPENAI_MODEL_FAST=qwen2.5:7b
-OPENAI_MODEL_SMART=qwen2.5:14b
+OPENAI_MODEL_SMART=qwen3:14b
 OPENAI_MODEL_VISION=llama3.2-vision:latest
 OPENAI_EMBEDDING_MODEL=nomic-embed-text:latest
-LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,llama3.2-vision:latest
+LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
 LIBRECHAT_TITLE_MODEL=qwen2.5:7b
 LIBRECHAT_SUMMARY_MODEL=qwen2.5:7b
 EOF
@@ -1726,83 +1731,47 @@ http.createServer(async (req, res) => {
 EOF
 
 
-7.11 Создать Минимальный MCP Server
------------------------------------
+7.11 Создать MCP Server
+-----------------------
 
-MCP server можно начать с минимальной версии: healthcheck и read-only SELECT в ClickHouse.
+В текущем проекте MCP server должен публиковать не сырой SQL endpoint, а набор безопасных ClickHouse tools.
 
-Потом можно добавить tools для Grafana и готовые аналитические функции.
+Причина простая: LibreChat должен отвечать по актуальным данным без догадок. Модель интерпретирует вопрос пользователя, выбирает tool, tool валидирует таблицу и колонки через system.tables/system.columns, выполняет нужное чтение в ClickHouse и возвращает строки модели.
 
+Минимальный набор tools для этого проекта:
 
-cat > mcp-server/package.json <<'EOF'
-{
-  "name": "mcp-server",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "start": "node src/server.js"
-  },
-  "dependencies": {
-    "@clickhouse/client": "^1.12.1"
-  }
-}
-EOF
+- describe_analytics_schema;
+- list_analytics_tables;
+- list_non_empty_analytics_tables;
+- describe_analytics_table;
+- sample_analytics_table;
+- profile_analytics_table;
+- distinct_analytics_values;
+- count_analytics_by.
 
-cat > mcp-server/Dockerfile <<'EOF'
-FROM node:22-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY src ./src
-EXPOSE 3333
-CMD ["npm", "start"]
-EOF
+Дополнительно оставлены purpose-built tools для частых сценариев: Prometheus metrics, application events, route performance, model usage, error trends и Grafana visualization links.
 
-cat > mcp-server/src/server.js <<'EOF'
-import http from 'node:http';
-import { createClient } from '@clickhouse/client';
+Важно: tool вида run_readonly_query не нужен LibreChat. Если дать модели raw SQL tool, она начинает показывать пользователю SQL/JSON и иногда отвечает из истории вместо live-данных. В этой архитектуре SQL остается внутри MCP server, а наружу публикуются понятные операции над таблицами и колонками.
 
-const port = Number(process.env.PORT || 3333);
-const clickhouse = createClient({
-  url: process.env.CLICKHOUSE_HOST || 'http://clickhouse:8123',
-  username: process.env.CLICKHOUSE_USER || 'analytics',
-  password: process.env.CLICKHOUSE_PASSWORD || 'analytics_password',
-  database: process.env.CLICKHOUSE_DATABASE || 'analytics',
-});
-
-function sendJson(res, status, data) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
-}
-
-function isSafeSelect(query) {
-  return /^\s*select\b/i.test(query) && !/;\s*\S/.test(query);
-}
-
-http.createServer(async (req, res) => {
-  try {
-    if (req.method === 'GET' && req.url === '/health') {
-      return sendJson(res, 200, { ok: true });
-    }
-    if (req.method === 'POST' && req.url === '/query') {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const { query } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      if (!isSafeSelect(query)) return sendJson(res, 400, { error: 'Only single SELECT queries are allowed' });
-      const result = await clickhouse.query({ query, format: 'JSONEachRow' });
-      return sendJson(res, 200, await result.json());
-    }
-    sendJson(res, 404, { error: 'Not found' });
-  } catch (error) {
-    sendJson(res, 500, { error: error.message });
-  }
-}).listen(port, '0.0.0.0');
-EOF
+Файлы MCP server в репозитории:
 
 
-Важно: эта минимальная версия не является полной MCP streamable-http реализацией.
+mcp-server/package.json
+mcp-server/Dockerfile
+mcp-server/src/server.js
 
-Для production нужно расширить ее до полного MCP protocol и добавить tools под нужные сценарии аналитики.
+
+Проверка синтаксиса:
+
+
+node --check mcp-server/src/server.js
+
+
+Пересборка:
+
+
+docker compose up -d --build mcp-server
+
 
 7.12 Создать LibreChat Template
 -------------------------------
@@ -1837,6 +1806,16 @@ mcpServers:
     type: streamable-http
     url: http://mcp-server:3333/mcp
     timeout: 60000
+    serverInstructions: |
+      You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
+      By default, "ClickHouse data", "project data", and "tables" mean the analytics database only.
+      If the user asks for non-empty tables, always call list_non_empty_analytics_tables live in the current turn.
+      If the user asks what tables or data are available, use list_analytics_tables or describe_analytics_schema before answering.
+      If the user asks what data is inside a specific table, use profile_analytics_table or sample_analytics_table.
+      If the user asks for unique values, use distinct_analytics_values.
+      If the user asks for counts or distributions, use count_analytics_by.
+      Do not write SQL in the answer as if the user should run it. Do not show JSON tool-call payloads to the user.
+      Never invent table names, columns, rows, JSON/tool results, or Prometheus metric tables.
 EOF
 
 
@@ -1848,7 +1827,7 @@ cat > librechat/render-config.sh <<'EOF'
 set -eu
 
 models="${LIBRECHAT_MODELS:-${OPENAI_MODEL:-qwen2.5:7b}}"
-title_model="${LIBRECHAT_TITLE_MODEL:-${OPENAI_MODEL:-qwen2.5:7b}}"
+title_model="${LIBRECHAT_TITLE_MODEL:-${OPENAI_MODEL:-$(printf '%s' "$models" | cut -d, -f1)}}"
 summary_model="${LIBRECHAT_SUMMARY_MODEL:-$title_model}"
 model_yaml=""
 
@@ -1862,6 +1841,11 @@ for model in $models; do
   fi
 done
 IFS="$old_ifs"
+
+if [ -z "$model_yaml" ]; then
+  model_yaml='          - "qwen2.5:7b"
+'
+fi
 
 export AGENT_PROXY_API_KEY="${AGENT_PROXY_API_KEY:-local-dev-key}"
 export AGENT_PROXY_BASE_URL="${AGENT_PROXY_BASE_URL:-http://agent-proxy:3344/v1}"
@@ -1888,6 +1872,27 @@ PY
 exec npm run backend
 EOF
 
+
+Добавить новую Ollama-модель в LibreChat:
+
+
+ollama pull qwen3:14b
+
+
+В .env добавьте точный tag модели:
+
+
+LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
+OPENAI_MODEL_SMART=qwen3:14b
+
+
+После изменения .env пересоздайте LibreChat:
+
+
+docker compose up -d --force-recreate librechat
+
+
+render-config.sh перечитает .env при старте контейнера и соберет /app/librechat.yaml с новым списком моделей.
 
 7.13 Создать docker-compose.yml
 -------------------------------

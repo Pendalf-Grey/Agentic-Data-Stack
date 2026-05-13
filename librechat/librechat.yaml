@@ -16,6 +16,7 @@ endpoints:
         default:
           - "qwen2.5:7b"
           - "qwen2.5:14b"
+          - "qwen3:14b"
           - "llama3.2-vision:latest"
         fetch: false
       titleConvo: true
@@ -27,3 +28,25 @@ mcpServers:
   clickhouse-analytics:
     type: streamable-http
     url: http://mcp-server:3333/mcp
+    timeout: 60000
+    serverInstructions: |
+      You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
+      If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
+      By default, "ClickHouse data", "project data", and "tables" mean the analytics database only. Do not report langfuse or system database tables unless the user explicitly asks for infrastructure/internal tables.
+      If the user asks for non-empty tables, always call list_non_empty_analytics_tables live in the current turn and report only the rows returned by that tool. Do not answer this from chat history, memory, Prometheus metric summaries, or sample rows.
+      If the user asks what tables or data are available, use list_analytics_tables or describe_analytics_schema before answering.
+      If the user asks what data is inside a specific table, use profile_analytics_table or sample_analytics_table.
+      If the user asks for unique values, use distinct_analytics_values.
+      If the user asks for counts or distributions, use count_analytics_by.
+      If the table name or column name is not explicit enough, inspect the live schema first and never guess identifiers.
+      Never call Prometheus metric names tables. Names such as synthetic_log_events_total, synthetic_service_up, and up are metric_name values inside analytics.prometheus_samples, not ClickHouse tables.
+      Do not write SQL in the answer as if the user should run it. Do not show JSON tool-call payloads to the user. Use the available clickhouse-analytics MCP tools to get the answer, then summarize the returned rows.
+      Do not claim that you executed SQL unless a tool call actually returned results. Never invent table names, columns, rows, JSON/tool results, or Prometheus metric tables.
+      Prefer purpose-built tools such as describe_analytics_table, sample_analytics_table, profile_analytics_table, distinct_analytics_values, count_analytics_by, list_non_empty_analytics_tables, list_analytics_tables, prometheus_metric_summary, prometheus_targets, sample_prometheus_metrics, prometheus_label_values, event_summary, route_performance, model_usage, and error_trends.
+      Use these tools when the user asks about application events, logs, users, routes, latency, errors, model usage, token usage, cost, or data migrated through Debezium.
+      Use these tools when the user asks about Prometheus metrics, targets, samples, incidents, synthetic monitoring data, or data in ClickHouse.
+      Start with describe_analytics_schema when you need the available objects and columns. Start with describe_analytics_table when the user names one table.
+      Prefer the purpose-built tools route_performance, model_usage, error_trends, and event_summary for common analytical questions.
+      When the user asks to visualize, plot, chart, graph, draw, or show trends, use visualize_event_volume, visualize_route_performance, or visualize_model_usage.
+      Visualization tools return a browser-ready Grafana short URL and a fallback panel URL. Include the browserShortUrl exactly in your answer, then explain the chart from the returned rows.
+      Never rewrite Grafana links, never invent d-solo URLs, and never use made-up dashboard UIDs. The user's browser must use http://localhost:3001. Do not use grafana:3000, grafana-server:3000, or localhost:3000.

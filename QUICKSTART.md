@@ -11,6 +11,17 @@ cp .env.example .env
 
 Если подключаетесь к внешней БД, заполните **host**, **port**, **user**, **password** и параметры active source-БД.
 
+Для локальной Ollama-модели `qwen3:14b` убедитесь, что она скачана и есть в списке LibreChat:
+
+```bash
+ollama pull qwen3:14b
+```
+
+```env
+LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
+OPENAI_MODEL_SMART=qwen3:14b
+```
+
 Если хотите просто проверить стек локально, загрузите demo-данные PostgreSQL в ClickHouse одной командой:
 
 ```bash
@@ -140,6 +151,30 @@ sh tools/clickhouse-tables.sh
 ![LibreChat model selector](docs/images/img_3.png)
 
 ![LibreChat MCP tools](docs/images/img_4.png)
+
+LibreChat должен отвечать по данным ClickHouse через MCP tools, а не показывать пользователю SQL или JSON tool-call. Примеры гибких вопросов, которые не завязаны на hardcode:
+
+```text
+Какие есть непустые таблицы в ClickHouse?
+```
+
+```text
+Что содержится в выбранной таблице?
+```
+
+```text
+Покажи уникальные значения нужной колонки.
+```
+
+```text
+Посчитай распределение по двум колонкам.
+```
+
+Если добавили новую Ollama-модель в `.env`, пересоздайте только LibreChat:
+
+```bash
+docker compose up -d --force-recreate librechat
+```
 
 ## 7. Langfuse
 
