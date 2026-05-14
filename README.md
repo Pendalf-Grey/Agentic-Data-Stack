@@ -284,7 +284,7 @@ CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 Создай красивый operational dashboard по Prometheus: availability, incidents, HTTP latency, HTTP errors, DB disk usage и replication lag.
 ```
 
-![img.png](img.png)
+![img_17.png](docs/images/img_17.png)
 
 
 ## External PostgreSQL
