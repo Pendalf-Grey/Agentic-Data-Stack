@@ -12,6 +12,8 @@
 docs/JUNIOR_DEVOPS_DEPLOYMENT_GUIDE.md
 ```
 
+![Agentic Data Stack data flow](docs/images/guide_architecture_flow.png)
+
 Для отдельной Prometheus demo-БД с синтетическими метриками используйте:
 
 ```text
@@ -21,6 +23,15 @@ prometheus-synthetic-lab/README.md
 Она имитирует мониторинг 1 PostgreSQL, 2 MySQL, 2 MongoDB и 5 сервисов, включая нормальную работу и аварии.
 
 ## Что Делают Сервисы
+
+| Сервис | Что Делает | Когда Смотреть |
+|---|---|---|
+| Debezium | читает изменения из source-БД и пишет события в Redpanda | когда не появляются новые строки в ClickHouse |
+| Prometheus connector | принимает `remote_write` и выполняет batch backfill в ClickHouse | когда нужны metrics history и operational dashboards |
+| ClickHouse | хранит analytics tables, Prometheus samples и Langfuse events | когда нужны быстрые агрегаты, таблицы и Grafana |
+| MCP server | публикует безопасные tools для LibreChat | когда модель должна отвечать по live-данным без догадок |
+| Grafana | строит dashboards по ClickHouse | когда нужен человекочитаемый график или таблица |
+| Langfuse | показывает traces, latency, tokens и ошибки LLM | когда нужно понять поведение модели и стоимость запросов |
 
 **Airflow** — планировщик.
 
@@ -153,6 +164,8 @@ ClickHouse хранит аналитическую копию, которая д
 Официальный ClickHouse Kafka Connect sink обычно ожидает, что target table уже существует. Поэтому auto-create в этой системе должен быть отдельным pre-step: `schema-bootstrap`.
 
 ## Prometheus В ClickHouse
+
+![Monitoring signal map](docs/images/guide_monitoring_map.png)
 
 Prometheus подключается не через Debezium.
 

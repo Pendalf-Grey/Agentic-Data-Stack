@@ -40,6 +40,8 @@ Prometheus
   -> MCP / LibreChat
 ```
 
+![Agentic Data Stack data flow](images/guide_architecture_flow.png)
+
 По-человечески:
 
 1. **Debezium** подключается к внешней БД и читает изменения.
@@ -51,6 +53,15 @@ Prometheus
 7. **Airflow** запускает регистрацию или обновление коннекторов по расписанию.
 8. **Langfuse** показывает traces LLM-запросов: что отправили в модель, что получили, какая модель отвечала и сколько времени занял вызов.
 9. **Prometheus connector** переносит метрики Prometheus в ClickHouse для анализа через LibreChat.
+
+| Слой | Компонент | Что Делает | Что Проверять |
+|---|---|---|---|
+| Source | PostgreSQL, MySQL, MongoDB, Prometheus | отдает бизнес-данные или metrics | доступность host/port, права пользователя, freshness |
+| Capture | Debezium, Prometheus connector | переносит изменения и samples | status connector, лаг, ошибки backfill/remote_write |
+| Transport | Redpanda | хранит поток событий для sink | broker health, topics, consumer lag |
+| Storage | ClickHouse | хранит analytics, Prometheus samples и Langfuse data | строки, disk usage, query latency |
+| UI/API | Grafana, MCP, LibreChat | показывает dashboards и дает LLM безопасные tools | health endpoints, dashboards, MCP tool responses |
+| LLM Observability | agent-proxy, Langfuse | вызывает модель и пишет traces | latency, errors, token usage, traces |
 
 ## 2. Что Делает Каждый Компонент
 ___
@@ -362,6 +373,8 @@ apply_active_connectors
 Первая — минимальная, чтобы поднять проект на ноутбуке и спокойно проверить всю цепочку.
 
 Вторая — рекомендованная production-like схема, когда компоненты раскладываются по разным машинам для отказоустойчивости.
+
+![Deployment resource profile](images/guide_resource_profile.png)
 ___
 ### Минимальная Схема Для Ноутбука
 
@@ -3449,6 +3462,8 @@ mc mirror minio/langfuse ./langfuse-minio-backup
 
 Минимально мониторить:
 
+![Monitoring signal map](images/guide_monitoring_map.png)
+
 - Redpanda health;
 - consumer lag ClickHouse sink connector;
 - Debezium connector status;
@@ -3681,3 +3696,69 @@ sh tools/prometheus-batch-to-clickhouse.sh
 24. Задать тестовый вопрос модели.
 25. Настроить backups.
 26. Настроить monitoring и alerts.
+
+## 23. Приложение: Скриншоты И Визуальные Материалы
+
+Этот раздел нужен для standalone DOCX/PDF-версии документа.
+
+Если файл `JUNIOR_DEVOPS_DEPLOYMENT_GUIDE.docx` передается отдельно от GitHub-проекта, картинки ниже уже встроены внутрь Word-документа.
+
+### 23.1 Архитектура И Monitoring
+
+![Agentic Data Stack data flow](images/guide_architecture_flow.png)
+
+![Deployment resource profile](images/guide_resource_profile.png)
+
+![Monitoring signal map](images/guide_monitoring_map.png)
+
+### 23.2 Prometheus, Airflow, LibreChat, Grafana И Langfuse
+
+![Prometheus synthetic lab](images/img_15.png)
+
+![Prometheus / Grafana dashboard](images/img_17.png)
+
+![Airflow UI](images/img_13.png)
+
+![Airflow login](images/img_12.png)
+
+![Airflow DAG trigger](images/img_14.png)
+
+![LibreChat UI](images/img.png)
+
+![LibreChat registration](images/img_1.png)
+
+![LibreChat chat window](images/img_2.png)
+
+![LibreChat model selector](images/img_3.png)
+
+![LibreChat MCP services](images/img_4.png)
+
+![LibreChat response example](images/img_9.png)
+
+![Grafana dashboard](images/img_5.png)
+
+![Langfuse organizations](images/img_6.png)
+
+![Langfuse project](images/img_7.png)
+
+![Langfuse traces](images/img_10.png)
+
+![Langfuse trace details](images/img_8.png)
+
+![Langfuse generation details](images/img_11.png)
+
+### 23.3 Дополнительные Скриншоты Из Процесса Настройки
+
+![Additional screenshot](img.png)
+
+![Additional screenshot 1](img_1.png)
+
+![Additional screenshot 2](img_2.png)
+
+![Additional screenshot 3](img_3.png)
+
+![Additional screenshot 4](img_4.png)
+
+![Additional screenshot 5](img_5.png)
+
+![Additional screenshot 6](img_6.png)

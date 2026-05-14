@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 
+from PIL import Image
 from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_ALIGN_VERTICAL
-from docx.enum.text import WD_BREAK
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
@@ -84,7 +86,7 @@ def set_cell_border(cell, color: str = "D9DEE8", size: str = "6") -> None:
         element.set(qn("w:color"), color)
 
 
-def set_cell_margins(cell, margin: int = 90) -> None:
+def set_cell_margins(cell, margin: int = 130) -> None:
     tc_pr = cell._tc.get_or_add_tcPr()
     margins = tc_pr.first_child_found_in("w:tcMar")
     if margins is None:
@@ -109,6 +111,42 @@ def set_cell_width(cell, width_dxa: int) -> None:
     tc_width.set(qn("w:type"), "dxa")
 
 
+def set_paragraph_shading(paragraph, fill: str) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    shading = p_pr.find(qn("w:shd"))
+    if shading is None:
+        shading = OxmlElement("w:shd")
+        p_pr.append(shading)
+    shading.set(qn("w:fill"), fill)
+
+
+def set_table_indent(table, indent_dxa: int = 120) -> None:
+    tbl_pr = table._tbl.tblPr
+    tbl_ind = tbl_pr.find(qn("w:tblInd"))
+    if tbl_ind is None:
+        tbl_ind = OxmlElement("w:tblInd")
+        tbl_pr.append(tbl_ind)
+    tbl_ind.set(qn("w:w"), str(indent_dxa))
+    tbl_ind.set(qn("w:type"), "dxa")
+
+
+def set_cant_split(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    cant_split = tr_pr.find(qn("w:cantSplit"))
+    if cant_split is None:
+        cant_split = OxmlElement("w:cantSplit")
+        tr_pr.append(cant_split)
+
+
+def paragraph_text(cell, text: str):
+    paragraph = cell.paragraphs[0]
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1.08
+    paragraph.text = ""
+    return paragraph
+
+
 def repeat_table_header(row) -> None:
     tr_pr = row._tr.get_or_add_trPr()
     repeat = OxmlElement("w:tblHeader")
@@ -130,6 +168,7 @@ def set_table_width(table, width_dxa: int) -> None:
         layout = OxmlElement("w:tblLayout")
         tbl_pr.append(layout)
     layout.set(qn("w:type"), "fixed")
+    set_table_indent(table)
 
 
 def column_widths(headers: list[str], page_width_dxa: int) -> list[int]:
@@ -138,6 +177,13 @@ def column_widths(headers: list[str], page_width_dxa: int) -> list[int]:
         "VM": 0.95,
         "Компонент": 1.45,
         "Компоненты": 2.8,
+        "Сервис": 1.45,
+        "Что Делает": 2.45,
+        "Когда Проверять": 1.75,
+        "Сигнал": 1.55,
+        "Действие": 2.55,
+        "Шаг": 0.8,
+        "Команда": 2.2,
         "Порт": 0.8,
         "Откуда Доступ": 1.55,
         "Для Чего": 2.45,
@@ -151,6 +197,19 @@ def column_widths(headers: list[str], page_width_dxa: int) -> list[int]:
     widths = [int(page_width_dxa * weight / total) for weight in weights]
     widths[-1] += page_width_dxa - sum(widths)
     return widths
+
+
+def is_numeric_header(header: str) -> bool:
+    lowered = header.lower()
+    numeric_tokens = ("cpu", "ram", "disk", "порт", "rows", "bytes", "samples", "%")
+    return any(token in lowered for token in numeric_tokens)
+
+
+def set_run_font(run, size: float, bold: bool = False, color: str = "172033", mono: bool = False) -> None:
+    run.bold = bold
+    run.font.name = "Courier New" if mono else "Arial"
+    run.font.size = Pt(size)
+    run.font.color.rgb = RGBColor.from_string(color)
 
 
 def add_word_table(document: Document, rows: list[list[str]]) -> None:
@@ -167,44 +226,104 @@ def add_word_table(document: Document, rows: list[list[str]]) -> None:
     table.allow_autofit = False
     set_table_width(table, usable_width_dxa)
     repeat_table_header(table.rows[0])
+    set_cant_split(table.rows[0])
 
     for column_index, header in enumerate(headers):
         cell = table.rows[0].cells[column_index]
         set_cell_width(cell, widths[column_index])
-        set_cell_margins(cell, 100)
-        set_cell_border(cell, "C6CCD8", "8")
-        set_cell_shading(cell, "EEF2F7")
+        set_cell_margins(cell, 140)
+        set_cell_border(cell, "1D4ED8", "8")
+        set_cell_shading(cell, "1E3A8A")
         cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        paragraph = cell.paragraphs[0]
+        paragraph = paragraph_text(cell, header)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if is_numeric_header(header) else WD_ALIGN_PARAGRAPH.LEFT
         run = paragraph.add_run(clean_inline_markdown(header))
-        run.bold = True
-        run.font.name = "Arial"
-        run.font.size = Pt(8.5)
+        set_run_font(run, 8.6, bold=True, color="FFFFFF")
 
-    for row_values in body:
+    for row_index, row_values in enumerate(body):
         cells = table.add_row().cells
+        set_cant_split(table.rows[-1])
         for column_index, value in enumerate(row_values):
             cell = cells[column_index]
             set_cell_width(cell, widths[column_index])
-            set_cell_margins(cell, 100)
-            set_cell_border(cell)
+            set_cell_margins(cell, 130)
+            set_cell_border(cell, "D9DEE8", "5")
+            if row_index % 2 == 1:
+                set_cell_shading(cell, "F8FAFC")
+            if re.search(r"\b(RUNNING|UP|OK|true|healthy)\b", value, flags=re.I):
+                set_cell_shading(cell, "DCFCE7")
+            elif re.search(r"\b(DOWN|FAILED|ERROR|false|critical)\b", value, flags=re.I):
+                set_cell_shading(cell, "FEE2E2")
             cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-            paragraph = cell.paragraphs[0]
-            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph = paragraph_text(cell, value)
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if is_numeric_header(headers[column_index]) else WD_ALIGN_PARAGRAPH.LEFT
             parts = re.split(r"(`[^`]+`)", value)
             for part in parts:
                 if not part:
                     continue
                 if part.startswith("`") and part.endswith("`"):
                     run = paragraph.add_run(part[1:-1])
-                    run.font.name = "Courier New"
-                    run.font.size = Pt(7.7)
+                    set_run_font(run, 7.7, mono=True, color="0F172A")
                 else:
                     run = paragraph.add_run(part.replace("**", "").replace("__", ""))
-                    run.font.name = "Arial"
-                    run.font.size = Pt(8)
+                    set_run_font(run, 8.0, color="172033")
 
     document.add_paragraph()
+
+
+def resolve_image_path(path_text: str) -> Path:
+    path = Path(path_text)
+    if path.is_absolute():
+        return path
+    source_relative = (SOURCE.parent / path).resolve()
+    if source_relative.exists():
+        return source_relative
+    return (ROOT / path).resolve()
+
+
+def add_image(document: Document, alt: str, image_path: Path) -> None:
+    if not image_path.exists():
+        paragraph_with_inline_code(document, f"[image not found: {image_path}]")
+        return
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run()
+    try:
+        run.add_picture(str(image_path), width=Inches(9.3))
+    except Exception:
+        with Image.open(image_path) as image:
+            normalized = image.convert("RGB")
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+                normalized.save(handle.name, "PNG")
+                normalized_path = handle.name
+        run.add_picture(normalized_path, width=Inches(8.2))
+    caption = document.add_paragraph()
+    caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    caption.paragraph_format.space_after = Pt(8)
+    caption_run = caption.add_run(clean_inline_markdown(alt) or image_path.name)
+    caption_run.italic = True
+    caption_run.font.name = "Arial"
+    caption_run.font.size = Pt(8.5)
+    caption_run.font.color.rgb = RGBColor(91, 100, 117)
+
+
+def add_horizontal_rule(document: Document) -> None:
+    paragraph = document.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(8)
+    paragraph.paragraph_format.space_after = Pt(8)
+    p_pr = paragraph._p.get_or_add_pPr()
+    borders = p_pr.find(qn("w:pBdr"))
+    if borders is None:
+        borders = OxmlElement("w:pBdr")
+        p_pr.append(borders)
+    bottom = borders.find(qn("w:bottom"))
+    if bottom is None:
+        bottom = OxmlElement("w:bottom")
+        borders.append(bottom)
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "8")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), "D9DEE8")
 
 
 def markdown_to_txt(markdown: str) -> str:
@@ -216,6 +335,13 @@ def markdown_to_txt(markdown: str) -> str:
 
         if line.startswith("```"):
             in_code = not in_code
+            lines.append("")
+            continue
+
+        if re.match(r"^\s*[-_]{3,}\s*$", line):
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append("-" * 72)
             lines.append("")
             continue
 
@@ -315,8 +441,19 @@ def markdown_to_docx(markdown: str):
             code_buffer.append(line)
             continue
 
+        if re.match(r"^\s*[-_]{3,}\s*$", line):
+            flush_table()
+            add_horizontal_rule(document)
+            continue
+
         if not line.strip():
             flush_table()
+            continue
+
+        image = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", line)
+        if image:
+            flush_table()
+            add_image(document, image.group(1), resolve_image_path(image.group(2)))
             continue
 
         if is_table_row(line):
