@@ -275,69 +275,17 @@ CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 
 Если пользователь просит dashboard по одной конкретной Prometheus-метрике, например `synthetic_log_events_total`, модель должна вызвать `create_prometheus_metric_dashboard`. `/goto` short URL остается вторичной ссылкой: основная ссылка должна быть вида `http://localhost:3001/d/<uid>/<slug>`.
 
-Пример ClickHouse SQL, который используется внутри Grafana dashboard для Prometheus metric `up`:
 
-```sql
-SELECT
-  toStartOfInterval(sample_time, INTERVAL 1 MINUTE) AS time,
-  if(JSONExtractString(labels_json, 'job') = '', 'unknown', JSONExtractString(labels_json, 'job')) AS series,
-  avg(value) AS value
-FROM analytics.prometheus_samples
-WHERE metric_name = 'up'
-  AND sample_time >= now() - INTERVAL 24 HOUR
-GROUP BY time, series
-ORDER BY time ASC, series ASC
-```
+Пример запроса в LibreChat:
 
-Примеры запросов в LibreChat:
 
-```text
-Какие есть непустые таблицы в ClickHouse?
-```
-
-```text
-Что содержится в таблице car_inventory_raw?
-```
-
-```text
-Сходи в ClickHouse и найди все уникальные марки машин.
-```
-
-```text
-Посчитай количество строк по brand и city в car_inventory_raw.
-```
-
-```text
-Создай dashboard по складам автомобилей: количество машин по городам и брендам.
-```
-
-```text
-Создай Grafana dashboard по inventory: сколько машин с пробегом больше 20000 в каждом городе.
-```
-
-```text
-Проанализируй Prometheus targets: какие instance сейчас down?
-```
-
-```text
-Покажи последние samples метрики up и объясни, где проблема.
-```
-
-```text
-Какие значения label job есть у метрики up?
-```
-
-```text
-Создай в Grafana dashboard по метрике up с разбивкой по job за последние 24 часа и дай ссылку.
-```
-
-```text
-Проанализируй prometheus_samples: какие instance и когда down, какие up? Сделай Grafana dashboard.
-```
 
 ```text
 Создай красивый operational dashboard по Prometheus: availability, incidents, HTTP latency, HTTP errors, DB disk usage и replication lag.
 ```
+
+![img.png](img.png)
+
 
 ## External PostgreSQL
 

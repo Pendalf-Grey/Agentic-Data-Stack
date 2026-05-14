@@ -3770,24 +3770,3 @@ sh tools/prometheus-batch-to-clickhouse.sh
 24. Задать тестовый вопрос модели.
 25. Настроить backups.
 26. Настроить monitoring и alerts.
-
-23. Что Обязательно Передать Следующей Смене
-============================================
-
-- Список машин и их роли.
-- Все внутренние DNS names и IP.
-- Какие ports открыты и почему.
-- Где лежат .env файлы.
-- Где хранятся secrets.
-- Какой ACTIVE_SOURCE_DB сейчас включен.
-- Какой AIRFLOW_MIGRATION_CRON сейчас активен.
-- Как проверить Debezium connector status.
-- Как проверить ClickHouse row count.
-- Какая команда используется для потоковой загрузки Prometheus в ClickHouse.
-- Какая команда используется для пакетной загрузки Prometheus в ClickHouse.
-- Где смотреть Grafana dashboards.
-- Как зайти в Airflow.
-- Как зайти в LibreChat.
-- Как зайти в Langfuse.
-- Как найти traces LLM-запросов.
-- Где backup и как восстановиться.
