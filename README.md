@@ -257,12 +257,37 @@ CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 - `profile_analytics_table`;
 - `distinct_analytics_values`;
 - `count_analytics_by`;
+- `create_car_inventory_dashboard`;
 - `prometheus_metric_summary`;
 - `prometheus_targets`;
 - `sample_prometheus_metrics`;
-- `prometheus_label_values`.
+- `prometheus_label_values`;
+- `create_prometheus_availability_dashboard`;
+- `create_prometheus_metric_dashboard`.
 
 Модель не должна показывать пользователю SQL или JSON payload tool-call. Правильная схема такая: модель понимает вопрос, вызывает один или несколько MCP tools, получает live-ответ от ClickHouse и только потом формулирует короткий человеческий ответ.
+
+Если пользователь просит создать dashboard в Grafana по PostgreSQL demo inventory-данным, модель должна вызвать `create_car_inventory_dashboard` и отправить в чат прямой `browserUrl`, который вернул tool.
+
+Если пользователь просит создать dashboard в Grafana по Prometheus up/down, instance health, availability, incidents, service health, DB health или HTTP health, модель должна вызвать `create_prometheus_availability_dashboard` и отправить в чат прямой `browserUrl`, который вернул tool.
+
+Важно: Prometheus metric `up` в этом проекте показывает, жив ли scrape target `synthetic-exporter`. Это не список всех сервисов и БД. Для реального operational dashboard tool использует `synthetic_service_up`, `synthetic_incident_active`, HTTP latency/traffic и DB disk/lag/query метрики.
+
+Если пользователь просит dashboard по одной конкретной Prometheus-метрике, например `synthetic_log_events_total`, модель должна вызвать `create_prometheus_metric_dashboard`. `/goto` short URL остается вторичной ссылкой: основная ссылка должна быть вида `http://localhost:3001/d/<uid>/<slug>`.
+
+Пример ClickHouse SQL, который используется внутри Grafana dashboard для Prometheus metric `up`:
+
+```sql
+SELECT
+  toStartOfInterval(sample_time, INTERVAL 1 MINUTE) AS time,
+  if(JSONExtractString(labels_json, 'job') = '', 'unknown', JSONExtractString(labels_json, 'job')) AS series,
+  avg(value) AS value
+FROM analytics.prometheus_samples
+WHERE metric_name = 'up'
+  AND sample_time >= now() - INTERVAL 24 HOUR
+GROUP BY time, series
+ORDER BY time ASC, series ASC
+```
 
 Примеры запросов в LibreChat:
 
@@ -283,6 +308,14 @@ CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 ```
 
 ```text
+Создай dashboard по складам автомобилей: количество машин по городам и брендам.
+```
+
+```text
+Создай Grafana dashboard по inventory: сколько машин с пробегом больше 20000 в каждом городе.
+```
+
+```text
 Проанализируй Prometheus targets: какие instance сейчас down?
 ```
 
@@ -292,6 +325,18 @@ CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 
 ```text
 Какие значения label job есть у метрики up?
+```
+
+```text
+Создай в Grafana dashboard по метрике up с разбивкой по job за последние 24 часа и дай ссылку.
+```
+
+```text
+Проанализируй prometheus_samples: какие instance и когда down, какие up? Сделай Grafana dashboard.
+```
+
+```text
+Создай красивый operational dashboard по Prometheus: availability, incidents, HTTP latency, HTTP errors, DB disk usage и replication lag.
 ```
 
 ## External PostgreSQL

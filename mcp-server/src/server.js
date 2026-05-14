@@ -126,7 +126,7 @@ const tools = [
   },
   {
     name: 'count_analytics_by',
-    description: 'Count rows in any analytics table grouped by one to three columns, with optional equality filters. Use this for distribution and "how many by ..." questions.',
+    description: 'Count rows in any analytics table grouped by one to three columns, with optional equality and comparison filters. Use this for distribution and "how many by ..." questions, including conditions such as mileage_km > 20000.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -146,6 +146,26 @@ const tools = [
             type: ['string', 'number', 'boolean'],
           },
         },
+        filter_conditions: {
+          type: 'array',
+          description: 'Optional comparison filters. Operators: =, !=, >, >=, <, <=.',
+          items: {
+            type: 'object',
+            properties: {
+              column: { type: 'string', description: 'Column name.' },
+              operator: {
+                type: 'string',
+                enum: ['=', '!=', '>', '>=', '<', '<=', 'eq', 'ne', 'gt', 'gte', 'lt', 'lte'],
+                description: 'Comparison operator.',
+              },
+              value: {
+                type: ['string', 'number', 'boolean'],
+                description: 'Comparison value.',
+              },
+            },
+            required: ['column', 'operator', 'value'],
+          },
+        },
         limit: {
           type: 'number',
           description: 'Maximum number of grouped rows to return.',
@@ -153,6 +173,40 @@ const tools = [
         },
       },
       required: ['table', 'dimensions'],
+    },
+  },
+  {
+    name: 'create_car_inventory_dashboard',
+    description: 'Create a Grafana dashboard for car inventory data stored in analytics.car_inventory_raw and return a browser-ready dashboard link. Use this when the user asks to create, build, draw, or show a Grafana dashboard for warehouses, cars, cities, brands, stock status, prices, mileage, or vehicle inventory migrated from PostgreSQL.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'Optional dashboard title.',
+          default: 'Car Inventory Dashboard',
+        },
+        min_mileage_km: {
+          type: 'number',
+          description: 'Optional minimum mileage filter, inclusive.',
+        },
+        max_mileage_km: {
+          type: 'number',
+          description: 'Optional maximum mileage filter, inclusive.',
+        },
+        city: {
+          type: 'string',
+          description: 'Optional city filter.',
+        },
+        brand: {
+          type: 'string',
+          description: 'Optional brand filter.',
+        },
+        stock_status: {
+          type: 'string',
+          description: 'Optional stock status filter, for example available, reserved, or maintenance.',
+        },
+      },
     },
   },
   {
@@ -282,6 +336,68 @@ const tools = [
     },
   },
   {
+    name: 'create_prometheus_availability_dashboard',
+    description: 'Create a rich Grafana dashboard for Prometheus synthetic availability, incidents, HTTP health, and DB health stored in ClickHouse. Use this for up/down, instance health, incidents, service availability, and operational overview questions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        hours: {
+          type: 'number',
+          description: 'How many recent hours to include.',
+          default: 24,
+        },
+        bucket_minutes: {
+          type: 'number',
+          description: 'Bucket size in minutes for time series panels.',
+          default: 1,
+        },
+        title: {
+          type: 'string',
+          description: 'Optional dashboard title.',
+        },
+      },
+    },
+  },
+  {
+    name: 'create_prometheus_metric_dashboard',
+    description: 'Create a Grafana dashboard for one Prometheus metric stored in ClickHouse and return a browser-ready dashboard link. Use this when the user asks to create, build, draw, or show a Grafana dashboard for Prometheus data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metric_name: {
+          type: 'string',
+          description: 'Prometheus metric name stored in analytics.prometheus_samples, for example up, synthetic_http_request_duration_ms, or synthetic_log_events_total.',
+        },
+        group_by_label: {
+          type: 'string',
+          description: 'Optional Prometheus label to split series by, for example job, instance, service, route, or city.',
+          default: 'job',
+        },
+        aggregation: {
+          type: 'string',
+          enum: ['avg', 'min', 'max', 'p95', 'sum', 'count', 'last'],
+          description: 'Aggregation for samples inside each time bucket.',
+          default: 'avg',
+        },
+        hours: {
+          type: 'number',
+          description: 'How many recent hours to include.',
+          default: 24,
+        },
+        bucket_minutes: {
+          type: 'number',
+          description: 'Bucket size in minutes.',
+          default: 1,
+        },
+        title: {
+          type: 'string',
+          description: 'Optional dashboard title.',
+        },
+      },
+      required: ['metric_name'],
+    },
+  },
+  {
     name: 'error_trends',
     description: 'Analyze hourly errors by route and status code from migrated ClickHouse events.',
     inputSchema: {
@@ -387,12 +503,76 @@ function safeSqlIdentifier(value, fallback = '') {
   return text;
 }
 
+function safeLabelName(value, fallback = 'job') {
+  const text = String(value || fallback);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
+    throw new Error(`Unsafe Prometheus label name: ${text}`);
+  }
+  return text;
+}
+
+function safeDashboardTitle(value, fallback) {
+  const text = String(value || fallback).trim();
+  return text.replace(/[^\w\s:().,\-/]/g, '').slice(0, 90) || fallback;
+}
+
 function quoteIdent(value) {
   return `\`${String(value).replaceAll('`', '``')}\``;
 }
 
 function quoteString(value) {
   return `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+function sqlLiteral(value) {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error('Only finite numeric filter values are allowed.');
+    }
+    return String(value);
+  }
+  if (typeof value === 'boolean') {
+    return value ? '1' : '0';
+  }
+  return quoteString(value);
+}
+
+function normalizeFilterOperator(operator) {
+  const normalized = String(operator || '').trim().toLowerCase();
+  const operators = {
+    '=': '=',
+    eq: '=',
+    '!=': '!=',
+    ne: '!=',
+    '>': '>',
+    gt: '>',
+    '>=': '>=',
+    gte: '>=',
+    '<': '<',
+    lt: '<',
+    '<=': '<=',
+    lte: '<=',
+  };
+  const sqlOperator = operators[normalized];
+  if (!sqlOperator) {
+    throw new Error(`Unsupported filter operator: ${operator}`);
+  }
+  return sqlOperator;
+}
+
+function optionalStringFilter(column, value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  return `${quoteIdent(column)} = ${quoteString(text)}`;
+}
+
+function optionalNumericFilter(column, operator, value) {
+  if (value === undefined || value === null || value === '') {
+    return '';
+  }
+  return `${quoteIdent(column)} ${operator} ${sqlLiteral(Number(value))}`;
 }
 
 async function analyticsTableExists(table) {
@@ -432,14 +612,6 @@ async function analyticsColumnExists(table, column) {
     throw new Error(`Unknown column ${columnName} in analytics.${tableName}`);
   }
   return { tableName, columnName, columns };
-}
-
-function safeLabelName(value) {
-  const text = String(value || '');
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
-    throw new Error(`Unsafe Prometheus label name: ${text}`);
-  }
-  return text;
 }
 
 function numberValue(value) {
@@ -626,7 +798,10 @@ function grafanaRelativePanelPath(panelId, from = 'now-24h', to = 'now') {
 }
 
 async function createGrafanaShortUrl(panelId, from = 'now-24h', to = 'now') {
-  const path = grafanaRelativePanelPath(panelId, from, to);
+  return createGrafanaShortUrlForPath(grafanaRelativePanelPath(panelId, from, to));
+}
+
+async function createGrafanaShortUrlForPath(path) {
   const auth = Buffer.from(`${grafanaUser}:${grafanaPassword}`).toString('base64');
   const response = await fetch(`${grafanaApiUrl}/api/short-urls`, {
     method: 'POST',
@@ -644,6 +819,65 @@ async function createGrafanaShortUrl(panelId, from = 'now-24h', to = 'now') {
 
   const payload = await response.json();
   return `${grafanaBaseUrl}/goto/${payload.uid}?orgId=1`;
+}
+
+async function createGrafanaDashboard(dashboard) {
+  const auth = Buffer.from(`${grafanaUser}:${grafanaPassword}`).toString('base64');
+  const response = await fetch(`${grafanaApiUrl}/api/dashboards/db`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      dashboard,
+      folderId: 0,
+      overwrite: true,
+      message: 'Created by Agentic Data Stack MCP',
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`Grafana dashboard create failed: ${response.status} ${message}`);
+  }
+
+  return response.json();
+}
+
+async function grafanaDashboardResponse(id, rows, metadata) {
+  const grafanaUrl = `${grafanaBaseUrl}${metadata.dashboardPath}`;
+  let grafanaShortUrl = '';
+  try {
+    grafanaShortUrl = await createGrafanaShortUrlForPath(metadata.dashboardPath.replace(/^\//, ''));
+  } catch (error) {
+    console.error(error.message);
+  }
+
+  return jsonRpc(id, {
+    content: [
+      {
+        type: 'text',
+        text: [
+          `Browser-ready Grafana dashboard URL (copy exactly, do not rewrite host or port): ${grafanaUrl}`,
+          `Grafana short URL (secondary; use only if it opens on localhost:3001): ${grafanaShortUrl || 'not available'}`,
+          `Important: use localhost:3001 for the user's browser. Do not use grafana:3000, grafana-server:3000, or port 3000.`,
+          '',
+          JSON.stringify({
+            metadata: {
+              ...metadata,
+              grafanaUrl,
+              grafanaShortUrl,
+              browserUrl: grafanaUrl,
+              browserShortUrl: grafanaUrl,
+              urlInstruction: 'Return browserUrl or browserShortUrl exactly as-is. The primary browserShortUrl intentionally equals the direct dashboard URL to avoid broken Grafana /goto redirects.',
+            },
+            rows,
+          }, null, 2),
+        ].join('\n'),
+      },
+    ],
+  });
 }
 
 async function grafanaResponse(id, rows, metadata) {
@@ -678,6 +912,408 @@ async function grafanaResponse(id, rows, metadata) {
         ].join('\n'),
       },
     ],
+  });
+}
+
+function clickhouseGrafanaTarget(rawSql, refId = 'A', format = 1) {
+  return {
+    datasource: {
+      type: 'grafana-clickhouse-datasource',
+      uid: 'clickhouse-analytics',
+    },
+    format,
+    rawSql,
+    refId,
+  };
+}
+
+async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
+  const hours = boundedLimit(args.hours, 24, 24 * 30);
+  const bucketMinutes = boundedLimit(args.bucket_minutes, 1, 60);
+  const title = safeDashboardTitle(args.title, 'Prometheus Availability Overview');
+  const uid = `prom-avail-${randomUUID().replaceAll('-', '').slice(0, 14)}`;
+  const datasource = {
+    type: 'grafana-clickhouse-datasource',
+    uid: 'clickhouse-analytics',
+  };
+  const timeFilter = `sample_time >= now() - INTERVAL ${hours} HOUR`;
+  const bucket = `toStartOfInterval(sample_time, INTERVAL ${bucketMinutes} MINUTE)`;
+  const serviceLabel = "JSONExtractString(labels_json, 'service')";
+  const instanceLabel = "JSONExtractString(labels_json, 'instance')";
+  const severityLabel = "JSONExtractString(labels_json, 'severity')";
+  const incidentLabel = "JSONExtractString(labels_json, 'incident')";
+
+  const targetCountSql = `
+    SELECT uniqExact(${instanceLabel}) AS targets
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_service_up'
+      AND ${timeFilter}
+  `.trim();
+  const downNowSql = `
+    SELECT countIf(last_value = 0) AS down_targets
+    FROM (
+      SELECT
+        ${instanceLabel} AS instance,
+        argMax(value, sample_time) AS last_value
+      FROM analytics.prometheus_samples
+      WHERE metric_name = 'synthetic_service_up'
+        AND ${timeFilter}
+      GROUP BY instance
+    )
+  `.trim();
+  const activeIncidentsSql = `
+    SELECT countIf(last_value = 1) AS active_incidents
+    FROM (
+      SELECT
+        ${incidentLabel} AS incident,
+        ${serviceLabel} AS service,
+        argMax(value, sample_time) AS last_value
+      FROM analytics.prometheus_samples
+      WHERE metric_name = 'synthetic_incident_active'
+        AND ${timeFilter}
+      GROUP BY incident, service
+    )
+  `.trim();
+  const exporterUpSql = `
+    SELECT min(value) AS scrape_up_min
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'up'
+      AND ${timeFilter}
+  `.trim();
+  const availabilityTimelineSql = `
+    SELECT
+      ${bucket} AS time,
+      concat(if(${serviceLabel} = '', 'unknown-service', ${serviceLabel}), ' / ', if(${instanceLabel} = '', 'unknown-instance', ${instanceLabel})) AS series,
+      min(value) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_service_up'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+  const downWindowsSql = `
+    SELECT
+      if(${serviceLabel} = '', 'unknown-service', ${serviceLabel}) AS service,
+      if(${instanceLabel} = '', 'unknown-instance', ${instanceLabel}) AS instance,
+      min(sample_time) AS first_seen_down,
+      max(sample_time) AS last_seen_down,
+      count() AS down_samples
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_service_up'
+      AND value = 0
+      AND ${timeFilter}
+    GROUP BY service, instance
+    ORDER BY last_seen_down DESC, down_samples DESC
+    LIMIT 100
+  `.trim();
+  const uptimeSql = `
+    SELECT
+      if(${serviceLabel} = '', 'unknown-service', ${serviceLabel}) AS service,
+      if(${instanceLabel} = '', 'unknown-instance', ${instanceLabel}) AS instance,
+      round(100 * avg(value), 2) AS uptime_percent,
+      countIf(value = 0) AS down_samples,
+      count() AS samples
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_service_up'
+      AND ${timeFilter}
+    GROUP BY service, instance
+    ORDER BY uptime_percent ASC, down_samples DESC, service ASC
+    LIMIT 100
+  `.trim();
+  const incidentTimelineSql = `
+    SELECT
+      ${bucket} AS time,
+      concat(if(${severityLabel} = '', 'unknown', ${severityLabel}), ': ', if(${incidentLabel} = '', 'incident', ${incidentLabel})) AS series,
+      max(value) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_incident_active'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+  const httpLatencySql = `
+    SELECT
+      ${bucket} AS time,
+      if(${serviceLabel} = '', 'unknown-service', ${serviceLabel}) AS series,
+      quantile(0.95)(value) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_http_request_duration_seconds_p95'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+  const httpTrafficSql = `
+    SELECT
+      toStartOfInterval(sample_time, INTERVAL 5 MINUTE) AS time,
+      concat(if(${serviceLabel} = '', 'unknown-service', ${serviceLabel}), ' ', if(JSONExtractString(labels_json, 'status_class') = '', 'status', JSONExtractString(labels_json, 'status_class'))) AS series,
+      greatest(max(value) - min(value), 0) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_http_requests_total'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+  const dbDiskSql = `
+    SELECT
+      ${bucket} AS time,
+      if(${serviceLabel} = '', 'unknown-db', ${serviceLabel}) AS series,
+      max(value) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_db_disk_usage_ratio'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+  const dbLagSql = `
+    SELECT
+      ${bucket} AS time,
+      if(${serviceLabel} = '', 'unknown-db', ${serviceLabel}) AS series,
+      max(value) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_db_replication_lag_seconds'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+  const dbQuerySql = `
+    SELECT
+      ${bucket} AS time,
+      if(${serviceLabel} = '', 'unknown-db', ${serviceLabel}) AS series,
+      quantile(0.95)(value) AS value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_db_query_duration_seconds_p95'
+      AND ${timeFilter}
+    GROUP BY time, series
+    ORDER BY time ASC, series ASC
+  `.trim();
+
+  const previewRows = await runQuery(`
+    SELECT
+      if(${serviceLabel} = '', 'unknown-service', ${serviceLabel}) AS service,
+      if(${instanceLabel} = '', 'unknown-instance', ${instanceLabel}) AS instance,
+      round(100 * avg(value), 2) AS uptime_percent,
+      countIf(value = 0) AS down_samples,
+      if(countIf(value = 0) = 0, '', toString(minIf(sample_time, value = 0))) AS first_seen_down,
+      if(countIf(value = 0) = 0, '', toString(maxIf(sample_time, value = 0))) AS last_seen_down,
+      argMax(value, sample_time) AS current_value
+    FROM analytics.prometheus_samples
+    WHERE metric_name = 'synthetic_service_up'
+      AND ${timeFilter}
+    GROUP BY service, instance
+    ORDER BY current_value ASC, uptime_percent ASC, down_samples DESC
+    LIMIT 50
+  `);
+
+  const stateMappings = [
+    {
+      type: 'value',
+      options: {
+        0: { text: 'DOWN', color: 'red' },
+        1: { text: 'UP', color: 'green' },
+      },
+    },
+  ];
+  const redGreenThresholds = {
+    mode: 'absolute',
+    steps: [
+      { color: 'red', value: null },
+      { color: 'green', value: 1 },
+    ],
+  };
+  const dashboard = {
+    id: null,
+    uid,
+    title,
+    description: 'Synthetic Prometheus operational dashboard generated from ClickHouse metrics. Raw metric up shows exporter scrape health; synthetic_service_up shows monitored service and database availability.',
+    tags: ['agentic-data-stack', 'prometheus', 'availability', 'clickhouse'],
+    timezone: 'browser',
+    schemaVersion: 39,
+    version: 0,
+    refresh: '30s',
+    time: {
+      from: `now-${hours}h`,
+      to: 'now',
+    },
+    panels: [
+      {
+        id: 1,
+        title: 'Monitored targets',
+        type: 'stat',
+        datasource,
+        gridPos: { h: 4, w: 6, x: 0, y: 0 },
+        fieldConfig: { defaults: { color: { mode: 'thresholds' }, thresholds: redGreenThresholds }, overrides: [] },
+        options: { colorMode: 'background', graphMode: 'none', justifyMode: 'center', reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false }, textMode: 'auto' },
+        targets: [clickhouseGrafanaTarget(targetCountSql, 'A', 1)],
+      },
+      {
+        id: 2,
+        title: 'Down now',
+        type: 'stat',
+        datasource,
+        gridPos: { h: 4, w: 6, x: 6, y: 0 },
+        fieldConfig: {
+          defaults: {
+            color: { mode: 'thresholds' },
+            thresholds: { mode: 'absolute', steps: [{ color: 'green', value: null }, { color: 'red', value: 1 }] },
+          },
+          overrides: [],
+        },
+        options: { colorMode: 'background', graphMode: 'none', justifyMode: 'center', reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false }, textMode: 'auto' },
+        targets: [clickhouseGrafanaTarget(downNowSql, 'A', 1)],
+      },
+      {
+        id: 3,
+        title: 'Active incidents',
+        type: 'stat',
+        datasource,
+        gridPos: { h: 4, w: 6, x: 12, y: 0 },
+        fieldConfig: {
+          defaults: {
+            color: { mode: 'thresholds' },
+            thresholds: { mode: 'absolute', steps: [{ color: 'green', value: null }, { color: 'orange', value: 1 }, { color: 'red', value: 3 }] },
+          },
+          overrides: [],
+        },
+        options: { colorMode: 'background', graphMode: 'none', justifyMode: 'center', reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false }, textMode: 'auto' },
+        targets: [clickhouseGrafanaTarget(activeIncidentsSql, 'A', 1)],
+      },
+      {
+        id: 4,
+        title: 'Prometheus scrape health',
+        type: 'stat',
+        datasource,
+        gridPos: { h: 4, w: 6, x: 18, y: 0 },
+        fieldConfig: { defaults: { color: { mode: 'thresholds' }, mappings: stateMappings, thresholds: redGreenThresholds }, overrides: [] },
+        options: { colorMode: 'background', graphMode: 'none', justifyMode: 'center', reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false }, textMode: 'auto' },
+        targets: [clickhouseGrafanaTarget(exporterUpSql, 'A', 1)],
+      },
+      {
+        id: 5,
+        title: 'Service availability timeline',
+        type: 'state-timeline',
+        datasource,
+        gridPos: { h: 9, w: 24, x: 0, y: 4 },
+        fieldConfig: { defaults: { color: { mode: 'thresholds' }, mappings: stateMappings, thresholds: redGreenThresholds }, overrides: [] },
+        options: { alignValue: 'center', legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, mergeValues: true, showValue: 'auto', tooltip: { mode: 'multi', sort: 'none' } },
+        targets: [clickhouseGrafanaTarget(availabilityTimelineSql, 'A', 0)],
+      },
+      {
+        id: 6,
+        title: 'Down windows',
+        type: 'table',
+        datasource,
+        gridPos: { h: 8, w: 12, x: 0, y: 13 },
+        targets: [clickhouseGrafanaTarget(downWindowsSql, 'A', 1)],
+      },
+      {
+        id: 7,
+        title: 'Uptime by service',
+        type: 'table',
+        datasource,
+        gridPos: { h: 8, w: 12, x: 12, y: 13 },
+        fieldConfig: {
+          defaults: { custom: { align: 'auto', cellOptions: { type: 'auto' } } },
+          overrides: [
+            {
+              matcher: { id: 'byName', options: 'uptime_percent' },
+              properties: [
+                { id: 'unit', value: 'percent' },
+                { id: 'custom.cellOptions', value: { type: 'color-background' } },
+                { id: 'thresholds', value: { mode: 'absolute', steps: [{ color: 'red', value: null }, { color: 'orange', value: 95 }, { color: 'green', value: 99 }] } },
+              ],
+            },
+          ],
+        },
+        targets: [clickhouseGrafanaTarget(uptimeSql, 'A', 1)],
+      },
+      {
+        id: 8,
+        title: 'Incident timeline',
+        type: 'state-timeline',
+        datasource,
+        gridPos: { h: 7, w: 24, x: 0, y: 21 },
+        fieldConfig: { defaults: { color: { mode: 'thresholds' }, mappings: stateMappings, thresholds: redGreenThresholds }, overrides: [] },
+        options: { alignValue: 'center', legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, mergeValues: true, showValue: 'auto', tooltip: { mode: 'multi', sort: 'none' } },
+        targets: [clickhouseGrafanaTarget(incidentTimelineSql, 'A', 0)],
+      },
+      {
+        id: 9,
+        title: 'HTTP p95 latency by service',
+        type: 'timeseries',
+        datasource,
+        gridPos: { h: 8, w: 12, x: 0, y: 28 },
+        fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 's', custom: { drawStyle: 'line', fillOpacity: 10, lineWidth: 2, showPoints: 'never', spanNulls: false } }, overrides: [] },
+        options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        targets: [clickhouseGrafanaTarget(httpLatencySql, 'A', 0)],
+      },
+      {
+        id: 10,
+        title: 'HTTP requests per 5 min by status class',
+        type: 'timeseries',
+        datasource,
+        gridPos: { h: 8, w: 12, x: 12, y: 28 },
+        fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 'short', custom: { drawStyle: 'bars', fillOpacity: 35, lineWidth: 1, showPoints: 'never', stacking: { mode: 'normal', group: 'A' } } }, overrides: [] },
+        options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        targets: [clickhouseGrafanaTarget(httpTrafficSql, 'A', 0)],
+      },
+      {
+        id: 11,
+        title: 'DB disk usage ratio',
+        type: 'timeseries',
+        datasource,
+        gridPos: { h: 8, w: 8, x: 0, y: 36 },
+        fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 'percentunit', max: 1, min: 0, custom: { drawStyle: 'line', fillOpacity: 15, lineWidth: 2, showPoints: 'never' } }, overrides: [] },
+        options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        targets: [clickhouseGrafanaTarget(dbDiskSql, 'A', 0)],
+      },
+      {
+        id: 12,
+        title: 'DB replication lag',
+        type: 'timeseries',
+        datasource,
+        gridPos: { h: 8, w: 8, x: 8, y: 36 },
+        fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 's', custom: { drawStyle: 'line', fillOpacity: 15, lineWidth: 2, showPoints: 'never' } }, overrides: [] },
+        options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        targets: [clickhouseGrafanaTarget(dbLagSql, 'A', 0)],
+      },
+      {
+        id: 13,
+        title: 'DB query p95 latency',
+        type: 'timeseries',
+        datasource,
+        gridPos: { h: 8, w: 8, x: 16, y: 36 },
+        fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 's', custom: { drawStyle: 'line', fillOpacity: 15, lineWidth: 2, showPoints: 'never' } }, overrides: [] },
+        options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        targets: [clickhouseGrafanaTarget(dbQuerySql, 'A', 0)],
+      },
+    ],
+  };
+  const created = await createGrafanaDashboard(dashboard);
+  return grafanaDashboardResponse(id, previewRows, {
+    title,
+    dashboardUid: created.uid || uid,
+    dashboardPath: created.url || `/d/${uid}/${uid}`,
+    purpose: 'prometheus_availability_overview',
+    primaryMetric: 'synthetic_service_up',
+    note: 'Use synthetic_service_up for monitored service/database availability. Raw Prometheus up is only scrape health for the exporter target.',
+    hours,
+    bucketMinutes,
+    datasourceUid: 'clickhouse-analytics',
+    sql: {
+      targetCountSql,
+      downNowSql,
+      activeIncidentsSql,
+      exporterUpSql,
+      availabilityTimelineSql,
+      downWindowsSql,
+      uptimeSql,
+      incidentTimelineSql,
+      httpLatencySql,
+      httpTrafficSql,
+      dbDiskSql,
+      dbLagSql,
+      dbQuerySql,
+    },
   });
 }
 
@@ -860,7 +1496,13 @@ async function handleRpc(payload) {
       const whereParts = [];
       for (const [column, value] of Object.entries(filters)) {
         const { columnName } = await analyticsColumnExists(tableName, column);
-        whereParts.push(`${quoteIdent(columnName)} = ${typeof value === 'number' ? String(value) : quoteString(value)}`);
+        whereParts.push(`${quoteIdent(columnName)} = ${sqlLiteral(value)}`);
+      }
+      const filterConditions = Array.isArray(args.filter_conditions) ? args.filter_conditions : [];
+      for (const condition of filterConditions) {
+        const { columnName } = await analyticsColumnExists(tableName, condition?.column);
+        const operator = normalizeFilterOperator(condition?.operator);
+        whereParts.push(`${quoteIdent(columnName)} ${operator} ${sqlLiteral(condition?.value)}`);
       }
       const limit = boundedLimit(args.limit, 100, 500);
       const groupBy = validatedDimensions.map(quoteIdent).join(', ');
@@ -877,6 +1519,205 @@ async function handleRpc(payload) {
       `);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'create_car_inventory_dashboard') {
+      await analyticsTableExists('car_inventory_raw');
+      const title = safeDashboardTitle(args.title, 'Car Inventory Dashboard');
+      const uid = `cars-${randomUUID().replaceAll('-', '').slice(0, 18)}`;
+      const filters = [
+        optionalStringFilter('city', args.city),
+        optionalStringFilter('brand', args.brand),
+        optionalStringFilter('stock_status', args.stock_status),
+        optionalNumericFilter('mileage_km', '>=', args.min_mileage_km),
+        optionalNumericFilter('mileage_km', '<=', args.max_mileage_km),
+      ].filter(Boolean);
+      const whereClause = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+      const carsByCityBrandSql = `
+        SELECT
+          city,
+          brand,
+          count() AS cars
+        FROM analytics.car_inventory_raw
+        ${whereClause}
+        GROUP BY city, brand
+        ORDER BY city ASC, cars DESC, brand ASC
+      `.trim();
+      const carsByWarehouseSql = `
+        SELECT
+          city,
+          warehouse_name,
+          brand,
+          count() AS cars,
+          countIf(stock_status = 'available') AS available_cars,
+          countIf(stock_status = 'reserved') AS reserved_cars,
+          countIf(stock_status = 'maintenance') AS maintenance_cars,
+          round(avg(price_usd), 2) AS avg_price_usd,
+          round(avg(mileage_km), 0) AS avg_mileage_km
+        FROM analytics.car_inventory_raw
+        ${whereClause}
+        GROUP BY city, warehouse_name, brand
+        ORDER BY city ASC, warehouse_name ASC, cars DESC, brand ASC
+      `.trim();
+      const stockStatusSql = `
+        SELECT
+          city,
+          stock_status,
+          count() AS cars
+        FROM analytics.car_inventory_raw
+        ${whereClause}
+        GROUP BY city, stock_status
+        ORDER BY city ASC, cars DESC, stock_status ASC
+      `.trim();
+      const priceMileageSql = `
+        SELECT
+          city,
+          brand,
+          round(avg(price_usd), 2) AS avg_price_usd,
+          round(avg(mileage_km), 0) AS avg_mileage_km,
+          count() AS cars
+        FROM analytics.car_inventory_raw
+        ${whereClause}
+        GROUP BY city, brand
+        ORDER BY city ASC, cars DESC, brand ASC
+      `.trim();
+      const previewRows = await runQuery(`${carsByCityBrandSql} LIMIT 50`);
+      const dashboard = {
+        id: null,
+        uid,
+        title,
+        tags: ['agentic-data-stack', 'postgres', 'car-inventory', 'clickhouse'],
+        timezone: 'browser',
+        schemaVersion: 39,
+        version: 0,
+        refresh: '',
+        time: {
+          from: 'now-30d',
+          to: 'now',
+        },
+        panels: [
+          {
+            id: 1,
+            title: 'Cars by city and brand',
+            type: 'barchart',
+            datasource: {
+              type: 'grafana-clickhouse-datasource',
+              uid: 'clickhouse-analytics',
+            },
+            gridPos: { h: 10, w: 24, x: 0, y: 0 },
+            fieldConfig: {
+              defaults: {
+                color: { mode: 'palette-classic' },
+                custom: {
+                  axisPlacement: 'auto',
+                  fillOpacity: 70,
+                  lineWidth: 1,
+                },
+              },
+              overrides: [],
+            },
+            options: {
+              legend: { displayMode: 'list', placement: 'bottom', showLegend: true },
+              tooltip: { mode: 'multi', sort: 'none' },
+              orientation: 'auto',
+              stacking: 'none',
+            },
+            targets: [
+              {
+                datasource: {
+                  type: 'grafana-clickhouse-datasource',
+                  uid: 'clickhouse-analytics',
+                },
+                format: 1,
+                rawSql: carsByCityBrandSql,
+                refId: 'A',
+              },
+            ],
+          },
+          {
+            id: 2,
+            title: 'Cars by city and stock status',
+            type: 'barchart',
+            datasource: {
+              type: 'grafana-clickhouse-datasource',
+              uid: 'clickhouse-analytics',
+            },
+            gridPos: { h: 8, w: 12, x: 0, y: 10 },
+            targets: [
+              {
+                datasource: {
+                  type: 'grafana-clickhouse-datasource',
+                  uid: 'clickhouse-analytics',
+                },
+                format: 1,
+                rawSql: stockStatusSql,
+                refId: 'A',
+              },
+            ],
+          },
+          {
+            id: 3,
+            title: 'Average price and mileage by city and brand',
+            type: 'table',
+            datasource: {
+              type: 'grafana-clickhouse-datasource',
+              uid: 'clickhouse-analytics',
+            },
+            gridPos: { h: 8, w: 12, x: 12, y: 10 },
+            targets: [
+              {
+                datasource: {
+                  type: 'grafana-clickhouse-datasource',
+                  uid: 'clickhouse-analytics',
+                },
+                format: 1,
+                rawSql: priceMileageSql,
+                refId: 'A',
+              },
+            ],
+          },
+          {
+            id: 4,
+            title: 'Warehouse inventory detail',
+            type: 'table',
+            datasource: {
+              type: 'grafana-clickhouse-datasource',
+              uid: 'clickhouse-analytics',
+            },
+            gridPos: { h: 11, w: 24, x: 0, y: 18 },
+            targets: [
+              {
+                datasource: {
+                  type: 'grafana-clickhouse-datasource',
+                  uid: 'clickhouse-analytics',
+                },
+                format: 1,
+                rawSql: carsByWarehouseSql,
+                refId: 'A',
+              },
+            ],
+          },
+        ],
+      };
+      const created = await createGrafanaDashboard(dashboard);
+      return grafanaDashboardResponse(id, previewRows, {
+        title,
+        dashboardUid: created.uid || uid,
+        dashboardPath: created.url || `/d/${uid}/${uid}`,
+        sourceTable: 'analytics.car_inventory_raw',
+        filters: {
+          city: args.city || null,
+          brand: args.brand || null,
+          stockStatus: args.stock_status || null,
+          minMileageKm: args.min_mileage_km ?? null,
+          maxMileageKm: args.max_mileage_km ?? null,
+        },
+        datasourceUid: 'clickhouse-analytics',
+        carsByCityBrandSql,
+        carsByWarehouseSql,
+        stockStatusSql,
+        priceMileageSql,
       });
     }
 
@@ -1038,6 +1879,167 @@ async function handleRpc(payload) {
       `);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'create_prometheus_availability_dashboard') {
+      return createPrometheusAvailabilityDashboardResponse(id, args);
+    }
+
+    if (name === 'create_prometheus_metric_dashboard') {
+      const metricName = safeIdentifier(args.metric_name);
+      const groupByLabel = safeLabelName(args.group_by_label, 'job');
+      const aggregation = safeChoice(args.aggregation, ['avg', 'min', 'max', 'p95', 'sum', 'count', 'last'], 'avg');
+      const hours = boundedLimit(args.hours, 24, 24 * 30);
+      const bucketMinutes = boundedLimit(args.bucket_minutes, 1, 60);
+      const title = safeDashboardTitle(args.title, `Prometheus ${metricName}`);
+      if (metricName === 'up' && ['job', 'instance'].includes(groupByLabel)) {
+        return createPrometheusAvailabilityDashboardResponse(id, {
+          ...args,
+          hours,
+          bucket_minutes: bucketMinutes,
+          title: title === `Prometheus ${metricName}` ? 'Prometheus Availability Overview' : title,
+        });
+      }
+      const uid = `prom-${randomUUID().replaceAll('-', '').slice(0, 18)}`;
+      const labelExpression = `JSONExtractString(labels_json, ${quoteString(groupByLabel)})`;
+      const valueExpressionByAggregation = {
+        avg: 'avg(value)',
+        min: 'min(value)',
+        max: 'max(value)',
+        p95: 'quantile(0.95)(value)',
+        sum: 'sum(value)',
+        count: 'count()',
+        last: 'argMax(value, sample_time)',
+      };
+      const valueExpression = valueExpressionByAggregation[aggregation];
+      const timeseriesSql = `
+        SELECT
+          toStartOfInterval(sample_time, INTERVAL ${bucketMinutes} MINUTE) AS time,
+          if(${labelExpression} = '', 'unknown', ${labelExpression}) AS series,
+          ${valueExpression} AS value
+        FROM analytics.prometheus_samples
+        WHERE metric_name = ${quoteString(metricName)}
+          AND sample_time >= now() - INTERVAL ${hours} HOUR
+        GROUP BY time, series
+        ORDER BY time ASC, series ASC
+      `.trim();
+      const latestSql = `
+        SELECT
+          if(${labelExpression} = '', 'unknown', ${labelExpression}) AS series,
+          max(sample_time) AS last_sample_time,
+          argMax(value, sample_time) AS last_value,
+          count() AS samples
+        FROM analytics.prometheus_samples
+        WHERE metric_name = ${quoteString(metricName)}
+          AND sample_time >= now() - INTERVAL ${hours} HOUR
+        GROUP BY series
+        ORDER BY series ASC
+      `.trim();
+      const previewRows = await runQuery(`
+        SELECT
+          if(${labelExpression} = '', 'unknown', ${labelExpression}) AS series,
+          count() AS samples,
+          min(value) AS min_value,
+          max(value) AS max_value,
+          avg(value) AS avg_value,
+          argMax(value, sample_time) AS last_value
+        FROM analytics.prometheus_samples
+        WHERE metric_name = ${quoteString(metricName)}
+          AND sample_time >= now() - INTERVAL ${hours} HOUR
+        GROUP BY series
+        ORDER BY samples DESC, series ASC
+        LIMIT 50
+      `);
+      const dashboard = {
+        id: null,
+        uid,
+        title,
+        tags: ['agentic-data-stack', 'prometheus', 'clickhouse', metricName],
+        timezone: 'browser',
+        schemaVersion: 39,
+        version: 0,
+        refresh: '30s',
+        time: {
+          from: `now-${hours}h`,
+          to: 'now',
+        },
+        panels: [
+          {
+            id: 1,
+            title: `${metricName} by ${groupByLabel}`,
+            type: 'timeseries',
+            datasource: {
+              type: 'grafana-clickhouse-datasource',
+              uid: 'clickhouse-analytics',
+            },
+            gridPos: { h: 14, w: 24, x: 0, y: 0 },
+            fieldConfig: {
+              defaults: {
+                color: { mode: 'palette-classic' },
+                custom: {
+                  drawStyle: 'line',
+                  lineInterpolation: 'linear',
+                  lineWidth: 2,
+                  fillOpacity: 10,
+                  showPoints: 'never',
+                  spanNulls: false,
+                },
+              },
+              overrides: [],
+            },
+            options: {
+              legend: { displayMode: 'list', placement: 'bottom', showLegend: true },
+              tooltip: { mode: 'multi', sort: 'none' },
+            },
+            targets: [
+              {
+                datasource: {
+                  type: 'grafana-clickhouse-datasource',
+                  uid: 'clickhouse-analytics',
+                },
+                format: 0,
+                rawSql: timeseriesSql,
+                refId: 'A',
+              },
+            ],
+          },
+          {
+            id: 2,
+            title: `Latest ${metricName} values`,
+            type: 'table',
+            datasource: {
+              type: 'grafana-clickhouse-datasource',
+              uid: 'clickhouse-analytics',
+            },
+            gridPos: { h: 9, w: 24, x: 0, y: 14 },
+            targets: [
+              {
+                datasource: {
+                  type: 'grafana-clickhouse-datasource',
+                  uid: 'clickhouse-analytics',
+                },
+                format: 1,
+                rawSql: latestSql,
+                refId: 'A',
+              },
+            ],
+          },
+        ],
+      };
+      const created = await createGrafanaDashboard(dashboard);
+      return grafanaDashboardResponse(id, previewRows, {
+        title,
+        dashboardUid: created.uid || uid,
+        dashboardPath: created.url || `/d/${uid}/${uid}`,
+        metricName,
+        groupByLabel,
+        aggregation,
+        hours,
+        bucketMinutes,
+        datasourceUid: 'clickhouse-analytics',
+        timeseriesSql,
+        latestSql,
       });
     }
 

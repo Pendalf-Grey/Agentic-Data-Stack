@@ -58,26 +58,23 @@ ___
 
 **Debezium** — это CDC-сервис.
 
-Он не хранит данные как аналитическая БД.
-
-Он подключается к source-БД и читает журнал изменений.
+Он не хранит данные как аналитическая БД, но подключается к source-БД и читает журнал изменений.
 
 Для PostgreSQL это **WAL**.
 
-**WAL** означает **Write-Ahead Log**. Это журнал, куда PostgreSQL пишет изменения перед тем, как окончательно применить их в таблицах.
+- **WAL** означает **Write-Ahead Log**. Это журнал, куда PostgreSQL пишет изменения перед тем, как окончательно применить их в таблицах.
 
-Для MySQL это **binlog**.
+Для MySQL - **binlog**.
 
-**Binlog** означает **binary log**. Это журнал изменений MySQL.
+- **Binlog** означает **binary log**. Это журнал изменений MySQL.
 
-Для MongoDB это **change stream**.
+Для MongoDB - **change stream**.
 
-**Change stream** — API MongoDB, который позволяет подписаться на изменения документов.
+- **Change stream** — API MongoDB, который позволяет подписаться на изменения документов.
 
 В этом проекте Debezium работает внутри Kafka Connect runtime.
 
-Важно: Debezium не подходит для Prometheus.
-
+**Важно**: Debezium не подходит для Prometheus.
 Prometheus — не транзакционная БД с WAL/binlog/change stream.
 
 У Prometheus другой способ интеграции, и в локальном проекте он сведен к двум командам:
@@ -94,7 +91,7 @@ ___
 
 В локальном compose-стеке его не нужно настраивать руками через длинные `curl` или ручное редактирование `prometheus.yml`: используйте две команды из `tools/`.
 
-**Batch command** — единоразовая или периодическая выгрузка истории.
+- **Batch command** — единоразовая или периодическая выгрузка истории.
 
 Connector ходит в Prometheus HTTP API:
 
@@ -102,7 +99,7 @@ Connector ходит в Prometheus HTTP API:
 /api/v1/query_range
 ```
 
-**Streaming command** — потоковая выгрузка почти в realtime.
+- **Streaming command** — потоковая выгрузка почти в realtime.
 
 Prometheus сам отправляет новые samples в endpoint:
 
@@ -126,7 +123,6 @@ analytics.prometheus_samples
 
 Labels Prometheus сохраняются в поле `labels_json`.
 
-Это сделано намеренно: у разных метрик разные labels, и жесткая таблица с колонками `job`, `instance`, `pod`, `namespace`, `route` быстро стала бы неудобной.
 ___
 ### Redpanda
 
@@ -166,7 +162,7 @@ ___
 analytics.app_events_raw
 ```
 
-Важно: ClickHouse не является первичной БД в этой архитектуре.
+**Важно**: ClickHouse не является первичной БД в этой архитектуре.
 
 Первична та БД, из которой мы делаем миграцию: PostgreSQL, MySQL, MongoDB или другая source-БД.
 
@@ -184,11 +180,9 @@ ___
 
 Он читает данные из Redpanda topic и пишет их в ClickHouse table.
 
-Важно: ClickHouse sink не подключается к внешней БД.
+**Важно**: ClickHouse sink не подключается к внешней БД, а работает только после Debezium и Redpanda.
 
-Он работает только после Debezium и Redpanda.
-
-Конфиг находится здесь:
+Конфиг лежит здесь:
 
 ```text
 debezium/connectors/clickhouse-sink.json
@@ -220,6 +214,8 @@ pg.public.users=users_raw,pg.public.orders=orders_raw
 2. **Auto schema bootstrap mode** — отдельный bootstrap job сначала читает source schema и создает ClickHouse tables, а уже потом включается ClickHouse sink.
 
 Второй вариант полезен, когда source-БД чужая и заранее неизвестно, какие таблицы и поля придется мигрировать.
+
+Оба варианта реализованы в проекте.
 ___
 ### Grafana
 
@@ -1834,7 +1830,7 @@ const tools = [
   },
   {
     name: 'count_analytics_by',
-    description: 'Count rows in any analytics table grouped by one to three columns.',
+    description: 'Count rows in any analytics table grouped by one to three columns, with optional equality and comparison filters.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1848,6 +1844,22 @@ const tools = [
           type: 'object',
           description: 'Optional equality filters by column name.',
           additionalProperties: { type: ['string', 'number', 'boolean'] },
+        },
+        filter_conditions: {
+          type: 'array',
+          description: 'Optional comparison filters. Operators: =, !=, >, >=, <, <=.',
+          items: {
+            type: 'object',
+            properties: {
+              column: { type: 'string', description: 'Column name.' },
+              operator: {
+                type: 'string',
+                enum: ['=', '!=', '>', '>=', '<', '<=', 'eq', 'ne', 'gt', 'gte', 'lt', 'lte'],
+              },
+              value: { type: ['string', 'number', 'boolean'], description: 'Comparison value.' },
+            },
+            required: ['column', 'operator', 'value'],
+          },
         },
         limit: { type: 'number', description: 'Maximum number of grouped rows.', default: 100 },
       },
@@ -1866,6 +1878,35 @@ function jsonRpcError(id, code, message) {
 
 function quoteString(value) {
   return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+}
+
+function sqlLiteral(value) {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Only finite numeric filter values are allowed.');
+    return String(value);
+  }
+  if (typeof value === 'boolean') return value ? '1' : '0';
+  return quoteString(value);
+}
+
+function normalizeFilterOperator(operator) {
+  const operators = {
+    '=': '=',
+    eq: '=',
+    '!=': '!=',
+    ne: '!=',
+    '>': '>',
+    gt: '>',
+    '>=': '>=',
+    gte: '>=',
+    '<': '<',
+    lt: '<',
+    '<=': '<=',
+    lte: '<=',
+  };
+  const sqlOperator = operators[String(operator || '').trim().toLowerCase()];
+  if (!sqlOperator) throw new Error(`Unsupported filter operator: ${operator}`);
+  return sqlOperator;
 }
 
 function quoteIdent(value) {
@@ -2081,7 +2122,13 @@ async function handleRpc(payload) {
     const whereParts = [];
     for (const [column, value] of Object.entries(filters)) {
       const { columnName } = await analyticsColumnExists(tableName, column);
-      whereParts.push(`${quoteIdent(columnName)} = ${typeof value === 'number' ? String(value) : quoteString(value)}`);
+      whereParts.push(`${quoteIdent(columnName)} = ${sqlLiteral(value)}`);
+    }
+    const filterConditions = Array.isArray(args.filter_conditions) ? args.filter_conditions : [];
+    for (const condition of filterConditions) {
+      const { columnName } = await analyticsColumnExists(tableName, condition?.column);
+      const operator = normalizeFilterOperator(condition?.operator);
+      whereParts.push(`${quoteIdent(columnName)} ${operator} ${sqlLiteral(condition?.value)}`);
     }
     const limit = boundedLimit(args.limit, 100, 500);
     const groupBy = validatedDimensions.map(quoteIdent).join(', ');
@@ -2190,7 +2237,8 @@ mcpServers:
       If the user asks what tables or data are available, use list_analytics_tables or describe_analytics_schema before answering.
       If the user asks what data is inside a specific table, use profile_analytics_table or sample_analytics_table.
       If the user asks for unique values, use distinct_analytics_values.
-      If the user asks for counts or distributions, use count_analytics_by.
+      If the user asks for counts or distributions, use count_analytics_by. For conditions like greater than, less than, at least, more than, before, after, or over a threshold, use count_analytics_by.filter_conditions with operators >, >=, <, <=, !=, or =. Use filters only for equality.
+      For any ClickHouse data question, the first step must be a real MCP tool call, not a written plan. Do not answer "I will call a tool", do not print JSON with a tool name, and do not ask the user to run a tool. If a tool is available, call it.
       Do not write SQL in the answer as if the user should run it. Do not show JSON tool-call payloads to the user.
       Never invent table names, columns, rows, JSON/tool results, or Prometheus metric tables.
 EOF
@@ -2960,15 +3008,26 @@ sh tools/clickhouse-clear.sh
 - `prometheus_metric_summary`;
 - `prometheus_targets`;
 - `sample_prometheus_metrics`;
-- `prometheus_label_values`.
+- `prometheus_label_values`;
+- `create_prometheus_availability_dashboard`;
+- `create_prometheus_metric_dashboard`.
+
+Если пользователь просит создать dashboard в Grafana по Prometheus up/down, instance health, availability, incidents, service health, DB health или HTTP health, модель должна вызвать `create_prometheus_availability_dashboard`.
+
+Важно: Prometheus metric `up` в этом проекте показывает, жив ли scrape target `synthetic-exporter`. Это не список всех сервисов и БД. Для operational dashboard tool использует `synthetic_service_up`, `synthetic_incident_active`, HTTP latency/traffic и DB disk/lag/query метрики.
+
+Если пользователь просит dashboard по одной конкретной Prometheus-метрике, например `synthetic_log_events_total`, модель должна вызвать `create_prometheus_metric_dashboard`.
+
+Tool создает dashboard через Grafana API и возвращает прямой `browserUrl` вида `http://localhost:3001/d/<uid>/<slug>`.
+
+`/goto` short URL можно считать вторичной ссылкой, потому что он зависит от настроек Grafana `root_url`.
+
 
 Примеры запросов:
 
 ```text
 Проанализируй Prometheus targets: какие instance сейчас down?
 ```
-
-![LibreChat Prometheus analysis](images/img_16.png)
 
 ```text
 Покажи последние samples метрики up и объясни, какие targets проблемные.
@@ -2977,6 +3036,49 @@ sh tools/clickhouse-clear.sh
 ```text
 Какие значения label job есть у метрики http_requests_total?
 ```
+
+```text
+Создай в Grafana dashboard по метрике up с разбивкой по job за последние 24 часа и дай ссылку.
+```
+
+```text
+Проанализируй prometheus_samples: какие instance и когда down, какие up? Сделай Grafana dashboard.
+```
+
+```text
+Создай красивый operational dashboard по Prometheus: availability, incidents, HTTP latency, HTTP errors, DB disk usage и replication lag.
+```
+
+### 15.6 Grafana Dashboard По PostgreSQL Demo Inventory
+
+PostgreSQL demo inventory попадает в ClickHouse table:
+
+```text
+analytics.car_inventory_raw
+```
+
+Для этой таблицы LibreChat может использовать MCP tool:
+
+- `create_car_inventory_dashboard`.
+
+Если пользователь просит создать dashboard по складам, автомобилям, городам, брендам, пробегу, ценам или статусам машин, модель должна вызвать `create_car_inventory_dashboard`.
+
+Tool создает Grafana dashboard через API и возвращает прямой `browserUrl` вида `http://localhost:3001/d/<uid>/<slug>`.
+
+
+Примеры запросов:
+
+```text
+Создай dashboard по складам автомобилей: количество машин по городам и брендам.
+```
+
+![img_1.png](img_1.png)
+
+```text
+Создай Grafana dashboard по inventory: сколько машин с пробегом больше 20000 в каждом городе.
+```
+![img_3.png](img_3.png)
+
 
 ## 16. Развертывание Langfuse
 
