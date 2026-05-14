@@ -3014,7 +3014,7 @@ sh tools/clickhouse-clear.sh
 
 Если пользователь просит создать dashboard в Grafana по Prometheus up/down, instance health, availability, incidents, service health, DB health или HTTP health, модель должна вызвать `create_prometheus_availability_dashboard`.
 
-Важно: Prometheus metric `up` в этом проекте показывает, жив ли scrape target `synthetic-exporter`. Это не список всех сервисов и БД. Для operational dashboard tool использует `synthetic_service_up`, `synthetic_incident_active`, HTTP latency/traffic и DB disk/lag/query метрики.
+Важно: Prometheus metric `up` в этом проекте показывает, жив ли scrape target `synthetic-exporter`. Это не список всех сервисов и БД. Для operational dashboard tool использует `synthetic_service_up`, `synthetic_incident_active`, HTTP latency/traffic и DB disk/lag/query метрики. В availability-панелях служебный `synthetic-exporter:9201` скрывается, чтобы dashboard показывал реальные application/database targets.
 
 Если пользователь просит dashboard по одной конкретной Prometheus-метрике, например `synthetic_log_events_total`, модель должна вызвать `create_prometheus_metric_dashboard`.
 

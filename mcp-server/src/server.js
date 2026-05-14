@@ -845,11 +845,42 @@ async function createGrafanaDashboard(dashboard) {
   return response.json();
 }
 
+function formatToolRows(rows, limit = 20) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return 'No rows returned.';
+  }
+
+  const limitedRows = rows.slice(0, limit);
+  const columns = [...new Set(limitedRows.flatMap((row) => Object.keys(row)))];
+  const header = `| ${columns.join(' | ')} |`;
+  const separator = `| ${columns.map(() => '---').join(' | ')} |`;
+  const body = limitedRows.map((row) => {
+    const cells = columns.map((column) => {
+      const value = row[column];
+      if (value === null || value === undefined || value === '') {
+        return '';
+      }
+      return String(value).replaceAll('|', '\\|').replace(/\s+/g, ' ').slice(0, 120);
+    });
+    return `| ${cells.join(' | ')} |`;
+  });
+  const suffix = rows.length > limit ? `\n\n... ${rows.length - limit} more rows omitted.` : '';
+  return [header, separator, ...body].join('\n') + suffix;
+}
+
 async function grafanaDashboardResponse(id, rows, metadata) {
   const grafanaUrl = `${grafanaBaseUrl}${metadata.dashboardPath}`;
+  const {
+    dashboardUid,
+    dashboardPath,
+    ...publicMetadata
+  } = metadata;
+  const safeMetadata = Object.fromEntries(
+    Object.entries(publicMetadata).filter(([key]) => key !== 'sql' && !key.endsWith('Sql')),
+  );
   let grafanaShortUrl = '';
   try {
-    grafanaShortUrl = await createGrafanaShortUrlForPath(metadata.dashboardPath.replace(/^\//, ''));
+    grafanaShortUrl = await createGrafanaShortUrlForPath(dashboardPath.replace(/^\//, ''));
   } catch (error) {
     console.error(error.message);
   }
@@ -859,21 +890,15 @@ async function grafanaDashboardResponse(id, rows, metadata) {
       {
         type: 'text',
         text: [
-          `Browser-ready Grafana dashboard URL (copy exactly, do not rewrite host or port): ${grafanaUrl}`,
-          `Grafana short URL (secondary; use only if it opens on localhost:3001): ${grafanaShortUrl || 'not available'}`,
-          `Important: use localhost:3001 for the user's browser. Do not use grafana:3000, grafana-server:3000, or port 3000.`,
+          `Dashboard URL for the final answer: ${grafanaUrl}`,
+          grafanaShortUrl ? `Secondary short URL: ${grafanaShortUrl}` : 'Secondary short URL: not available',
+          `Final answer instruction: return only the dashboard URL above and a short summary from the rows below. Do not paste raw tool output, JSON, SQL, metadata, UID, path, or debug text. Do not rewrite the URL host or port.`,
           '',
-          JSON.stringify({
-            metadata: {
-              ...metadata,
-              grafanaUrl,
-              grafanaShortUrl,
-              browserUrl: grafanaUrl,
-              browserShortUrl: grafanaUrl,
-              urlInstruction: 'Return browserUrl or browserShortUrl exactly as-is. The primary browserShortUrl intentionally equals the direct dashboard URL to avoid broken Grafana /goto redirects.',
-            },
-            rows,
-          }, null, 2),
+          `Dashboard title: ${safeMetadata.title || 'Grafana dashboard'}`,
+          safeMetadata.note ? `Note: ${safeMetadata.note}` : '',
+          '',
+          'Rows for summary:',
+          formatToolRows(rows),
         ].join('\n'),
       },
     ],
@@ -942,12 +967,14 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
   const instanceLabel = "JSONExtractString(labels_json, 'instance')";
   const severityLabel = "JSONExtractString(labels_json, 'severity')";
   const incidentLabel = "JSONExtractString(labels_json, 'incident')";
+  const realTargetFilter = `${instanceLabel} != 'synthetic-exporter:9201'`;
 
   const targetCountSql = `
     SELECT uniqExact(${instanceLabel}) AS targets
     FROM analytics.prometheus_samples
     WHERE metric_name = 'synthetic_service_up'
       AND ${timeFilter}
+      AND ${realTargetFilter}
   `.trim();
   const downNowSql = `
     SELECT countIf(last_value = 0) AS down_targets
@@ -958,6 +985,7 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
       FROM analytics.prometheus_samples
       WHERE metric_name = 'synthetic_service_up'
         AND ${timeFilter}
+        AND ${realTargetFilter}
       GROUP BY instance
     )
   `.trim();
@@ -988,6 +1016,7 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     FROM analytics.prometheus_samples
     WHERE metric_name = 'synthetic_service_up'
       AND ${timeFilter}
+      AND ${realTargetFilter}
     GROUP BY time, series
     ORDER BY time ASC, series ASC
   `.trim();
@@ -1002,6 +1031,7 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     WHERE metric_name = 'synthetic_service_up'
       AND value = 0
       AND ${timeFilter}
+      AND ${realTargetFilter}
     GROUP BY service, instance
     ORDER BY last_seen_down DESC, down_samples DESC
     LIMIT 100
@@ -1016,6 +1046,7 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     FROM analytics.prometheus_samples
     WHERE metric_name = 'synthetic_service_up'
       AND ${timeFilter}
+      AND ${realTargetFilter}
     GROUP BY service, instance
     ORDER BY uptime_percent ASC, down_samples DESC, service ASC
     LIMIT 100
@@ -1099,6 +1130,7 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     FROM analytics.prometheus_samples
     WHERE metric_name = 'synthetic_service_up'
       AND ${timeFilter}
+      AND ${realTargetFilter}
     GROUP BY service, instance
     ORDER BY current_value ASC, uptime_percent ASC, down_samples DESC
     LIMIT 50
@@ -1118,6 +1150,22 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     steps: [
       { color: 'red', value: null },
       { color: 'green', value: 1 },
+    ],
+  };
+  const incidentMappings = [
+    {
+      type: 'value',
+      options: {
+        0: { text: 'OK', color: 'green' },
+        1: { text: 'ACTIVE', color: 'red' },
+      },
+    },
+  ];
+  const incidentThresholds = {
+    mode: 'absolute',
+    steps: [
+      { color: 'green', value: null },
+      { color: 'red', value: 1 },
     ],
   };
   const dashboard = {
@@ -1195,6 +1243,12 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         gridPos: { h: 9, w: 24, x: 0, y: 4 },
         fieldConfig: { defaults: { color: { mode: 'thresholds' }, mappings: stateMappings, thresholds: redGreenThresholds }, overrides: [] },
         options: { alignValue: 'center', legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, mergeValues: true, showValue: 'auto', tooltip: { mode: 'multi', sort: 'none' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(availabilityTimelineSql, 'A', 0)],
       },
       {
@@ -1232,8 +1286,14 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         type: 'state-timeline',
         datasource,
         gridPos: { h: 7, w: 24, x: 0, y: 21 },
-        fieldConfig: { defaults: { color: { mode: 'thresholds' }, mappings: stateMappings, thresholds: redGreenThresholds }, overrides: [] },
+        fieldConfig: { defaults: { color: { mode: 'thresholds' }, mappings: incidentMappings, thresholds: incidentThresholds }, overrides: [] },
         options: { alignValue: 'center', legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, mergeValues: true, showValue: 'auto', tooltip: { mode: 'multi', sort: 'none' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(incidentTimelineSql, 'A', 0)],
       },
       {
@@ -1244,6 +1304,12 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         gridPos: { h: 8, w: 12, x: 0, y: 28 },
         fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 's', custom: { drawStyle: 'line', fillOpacity: 10, lineWidth: 2, showPoints: 'never', spanNulls: false } }, overrides: [] },
         options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(httpLatencySql, 'A', 0)],
       },
       {
@@ -1254,6 +1320,12 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         gridPos: { h: 8, w: 12, x: 12, y: 28 },
         fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 'short', custom: { drawStyle: 'bars', fillOpacity: 35, lineWidth: 1, showPoints: 'never', stacking: { mode: 'normal', group: 'A' } } }, overrides: [] },
         options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(httpTrafficSql, 'A', 0)],
       },
       {
@@ -1264,6 +1336,12 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         gridPos: { h: 8, w: 8, x: 0, y: 36 },
         fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 'percentunit', max: 1, min: 0, custom: { drawStyle: 'line', fillOpacity: 15, lineWidth: 2, showPoints: 'never' } }, overrides: [] },
         options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(dbDiskSql, 'A', 0)],
       },
       {
@@ -1274,6 +1352,12 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         gridPos: { h: 8, w: 8, x: 8, y: 36 },
         fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 's', custom: { drawStyle: 'line', fillOpacity: 15, lineWidth: 2, showPoints: 'never' } }, overrides: [] },
         options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(dbLagSql, 'A', 0)],
       },
       {
@@ -1284,6 +1368,12 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
         gridPos: { h: 8, w: 8, x: 16, y: 36 },
         fieldConfig: { defaults: { color: { mode: 'palette-classic' }, unit: 's', custom: { drawStyle: 'line', fillOpacity: 15, lineWidth: 2, showPoints: 'never' } }, overrides: [] },
         options: { legend: { displayMode: 'list', placement: 'bottom', showLegend: true }, tooltip: { mode: 'multi', sort: 'desc' } },
+        transformations: [
+          {
+            id: 'renameByRegex',
+            options: { regex: '^value (.*)$', renamePattern: '$1' },
+          },
+        ],
         targets: [clickhouseGrafanaTarget(dbQuerySql, 'A', 0)],
       },
     ],
