@@ -252,7 +252,9 @@ ___
 
 Пользователь задает вопрос в LibreChat.
 
-Модель через MCP tools обращается к ClickHouse и Grafana.
+Модель через MCP tools обращается к ClickHouse.
+
+Ответ собирается из вопроса пользователя и ответа от ClickHouse&
 ___
 ### Agent Proxy
 
@@ -260,13 +262,13 @@ ___
 
 OpenAI-compatible означает, что сервис выглядит для LibreChat как OpenAI API, даже если реальная модель запущена локально в Ollama или в другом облачном провайдере.
 
-В этом проекте `agent-proxy` делает две вещи.
+В этом проекте `agent-proxy` делает две вещи:
 
-Во-первых, он пересылает запросы LibreChat в upstream model endpoint.
+- Во-первых, он пересылает запросы LibreChat в upstream model endpoint.
 
 **Upstream** — это сервис выше по цепочке. Например, Ollama на Mac по адресу `http://host.docker.internal:11434/v1`.
 
-Во-вторых, `agent-proxy` отправляет trace каждого LLM-запроса в Langfuse.
+- Во-вторых, `agent-proxy` отправляет trace каждого LLM-запроса в Langfuse.
 
 Это удобная точка интеграции, потому что почти все запросы LibreChat к модели проходят через этот proxy.
 ___
@@ -3023,32 +3025,14 @@ Tool создает dashboard через Grafana API и возвращает п�
 `/goto` short URL можно считать вторичной ссылкой, потому что он зависит от настроек Grafana `root_url`.
 
 
-Примеры запросов:
-
-```text
-Проанализируй Prometheus targets: какие instance сейчас down?
-```
-
-```text
-Покажи последние samples метрики up и объясни, какие targets проблемные.
-```
-
-```text
-Какие значения label job есть у метрики http_requests_total?
-```
-
-```text
-Создай в Grafana dashboard по метрике up с разбивкой по job за последние 24 часа и дай ссылку.
-```
-
-```text
-Проанализируй prometheus_samples: какие instance и когда down, какие up? Сделай Grafana dashboard.
-```
+Пример запроса:
 
 ```text
 Создай красивый operational dashboard по Prometheus: availability, incidents, HTTP latency, HTTP errors, DB disk usage и replication lag.
 ```
+![img_6.png](img_6.png)
 
+![img_4.png](img_4.png)
 ### 15.6 Grafana Dashboard По PostgreSQL Demo Inventory
 
 PostgreSQL demo inventory попадает в ClickHouse table:
