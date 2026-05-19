@@ -1,0 +1,176 @@
+Dynamic MCP connectors: implemented changes
+===========================================
+
+Date: 2026-05-19
+Project: Agentic-Data-Stack
+
+Goal
+----
+
+The model should be able to create a task-specific MCP connector from a user's ClickHouse question.
+
+The created connector must be a JavaScript file that can be reviewed, edited by hand, committed to Git, and reused later.
+
+Main implementation
+-------------------
+
+1. Added file-based generated connector storage:
+
+    mcp-server/generated-connectors/
+
+Generated connectors are saved as JavaScript files:
+
+    mcp-server/generated-connectors/clickhouse_some_task.js
+
+Connector names must start with:
+
+    clickhouse_
+
+2. Added generated connector loading to the MCP server.
+
+The MCP server scans:
+
+    mcp-server/generated-connectors/*.js
+
+Each generated connector must export this shape:
+
+    export default {
+      name: "clickhouse_some_task",
+      description: "Useful human-readable description.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      async handler({ args, runQuery, helpers }) {
+        return [];
+      }
+    };
+
+3. Added generated connector lifecycle tools to ClickHouse MCP:
+
+    list_generated_connectors
+    describe_generated_connector
+    create_generated_connector
+    update_generated_connector
+    run_generated_connector
+
+4. Added direct generated connector calls.
+
+After a connector is saved, it also appears as a normal MCP tool with its own name.
+
+Example:
+
+    clickhouse_cars_by_city_mileage
+
+The user can say:
+
+    Use connector clickhouse_cars_by_city_mileage
+
+or:
+
+    Modify connector clickhouse_cars_by_city_mileage
+
+5. Added Docker support.
+
+The mcp-server image now includes:
+
+    COPY generated-connectors ./generated-connectors
+
+The docker-compose service now bind-mounts:
+
+    ./mcp-server/generated-connectors:/app/generated-connectors
+
+This means generated connector JS files created from LibreChat inside the container are visible on the host machine and can be inspected or edited manually.
+
+6. Added LibreChat MCP instructions.
+
+LibreChat is instructed to:
+
+    - inspect live schema first;
+    - create a generated connector when no existing purpose-built tool fits;
+    - run the generated connector;
+    - answer with connector name, saved path, and returned ClickHouse data;
+    - use a named generated connector when the user explicitly asks for it;
+    - update an existing generated connector when the user asks to modify it;
+    - avoid dumping generated source code into chat unless explicitly requested.
+
+Safety constraints currently implemented
+----------------------------------------
+
+1. Generated connector names are validated.
+
+2. Generated connector source must:
+
+    - be non-empty;
+    - be below the configured size cap;
+    - use export default;
+    - export the expected connector name.
+
+3. Some dangerous source patterns are rejected:
+
+    import
+    require(...)
+    process
+    child_process
+    node:
+    fs
+    eval(...)
+    Function(...)
+    fetch(...)
+    XMLHttpRequest
+
+4. Generated connectors receive read-only helpers:
+
+    runQuery
+    analyticsTableExists
+    analyticsColumns
+    analyticsColumnExists
+    boundedLimit
+    normalizeFilterOperator
+    quoteIdent
+    quoteString
+    safeSqlIdentifier
+    sqlLiteral
+
+5. runQuery still enforces SELECT-only queries and rejects mutating SQL words.
+
+Important behavior
+------------------
+
+The model should not hardcode current demo tables.
+
+Existing tables such as:
+
+    car_inventory_raw
+    prometheus_samples
+
+may be used only when live schema inspection shows that they exist and match the user's question.
+
+The intended flow for a new question is:
+
+    1. User asks a ClickHouse data question.
+    2. Model calls schema/table inspection tools.
+    3. Model creates a generated JS connector with create_generated_connector.
+    4. Model runs it with run_generated_connector or by calling the generated tool directly.
+    5. Model replies with:
+       - connector name;
+       - saved path;
+       - result summary from ClickHouse.
+
+Files changed
+-------------
+
+    mcp-server/src/server.js
+    mcp-server/Dockerfile
+    docker-compose.yml
+    librechat/librechat.yaml
+    mcp-server/generated-connectors/.gitkeep
+    docs/DYNAMIC_MCP_CONNECTORS_NOTES.txt
+
+Remaining engineering note
+--------------------------
+
+This implementation intentionally supports generated JavaScript files because that is the requested behavior.
+
+For stronger production hardening, generated connectors should eventually run in a stricter sandbox or be limited to a declarative query DSL. The current implementation adds validation and read-only ClickHouse execution, but generated JavaScript is still a powerful mechanism and should be reviewed before use in sensitive environments.

@@ -443,6 +443,8 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
     ports:
       - "3333:3333"
+    volumes:
+      - ./mcp-server/generated-connectors:/app/generated-connectors
 
   librechat:
     image: ghcr.io/danny-avila/librechat:latest

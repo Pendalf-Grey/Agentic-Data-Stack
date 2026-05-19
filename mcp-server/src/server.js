@@ -1,5 +1,8 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { createClient } from '@clickhouse/client';
 
@@ -10,6 +13,10 @@ const grafanaApiUrl = (process.env.GRAFANA_API_URL || 'http://grafana:3000').rep
 const grafanaUser = process.env.GRAFANA_USER || 'admin';
 const grafanaPassword = process.env.GRAFANA_PASSWORD || 'admin';
 const chartStore = new Map();
+const generatedConnectorsDir = path.resolve(
+  process.env.GENERATED_CONNECTORS_DIR || path.join(process.cwd(), 'generated-connectors'),
+);
+const generatedConnectorCache = new Map();
 
 const clickhouse = createClient({
   url: process.env.CLICKHOUSE_HOST || 'http://localhost:8123',
@@ -18,7 +25,7 @@ const clickhouse = createClient({
   database: process.env.CLICKHOUSE_DATABASE || 'analytics',
 });
 
-const tools = [
+const baseTools = [
   {
     name: 'describe_analytics_schema',
     description: 'Describe ClickHouse analytics tables and views available for analysis.',
@@ -465,6 +472,88 @@ const tools = [
       },
     },
   },
+  {
+    name: 'list_generated_connectors',
+    description: 'List JavaScript MCP connectors generated for previous user database tasks. Use this when the user asks which saved generated connector can be reused.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'describe_generated_connector',
+    description: 'Describe one saved generated MCP connector by name, including file path and exported schema.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connector_name: {
+          type: 'string',
+          description: 'Generated connector name without .js suffix.',
+        },
+      },
+      required: ['connector_name'],
+    },
+  },
+  {
+    name: 'create_generated_connector',
+    description: 'Create a JavaScript MCP connector file for a specific user database question. Use this only after inspecting live ClickHouse schema. The final chat answer must mention only connector name, saved path, and query result; do not paste source code unless asked.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connector_name: {
+          type: 'string',
+          description: 'Safe connector/tool name, for example clickhouse_cars_by_city_mileage.',
+        },
+        source_code: {
+          type: 'string',
+          description: 'Complete JavaScript module source. It must export default { name, description, inputSchema, handler }.',
+        },
+        overwrite: {
+          type: 'boolean',
+          description: 'Allow replacing an existing connector file.',
+          default: false,
+        },
+      },
+      required: ['connector_name', 'source_code'],
+    },
+  },
+  {
+    name: 'update_generated_connector',
+    description: 'Update an existing generated JavaScript MCP connector file by name. Use this when the user explicitly asks to modify a saved connector.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connector_name: {
+          type: 'string',
+          description: 'Existing connector/tool name without .js suffix.',
+        },
+        source_code: {
+          type: 'string',
+          description: 'Complete replacement JavaScript module source.',
+        },
+      },
+      required: ['connector_name', 'source_code'],
+    },
+  },
+  {
+    name: 'run_generated_connector',
+    description: 'Run a saved generated MCP connector by name and return live ClickHouse data. Use this when the user explicitly names a connector or after creating/updating one.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connector_name: {
+          type: 'string',
+          description: 'Generated connector/tool name without .js suffix.',
+        },
+        arguments: {
+          type: 'object',
+          description: 'Arguments passed to the generated connector handler.',
+          default: {},
+        },
+      },
+      required: ['connector_name'],
+    },
+  },
 ];
 
 function jsonRpc(id, result) {
@@ -518,6 +607,166 @@ function safeDashboardTitle(value, fallback) {
 
 function quoteIdent(value) {
   return `\`${String(value).replaceAll('`', '``')}\``;
+}
+
+function safeGeneratedConnectorName(value) {
+  const text = String(value || '').trim();
+  if (!/^[a-z][a-z0-9_]{2,80}$/.test(text)) {
+    throw new Error(`Unsafe generated connector name: ${text}`);
+  }
+  if (!text.startsWith('clickhouse_')) {
+    throw new Error('Generated connector names must start with clickhouse_.');
+  }
+  return text;
+}
+
+function generatedConnectorPath(connectorName) {
+  const safeName = safeGeneratedConnectorName(connectorName);
+  return path.join(generatedConnectorsDir, `${safeName}.js`);
+}
+
+function publicGeneratedConnectorPath(connectorName) {
+  return `mcp-server/generated-connectors/${safeGeneratedConnectorName(connectorName)}.js`;
+}
+
+function validateGeneratedConnectorSource(connectorName, sourceCode) {
+  const safeName = safeGeneratedConnectorName(connectorName);
+  const source = String(sourceCode || '').trim();
+  if (!source) {
+    throw new Error('Generated connector source_code is required.');
+  }
+  if (source.length > 30000) {
+    throw new Error('Generated connector source_code is too large.');
+  }
+  if (!source.includes('export default')) {
+    throw new Error('Generated connector must use export default.');
+  }
+  const expectedNamePattern = new RegExp(`["']?name["']?\\s*:\\s*["']${safeName}["']`);
+  if (!expectedNamePattern.test(source)) {
+    throw new Error(`Generated connector source must export name ${safeName}.`);
+  }
+  const forbiddenPatterns = [
+    /\bimport\s+/,
+    /\brequire\s*\(/,
+    /\bprocess\b/,
+    /\bchild_process\b/,
+    /\bnode:/,
+    /\bfs\b/,
+    /\beval\s*\(/,
+    /\bFunction\s*\(/,
+    /\bfetch\s*\(/,
+    /\bXMLHttpRequest\b/,
+  ];
+  for (const pattern of forbiddenPatterns) {
+    if (pattern.test(source)) {
+      throw new Error(`Generated connector source contains forbidden pattern: ${pattern}`);
+    }
+  }
+  return `${source}\n`;
+}
+
+function validateGeneratedConnectorModule(connector, expectedName = '') {
+  if (!connector || typeof connector !== 'object') {
+    throw new Error('Generated connector must export an object.');
+  }
+  const connectorName = safeGeneratedConnectorName(connector.name);
+  if (expectedName && connectorName !== safeGeneratedConnectorName(expectedName)) {
+    throw new Error(`Generated connector name mismatch: expected ${expectedName}, got ${connectorName}.`);
+  }
+  if (typeof connector.description !== 'string' || connector.description.trim().length < 10) {
+    throw new Error(`Generated connector ${connectorName} must have a useful description.`);
+  }
+  if (!connector.inputSchema || connector.inputSchema.type !== 'object') {
+    throw new Error(`Generated connector ${connectorName} must expose an object inputSchema.`);
+  }
+  if (typeof connector.handler !== 'function') {
+    throw new Error(`Generated connector ${connectorName} must expose an async handler function.`);
+  }
+  return connectorName;
+}
+
+async function ensureGeneratedConnectorsDir() {
+  await mkdir(generatedConnectorsDir, { recursive: true });
+}
+
+async function loadGeneratedConnector(connectorName, { force = false } = {}) {
+  const safeName = safeGeneratedConnectorName(connectorName);
+  await ensureGeneratedConnectorsDir();
+  const filePath = generatedConnectorPath(safeName);
+  if (!force && generatedConnectorCache.has(safeName)) {
+    return generatedConnectorCache.get(safeName);
+  }
+  const moduleUrl = `${pathToFileURL(filePath).href}?v=${Date.now()}`;
+  const module = await import(moduleUrl);
+  const connector = module.default;
+  validateGeneratedConnectorModule(connector, safeName);
+  const loaded = {
+    ...connector,
+    filePath,
+    publicPath: publicGeneratedConnectorPath(safeName),
+  };
+  generatedConnectorCache.set(safeName, loaded);
+  return loaded;
+}
+
+async function listGeneratedConnectorFiles() {
+  await ensureGeneratedConnectorsDir();
+  const entries = await readdir(generatedConnectorsDir, { withFileTypes: true });
+  return entries
+    .filter(entry => entry.isFile() && entry.name.endsWith('.js'))
+    .map(entry => entry.name.replace(/\.js$/, ''))
+    .filter(name => {
+      try {
+        safeGeneratedConnectorName(name);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+}
+
+async function loadGeneratedConnectorTools() {
+  const connectorNames = await listGeneratedConnectorFiles();
+  const loaded = [];
+  for (const connectorName of connectorNames) {
+    try {
+      const connector = await loadGeneratedConnector(connectorName);
+      loaded.push({
+        name: connector.name,
+        description: `${connector.description} Generated connector saved at ${connector.publicPath}.`,
+        inputSchema: connector.inputSchema,
+      });
+    } catch (error) {
+      console.error(`Failed to load generated connector ${connectorName}: ${error.message}`);
+    }
+  }
+  return loaded;
+}
+
+async function callGeneratedConnector(connectorName, args) {
+  const connector = await loadGeneratedConnector(connectorName, { force: true });
+  const result = await connector.handler({
+    args: args || {},
+    clickhouse,
+    runQuery,
+    helpers: {
+      analyticsColumns,
+      analyticsColumnExists,
+      analyticsTableExists,
+      boundedLimit,
+      normalizeFilterOperator,
+      quoteIdent,
+      quoteString,
+      safeSqlIdentifier,
+      sqlLiteral,
+    },
+  });
+  return {
+    connector_name: connector.name,
+    saved_path: connector.publicPath,
+    result,
+  };
 }
 
 function quoteString(value) {
@@ -1435,12 +1684,92 @@ async function handleRpc(payload) {
   }
 
   if (method === 'tools/list') {
-    return jsonRpc(id, { tools });
+    const generatedTools = await loadGeneratedConnectorTools();
+    return jsonRpc(id, { tools: [...baseTools, ...generatedTools] });
   }
 
   if (method === 'tools/call') {
     const name = params?.name;
     const args = params?.arguments || {};
+
+    if (name === 'list_generated_connectors') {
+      const connectorNames = await listGeneratedConnectorFiles();
+      const rows = [];
+      for (const connectorName of connectorNames) {
+        try {
+          const connector = await loadGeneratedConnector(connectorName, { force: true });
+          rows.push({
+            name: connector.name,
+            description: connector.description,
+            saved_path: connector.publicPath,
+          });
+        } catch (error) {
+          rows.push({
+            name: connectorName,
+            description: '',
+            saved_path: publicGeneratedConnectorPath(connectorName),
+            error: error.message,
+          });
+        }
+      }
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+      });
+    }
+
+    if (name === 'describe_generated_connector') {
+      const connector = await loadGeneratedConnector(args.connector_name, { force: true });
+      return jsonRpc(id, {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            name: connector.name,
+            description: connector.description,
+            inputSchema: connector.inputSchema,
+            saved_path: connector.publicPath,
+          }, null, 2),
+        }],
+      });
+    }
+
+    if (name === 'create_generated_connector' || name === 'update_generated_connector') {
+      const connectorName = safeGeneratedConnectorName(args.connector_name);
+      const filePath = generatedConnectorPath(connectorName);
+      const overwrite = name === 'update_generated_connector' || args.overwrite === true;
+      const source = validateGeneratedConnectorSource(connectorName, args.source_code);
+      await ensureGeneratedConnectorsDir();
+      if (!overwrite) {
+        try {
+          await readFile(filePath, 'utf8');
+          throw new Error(`Generated connector already exists: ${publicGeneratedConnectorPath(connectorName)}. Use update_generated_connector or overwrite=true.`);
+        } catch (error) {
+          if (error.code !== 'ENOENT') {
+            throw error;
+          }
+        }
+      }
+      await writeFile(filePath, source, 'utf8');
+      generatedConnectorCache.delete(connectorName);
+      const connector = await loadGeneratedConnector(connectorName, { force: true });
+      return jsonRpc(id, {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            connector_name: connector.name,
+            saved_path: connector.publicPath,
+            status: name === 'create_generated_connector' ? 'created' : 'updated',
+            instruction: 'Now call run_generated_connector, or call the connector tool by its name, to return ClickHouse data to the user.',
+          }, null, 2),
+        }],
+      });
+    }
+
+    if (name === 'run_generated_connector') {
+      const payload = await callGeneratedConnector(args.connector_name, args.arguments || {});
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+      });
+    }
 
     if (name === 'describe_analytics_schema') {
       const rows = await runQuery(`
@@ -2239,6 +2568,13 @@ async function handleRpc(payload) {
         metric,
         groupBy: 'model_name',
         source: 'analytics.app_events_raw',
+      });
+    }
+
+    if (typeof name === 'string' && name.startsWith('clickhouse_')) {
+      const payload = await callGeneratedConnector(name, args);
+      return jsonRpc(id, {
+        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
       });
     }
 
