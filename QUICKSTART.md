@@ -131,7 +131,7 @@ sh tools/clickhouse-tables.sh
 - Prometheus remote_write receiver: `http://localhost:3355/api/v1/write`
 - Prometheus backfill: `http://localhost:3355/backfill`
 - MCP health: `http://localhost:3333/health`
-- Agent proxy health: `http://localhost:3344/health`
+- LLM gateway health: `http://localhost:3344/health`
 
 ## 6. LibreChat
 
@@ -214,7 +214,7 @@ Agentic Data Stack LLM
 
 ![Langfuse trace](docs/images/img_11.png)
 
-`agent-proxy` отправляет traces в Langfuse автоматически, если в `.env` включено:
+`llm-gateway` отправляет traces в Langfuse автоматически, если в `.env` включено:
 
 ```env
 LANGFUSE_ENABLED=true

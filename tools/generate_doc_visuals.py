@@ -98,7 +98,7 @@ def architecture_flow():
         ((70, 650, 340, 795), "Prometheus\nremote_write /\nquery_range", PALETTE["red_soft"], PALETTE["red"]),
         ((425, 650, 695, 795), "Prometheus\nConnector", PALETTE["red_soft"], PALETTE["red"]),
         ((780, 650, 1050, 795), "Langfuse\nLLM traces", PALETTE["green_soft"], PALETTE["green"]),
-        ((1135, 650, 1450, 795), "Agent Proxy\nmodel gateway", PALETTE["blue_soft"], PALETTE["blue"]),
+        ((1135, 650, 1450, 795), "LLM Gateway\nmodel gateway", PALETTE["blue_soft"], PALETTE["blue"]),
     ]
 
     for xy, label, fill, outline in boxes:
@@ -171,7 +171,7 @@ def monitoring_map():
         ("Data ingest", "Debezium status\nKafka consumer lag\nClickHouse sink errors", PALETTE["blue_soft"], PALETTE["blue"]),
         ("Storage", "ClickHouse disk\nQuery latency\nFreshness of samples", PALETTE["green_soft"], PALETTE["green"]),
         ("Orchestration", "Airflow DAG failures\nSchedule state\nConnector registration", PALETTE["amber_soft"], PALETTE["amber"]),
-        ("LLM app", "LibreChat health\nMCP health\nagent-proxy health", PALETTE["slate_soft"], "#64748B"),
+        ("LLM app", "LibreChat health\nMCP health\nllm-gateway health", PALETTE["slate_soft"], "#64748B"),
         ("LLM observability", "Langfuse web/worker\nTrace volume\nIngestion errors", PALETTE["green_soft"], PALETTE["green"]),
         ("Prometheus path", "remote_write health\nBackfill results\nprometheus_samples rows", PALETTE["red_soft"], PALETTE["red"]),
     ]

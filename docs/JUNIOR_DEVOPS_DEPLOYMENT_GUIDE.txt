@@ -63,7 +63,7 @@ Prometheus
 | Transport | Apache Kafka | хранит поток событий для sink | broker health, topics, consumer lag |
 | Storage | ClickHouse | хранит analytics, Prometheus samples и Langfuse data | строки, disk usage, query latency |
 | UI/API | Grafana, MCP, LibreChat | показывает dashboards и дает LLM безопасные tools | health endpoints, dashboards, MCP tool responses |
-| LLM Observability | agent-proxy, Langfuse | вызывает модель и пишет traces | latency, errors, token usage, traces |
+| LLM Observability | llm-gateway, Langfuse | вызывает модель и пишет traces | latency, errors, token usage, traces |
 
 2. Что Делает Каждый Компонент
 ==============================
@@ -295,20 +295,20 @@ LibreChat — web UI для общения с LLM-моделью.
 
 ------------------------------------------------------------------------
 
-Agent Proxy
+LLM Gateway
 -----------
 
-agent-proxy — маленький OpenAI-compatible proxy.
+llm-gateway — маленький OpenAI-compatible proxy.
 
 OpenAI-compatible означает, что сервис выглядит для LibreChat как OpenAI API, даже если реальная модель запущена локально в Ollama или в другом облачном провайдере.
 
-В этом проекте agent-proxy делает две вещи:
+В этом проекте llm-gateway делает две вещи:
 
 - Во-первых, он пересылает запросы LibreChat в upstream model endpoint.
 
 Upstream — это сервис выше по цепочке. Например, Ollama на Mac по адресу http://host.docker.internal:11434/v1.
 
-- Во-вторых, agent-proxy отправляет trace каждого LLM-запроса в Langfuse.
+- Во-вторых, llm-gateway отправляет trace каждого LLM-запроса в Langfuse.
 
 Это удобная точка интеграции, потому что почти все запросы LibreChat к модели проходят через этот proxy.
 
@@ -343,10 +343,10 @@ Generation — конкретный вызов LLM-модели: модель, �
 
 
 LibreChat
-  -> agent-proxy
+  -> llm-gateway
   -> local/cloud LLM
 
-agent-proxy
+llm-gateway
   -> Langfuse ingestion API
   -> Langfuse worker
   -> ClickHouse/Postgres/MinIO/Redis
@@ -468,14 +468,14 @@ COMPOSE_PROFILES=postgres-source
 |---|---|---:|---:|---:|---|
 | vm-data | Apache Kafka, ClickHouse, demo PostgreSQL | 4 vCPU | 10-12 GB | 100 GB | data plane и ClickHouse для analytics/langfuse |
 | vm-orch | Airflow DB, Airflow webserver, Airflow scheduler | 2 vCPU | 4 GB | 40 GB | расписание миграций |
-| vm-app | Grafana, MCP, agent-proxy, LibreChat, MongoDB, Langfuse, Redis, MinIO | 4 vCPU | 10 GB | 80 GB | UI/API и LLM observability |
+| vm-app | Grafana, MCP, llm-gateway, LibreChat, MongoDB, Langfuse, Redis, MinIO | 4 vCPU | 10 GB | 80 GB | UI/API и LLM observability |
 
 Если хочется еще проще, можно сделать 2 VM:
 
 | VM | Компоненты | CPU | RAM | Disk |
 |---|---|---:|---:|---:|
 | vm-data | Apache Kafka, ClickHouse, Debezium, demo PostgreSQL | 5 vCPU | 12 GB | 100 GB |
-| vm-app | Airflow, Grafana, MCP, agent-proxy, LibreChat, MongoDB, Langfuse, Redis, MinIO | 5 vCPU | 10 GB | 100 GB |
+| vm-app | Airflow, Grafana, MCP, llm-gateway, LibreChat, MongoDB, Langfuse, Redis, MinIO | 5 vCPU | 10 GB | 100 GB |
 
 Главная цель такой минимальной схемы — проверить сетевое взаимодействие.
 
@@ -501,7 +501,7 @@ COMPOSE_PROFILES=postgres-source
 | connect-2 | Debezium/Kafka Connect worker 2 | 4 vCPU | 8-16 GB | 100 GB SSD | второй worker |
 | airflow-1 | Airflow webserver/scheduler | 4 vCPU | 8 GB | 100 GB SSD | orchestration |
 | meta-1 | Airflow metadata PostgreSQL | 2-4 vCPU | 8 GB | 100 GB SSD | лучше managed DB |
-| app-1 | LibreChat, MCP, agent-proxy, Grafana | 4-8 vCPU | 16 GB | 100 GB SSD | UI/API |
+| app-1 | LibreChat, MCP, llm-gateway, Grafana | 4-8 vCPU | 16 GB | 100 GB SSD | UI/API |
 | mongo-1 | LibreChat MongoDB | 2-4 vCPU | 8 GB | 100 GB SSD | для production лучше replica set |
 | lf-web-1 | Langfuse web и worker | 4 vCPU | 8-16 GB | 100 GB SSD | LLM observability |
 | lf-meta-1 | Langfuse PostgreSQL, Redis, object storage gateway | 4 vCPU | 8-16 GB | 200 GB SSD | для production лучше managed services |
@@ -590,7 +590,7 @@ sudo nano /etc/hosts
 | Langfuse MinIO Console | 9091 или 9001 | ops/admin only | управление local object storage |
 | LibreChat | 3080 | users | chat UI |
 | MCP server | 3333 | LibreChat/app network | tools для модели |
-| agent-proxy | 3344 | LibreChat/app network | OpenAI-compatible proxy |
+| llm-gateway | 3344 | LibreChat/app network | OpenAI-compatible proxy |
 | Airflow UI | 8081 | ops/admin | scheduler UI |
 | Airflow metadata DB | 5432 | Airflow only | metadata |
 | LibreChat MongoDB | 27017 | LibreChat only | user/chat metadata |
@@ -674,7 +674,7 @@ cd /opt/agentic-data-stack
 
 
 mkdir -p \
-  agent-proxy/src \
+  llm-gateway/src \
   airflow/dags \
   clickhouse/init \
   debezium/connectors \
@@ -692,7 +692,7 @@ mkdir -p \
 
 Что это значит:
 
-- agent-proxy — маленький OpenAI-compatible proxy для LibreChat.
+- llm-gateway — маленький OpenAI-compatible proxy для LibreChat.
 - airflow/dags — DAG-файлы Airflow.
 - clickhouse/init — SQL, который создает базу и таблицы ClickHouse.
 - debezium/connectors — JSON-шаблоны Debezium source/sink connectors.
@@ -833,8 +833,8 @@ ALLOW_REGISTRATION=true
 ALLOW_UNVERIFIED_EMAIL_LOGIN=true
 ALLOW_PASSWORD_RESET=false
 
-AGENT_PROXY_API_KEY=local-dev-key
-AGENT_PROXY_BASE_URL=http://agent-proxy:3344/v1
+LLM_GATEWAY_API_KEY=local-dev-key
+LLM_GATEWAY_BASE_URL=http://llm-gateway:3344/v1
 UPSTREAM_OPENAI_API_KEY=local-dev-key
 UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 
@@ -1687,13 +1687,13 @@ EOF
 - рендерил templates из /opt/airflow/connectors;
 - вызывал Debezium REST API CONNECT_URL.
 
-7.10 Создать Минимальный Agent Proxy
+7.10 Создать Минимальный LLM Gateway
 ------------------------------------
 
 
-cat > agent-proxy/package.json <<'EOF'
+cat > llm-gateway/package.json <<'EOF'
 {
-  "name": "agent-proxy",
+  "name": "llm-gateway",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -1702,7 +1702,7 @@ cat > agent-proxy/package.json <<'EOF'
 }
 EOF
 
-cat > agent-proxy/Dockerfile <<'EOF'
+cat > llm-gateway/Dockerfile <<'EOF'
 FROM node:22-alpine
 WORKDIR /app
 COPY package*.json ./
@@ -1712,7 +1712,7 @@ EXPOSE 3344
 CMD ["npm", "start"]
 EOF
 
-cat > agent-proxy/src/server.js <<'EOF'
+cat > llm-gateway/src/server.js <<'EOF'
 import http from 'node:http';
 
 const port = Number(process.env.PORT || 3344);
@@ -2287,8 +2287,8 @@ mcpSettings:
 endpoints:
   custom:
     - name: "Local OpenAI-compatible"
-      apiKey: "${AGENT_PROXY_API_KEY}"
-      baseURL: "${AGENT_PROXY_BASE_URL}"
+      apiKey: "${LLM_GATEWAY_API_KEY}"
+      baseURL: "${LLM_GATEWAY_BASE_URL}"
       models:
         default:
 ${LIBRECHAT_MODEL_LIST_YAML}
@@ -2345,8 +2345,8 @@ if [ -z "$model_yaml" ]; then
 '
 fi
 
-export AGENT_PROXY_API_KEY="${AGENT_PROXY_API_KEY:-local-dev-key}"
-export AGENT_PROXY_BASE_URL="${AGENT_PROXY_BASE_URL:-http://agent-proxy:3344/v1}"
+export LLM_GATEWAY_API_KEY="${LLM_GATEWAY_API_KEY:-local-dev-key}"
+export LLM_GATEWAY_BASE_URL="${LLM_GATEWAY_BASE_URL:-http://llm-gateway:3344/v1}"
 export LIBRECHAT_TITLE_MODEL="$title_model"
 export LIBRECHAT_SUMMARY_MODEL="$summary_model"
 export LIBRECHAT_MODEL_LIST_YAML="$model_yaml"
@@ -2357,8 +2357,8 @@ import os
 
 template = Path('/app/librechat.yaml.template').read_text()
 for key in [
-    'AGENT_PROXY_API_KEY',
-    'AGENT_PROXY_BASE_URL',
+    'LLM_GATEWAY_API_KEY',
+    'LLM_GATEWAY_BASE_URL',
     'LIBRECHAT_TITLE_MODEL',
     'LIBRECHAT_SUMMARY_MODEL',
     'LIBRECHAT_MODEL_LIST_YAML',
@@ -2380,11 +2380,11 @@ LibreChat в этом проекте не ходит напрямую в Ollama 
 
 
 LibreChat
-  -> agent-proxy
+  -> llm-gateway
   -> UPSTREAM_OPENAI_BASE_URL
 
 
-agent-proxy нужен, чтобы все запросы к модели проходили через одну точку и попадали в Langfuse traces.
+llm-gateway нужен, чтобы все запросы к модели проходили через одну точку и попадали в Langfuse traces.
 
 Вариант A: Добавить Локальную Ollama-Модель
 -------------------------------------------
@@ -2401,14 +2401,14 @@ ollama pull qwen3:14b
 curl http://localhost:11434/v1/models
 
 
-В .env укажите Ollama как upstream для agent-proxy:
+В .env укажите Ollama как upstream для llm-gateway:
 
 
 UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 UPSTREAM_OPENAI_API_KEY=local-dev-key
 
 
-host.docker.internal нужен на macOS, потому что LibreChat и agent-proxy работают внутри Docker, а Ollama обычно запущена на host-машине.
+host.docker.internal нужен на macOS, потому что LibreChat и llm-gateway работают внутри Docker, а Ollama обычно запущена на host-машине.
 
 Добавьте точный tag модели в список LibreChat:
 
@@ -2448,17 +2448,17 @@ OPENAI_MODEL_SMART=provider-smart-model
 
 Важно: имена в LIBRECHAT_MODELS должны совпадать с model ids, которые реально поддерживает upstream API.
 
-После любого изменения .env пересоздайте LibreChat и agent-proxy:
+После любого изменения .env пересоздайте LibreChat и llm-gateway:
 
 
-docker compose up -d --force-recreate agent-proxy librechat
+docker compose up -d --force-recreate llm-gateway librechat
 
 
-agent-proxy перечитает UPSTREAM_OPENAI_BASE_URL и UPSTREAM_OPENAI_API_KEY.
+llm-gateway перечитает UPSTREAM_OPENAI_BASE_URL и UPSTREAM_OPENAI_API_KEY.
 
 render-config.sh внутри LibreChat перечитает LIBRECHAT_MODELS и соберет /app/librechat.yaml с новым списком моделей.
 
-Проверить, что agent-proxy видит upstream models:
+Проверить, что llm-gateway видит upstream models:
 
 
 curl http://localhost:3344/v1/models
@@ -2494,7 +2494,7 @@ docker compose exec -T librechat sed -n '12,30p' /app/librechat.yaml
 - langfuse-worker;
 - langfuse-web;
 - librechat-db;
-- agent-proxy;
+- llm-gateway;
 - mcp-server;
 - librechat.
 
@@ -2952,7 +2952,7 @@ Airflow в этой системе управляет моментом реги�
 
 - Grafana;
 - MCP server;
-- agent-proxy;
+- llm-gateway;
 - LibreChat;
 - MongoDB для LibreChat metadata.
 
@@ -2970,8 +2970,8 @@ CLICKHOUSE_DB=analytics
 CLICKHOUSE_USER=analytics
 CLICKHOUSE_PASSWORD=change-me
 
-AGENT_PROXY_API_KEY=local-dev-key
-AGENT_PROXY_BASE_URL=http://agent-proxy:3344/v1
+LLM_GATEWAY_API_KEY=local-dev-key
+LLM_GATEWAY_BASE_URL=http://llm-gateway:3344/v1
 UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 UPSTREAM_OPENAI_API_KEY=local-dev-key
 
@@ -3211,11 +3211,11 @@ LANGFUSE_SECRET_KEY=sk-lf-change-me
 
 LANGFUSE_PUBLIC_URL — адрес, который открывает человек в браузере.
 
-LANGFUSE_INTERNAL_URL — адрес внутри Docker network, куда agent-proxy отправляет traces.
+LANGFUSE_INTERNAL_URL — адрес внутри Docker network, куда llm-gateway отправляет traces.
 
 LANGFUSE_PUBLIC_KEY и LANGFUSE_SECRET_KEY — API keys проекта Langfuse.
 
-Их использует agent-proxy, чтобы писать traces.
+Их использует llm-gateway, чтобы писать traces.
 
 LANGFUSE_INIT_USER_PASSWORD должен быть не короче 8 символов.
 
@@ -3319,45 +3319,45 @@ LANGFUSE_SECRET_KEY=sk-lf-agentic-data-stack-local
 5. Открыть Project Settings.
 6. Создать API keys.
 7. Перенести public key и secret key в .env.
-8. Перезапустить agent-proxy.
+8. Перезапустить llm-gateway.
 
 Команда перезапуска:
 
 
-docker compose up -d --build agent-proxy
+docker compose up -d --build llm-gateway
 
 
 16.5 Как Trace Попадает В Langfuse
 ----------------------------------
 
-В этой системе трассировка сделана на уровне agent-proxy.
+В этой системе трассировка сделана на уровне llm-gateway.
 
 Поток такой:
 
 
 LibreChat
-  -> agent-proxy /v1/chat/completions
+  -> llm-gateway /v1/chat/completions
   -> upstream LLM
   -> response to LibreChat
 
-agent-proxy
+llm-gateway
   -> Langfuse /api/public/ingestion
 
 
-Если LANGFUSE_ENABLED=true, agent-proxy отправляет trace после каждого non-streaming и streaming chat completion.
+Если LANGFUSE_ENABLED=true, llm-gateway отправляет trace после каждого non-streaming и streaming chat completion.
 
-Если Langfuse временно недоступен, agent-proxy не ломает ответ пользователю.
+Если Langfuse временно недоступен, llm-gateway не ломает ответ пользователю.
 
 Он пишет warning в logs и продолжает отдавать ответ LibreChat.
 
 16.6 Ограничения Langfuse В Этом Проекте
 ----------------------------------------
 
-Langfuse видит те LLM-запросы, которые проходят через agent-proxy.
+Langfuse видит те LLM-запросы, которые проходят через llm-gateway.
 
-Если какой-то сервис ходит в модель напрямую, минуя agent-proxy, Langfuse этот вызов не увидит.
+Если какой-то сервис ходит в модель напрямую, минуя llm-gateway, Langfuse этот вызов не увидит.
 
-В текущей реализации agent-proxy пишет в Langfuse:
+В текущей реализации llm-gateway пишет в Langfuse:
 
 - model name;
 - input messages;
@@ -3474,7 +3474,7 @@ docker compose -f docker-compose.airflow.yml exec airflow-scheduler \
 curl http://app-1.internal:3333/health
 
 
-Проверить agent-proxy:
+Проверить llm-gateway:
 
 
 curl http://app-1.internal:3344/health
@@ -3484,7 +3484,7 @@ curl http://app-1.internal:3344/health
 
 
 curl http://localhost:3002/api/public/health
-docker compose logs agent-proxy
+docker compose logs llm-gateway
 docker compose logs langfuse-web
 docker compose logs langfuse-worker
 
@@ -3567,7 +3567,7 @@ mc mirror minio/langfuse ./langfuse-minio-backup
 - количество Prometheus samples;
 - свежесть Prometheus samples;
 - MCP /health;
-- agent-proxy /health.
+- llm-gateway /health.
 
 Если connector status не RUNNING, сразу смотреть:
 
@@ -3691,12 +3691,12 @@ LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
 Проверить logs:
 
 
-docker compose logs agent-proxy
+docker compose logs llm-gateway
 docker compose logs langfuse-web
 docker compose logs langfuse-worker
 
 
-Проверить, что в LibreChat выбран endpoint, который идет через agent-proxy.
+Проверить, что в LibreChat выбран endpoint, который идет через llm-gateway.
 
 Если LibreChat ходит напрямую в Ollama или другой provider, Langfuse не увидит запрос.
 

@@ -9,13 +9,13 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-# Этот контейнер стоит между LibreChat и OpenAI-compatible backend.
-# Поток данных: LibreChat -> agent-proxy -> Ollama/OpenAI-compatible API -> agent-proxy -> LibreChat.
+# Этот контейнер стоит между LibreChat и локальным или внешним model backend.
+# Поток данных: LibreChat -> llm-gateway -> model API -> llm-gateway -> LibreChat.
 # Если включен Langfuse, proxy дополнительно отправляет trace/generation в Langfuse.
 
 PORT = int(os.getenv("PORT", "3344"))
-UPSTREAM_BASE_URL = os.getenv("UPSTREAM_OPENAI_BASE_URL", "http://host.docker.internal:11434/v1").rstrip("/")
-UPSTREAM_API_KEY = os.getenv("UPSTREAM_OPENAI_API_KEY", "local-dev-key")
+UPSTREAM_BASE_URL = os.getenv("UPSTREAM_MODEL_BASE_URL", "http://host.docker.internal:11434/v1").rstrip("/")
+UPSTREAM_API_KEY = os.getenv("UPSTREAM_MODEL_API_KEY", "local-dev-key")
 LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
 LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "").rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
@@ -49,7 +49,7 @@ def send_json(handler, status, value):
 
 
 def upstream_request(path, method="GET", body=None, stream=False):
-    """Отправляет запрос в OpenAI-compatible backend и возвращает HTTP response object."""
+    """Отправляет запрос в model backend и возвращает HTTP response object."""
     headers = {"Authorization": f"Bearer {UPSTREAM_API_KEY}"}
     data = None
     if body is not None:
@@ -60,7 +60,7 @@ def upstream_request(path, method="GET", body=None, stream=False):
 
 
 def usage_from_completion(data):
-    """Переводит usage OpenAI-compatible ответа в формат Langfuse."""
+    """Переводит usage ответа model backend в формат Langfuse."""
     usage = data.get("usage") if isinstance(data, dict) else None
     if not usage:
         return None
@@ -73,7 +73,7 @@ def usage_from_completion(data):
 
 
 def extract_completion_text(data):
-    """Достает текст assistant-ответа из non-streaming OpenAI-compatible ответа."""
+    """Достает текст assistant-ответа из non-streaming model backend ответа."""
     if not isinstance(data, dict):
         return ""
     parts = []
@@ -125,7 +125,7 @@ def send_langfuse_trace(body, output, usage, started_at, ended_at, status):
                 "input": body.get("messages") or body,
                 "output": output,
                 "environment": LANGFUSE_ENVIRONMENT,
-                "tags": ["agentic-data-stack", "librechat", "agent-proxy"],
+                "tags": ["agentic-data-stack", "librechat", "llm-gateway"],
                 "metadata": {"upstreamBaseUrl": UPSTREAM_BASE_URL, "stream": bool(body.get("stream")), "status": status},
             },
         },
@@ -155,7 +155,7 @@ def send_langfuse_trace(body, output, usage, started_at, ended_at, status):
             },
         },
     ]
-    payload = {"batch": batch, "metadata": {"source": "agentic-data-stack-agent-proxy"}}
+    payload = {"batch": batch, "metadata": {"source": "agentic-data-stack-llm-gateway"}}
     try:
         request = Request(
             f"{LANGFUSE_BASE_URL}/api/public/ingestion",
@@ -173,7 +173,7 @@ def send_langfuse_trace(body, output, usage, started_at, ended_at, status):
 class AgentProxyHandler(BaseHTTPRequestHandler):
     """HTTP handler: принимает endpoints /health, /v1/models и /v1/chat/completions."""
 
-    server_version = "agentic-data-stack-agent-proxy-python/1.0"
+    server_version = "agentic-data-stack-llm-gateway-python/1.0"
 
     def log_message(self, fmt, *args):
         """Оставляем стандартный access log компактным."""
@@ -245,12 +245,12 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
                 )
         except Exception as error:
             traceback.print_exc()
-            send_json(self, 500, {"error": {"message": str(error), "type": "agent_proxy_error"}})
+            send_json(self, 500, {"error": {"message": str(error), "type": "llm_gateway_error"}})
 
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), AgentProxyHandler)
-    print(f"agent-proxy listening on 0.0.0.0:{PORT}")
-    print(f"upstream OpenAI-compatible base URL: {UPSTREAM_BASE_URL}")
+    print(f"llm-gateway listening on 0.0.0.0:{PORT}")
+    print(f"upstream model base URL: {UPSTREAM_BASE_URL}")
     print(f"langfuse tracing: {'enabled' if LANGFUSE_ENABLED else 'disabled'}")
     server.serve_forever()

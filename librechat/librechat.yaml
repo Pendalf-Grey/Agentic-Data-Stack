@@ -9,9 +9,9 @@ mcpSettings:
 
 endpoints:
   custom:
-    - name: "Local OpenAI-compatible"
-      apiKey: "${AGENT_PROXY_API_KEY}"
-      baseURL: "${AGENT_PROXY_BASE_URL}"
+    - name: "Local Model Gateway"
+      apiKey: "${LLM_GATEWAY_API_KEY}"
+      baseURL: "${LLM_GATEWAY_BASE_URL}"
       models:
         default:
           - "qwen2.5:7b"

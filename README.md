@@ -76,7 +76,7 @@ ___
 ___
 **LibreChat** — web UI для общения с моделью.
 
-В этом проекте LibreChat подключен к локальной или облачной OpenAI-compatible модели через `agent-proxy`. Также LibreChat видит MCP tools и может просить их анализировать ClickHouse.
+В этом проекте LibreChat подключен к локальной или облачной OpenAI-compatible модели через `llm-gateway`. Также LibreChat видит MCP tools и может просить их анализировать ClickHouse.
 
 В других проектах LibreChat часто используют как единый чат-интерфейс к нескольким LLM providers.
 ___
@@ -84,7 +84,7 @@ ___
 
 **Observability** означает наблюдаемость: мы видим не только итоговый ответ модели, но и trace запроса, latency, model name, input, output, usage tokens и ошибки.
 
-В этом проекте Langfuse получает traces от `agent-proxy`. LibreChat отправляет запрос в `agent-proxy`, `agent-proxy` вызывает локальную или облачную модель и параллельно отправляет trace в Langfuse.
+В этом проекте Langfuse получает traces от `llm-gateway`. LibreChat отправляет запрос в `llm-gateway`, `llm-gateway` вызывает локальную или облачную модель и параллельно отправляет trace в Langfuse.
 
 В других проектах Langfuse часто используют для debugging LLM-приложений, оценки качества ответов, анализа стоимости, prompt management и поиска “почему модель ответила именно так”.
 ___
@@ -770,16 +770,16 @@ openssl rand -hex 32
 
 ```bash
 curl http://localhost:3002/api/public/health
-docker compose logs agent-proxy
+docker compose logs llm-gateway
 docker compose logs langfuse-web
 docker compose logs langfuse-worker
 ```
 
 ## Локальная Или Облачная Модель
 
-LibreChat ходит в модель через `agent-proxy`.
+LibreChat ходит в модель через `llm-gateway`.
 
-`agent-proxy` также отправляет traces в Langfuse, если включено:
+`llm-gateway` также отправляет traces в Langfuse, если включено:
 
 ```env
 LANGFUSE_ENABLED=true
@@ -836,9 +836,9 @@ docker compose up -d --force-recreate librechat
 - `http://localhost:3355/backfill` — historical backfill из Prometheus HTTP API.
 - `http://localhost:3333/health` — healthcheck MCP server.
 - `http://localhost:3333/mcp` — MCP endpoint. Внутри Docker LibreChat использует `http://mcp-server:3333/mcp`.
-- `http://localhost:3344/health` — healthcheck `agent-proxy`.
-- `http://localhost:3344/v1/models` — debug endpoint списка моделей через `agent-proxy`.
-- `http://agent-proxy:3344/v1` — внутренний Docker endpoint для LibreChat.
+- `http://localhost:3344/health` — healthcheck `llm-gateway`.
+- `http://localhost:3344/v1/models` — debug endpoint списка моделей через `llm-gateway`.
+- `http://llm-gateway:3344/v1` — внутренний Docker endpoint для LibreChat.
 - `http://host.docker.internal:11434/v1` — OpenAI-compatible endpoint Ollama на macOS.
 - `http://localhost:8083` — Debezium Kafka Connect REST API.
 - `http://localhost:8083/connectors` — список зарегистрированных Debezium connectors.

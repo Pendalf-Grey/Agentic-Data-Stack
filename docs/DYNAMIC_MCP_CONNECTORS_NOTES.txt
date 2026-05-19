@@ -11,7 +11,7 @@ MCP server переписан с JavaScript на Python.
 
 Остальные собственные сервисы проекта тоже переведены на Python:
 
-    agent-proxy
+    llm-gateway
     prometheus-connector
     prometheus-synthetic-lab/synthetic-exporter
     prometheus-synthetic-lab/scripts/generate_openmetrics.py
@@ -339,7 +339,7 @@ Tool schema ожидала table, поэтому запрос падал до в
 ----------------
 
     mcp-server/src/server.py
-    agent-proxy/src/server.py
+    llm-gateway/src/server.py
     prometheus-connector/src/server.py
     prometheus-synthetic-lab/synthetic-exporter/src/server.py
     prometheus-synthetic-lab/synthetic-exporter/src/metrics.py
@@ -347,7 +347,7 @@ Tool schema ожидала table, поэтому запрос падал до в
     prometheus-synthetic-lab/scripts/generate_openmetrics.py
     debezium/register_connectors.py
     mcp-server/Dockerfile
-    agent-proxy/Dockerfile
+    llm-gateway/Dockerfile
     prometheus-connector/Dockerfile
     prometheus-synthetic-lab/synthetic-exporter/Dockerfile
     docker-compose.yml

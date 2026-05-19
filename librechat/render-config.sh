@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-models="${LIBRECHAT_MODELS:-${OPENAI_MODEL:-qwen2.5:7b}}"
-title_model="${LIBRECHAT_TITLE_MODEL:-${OPENAI_MODEL:-$(printf '%s' "$models" | cut -d, -f1)}}"
+models="${LIBRECHAT_MODELS:-${MODEL:-qwen2.5:7b}}"
+title_model="${LIBRECHAT_TITLE_MODEL:-${MODEL:-$(printf '%s' "$models" | cut -d, -f1)}}"
 summary_model="${LIBRECHAT_SUMMARY_MODEL:-$title_model}"
 model_yaml=""
 
@@ -22,8 +22,8 @@ if [ -z "$model_yaml" ]; then
 '
 fi
 
-export AGENT_PROXY_API_KEY="${AGENT_PROXY_API_KEY:-local-dev-key}"
-export AGENT_PROXY_BASE_URL="${AGENT_PROXY_BASE_URL:-http://agent-proxy:3344/v1}"
+export LLM_GATEWAY_API_KEY="${LLM_GATEWAY_API_KEY:-local-dev-key}"
+export LLM_GATEWAY_BASE_URL="${LLM_GATEWAY_BASE_URL:-http://llm-gateway:3344/v1}"
 export LIBRECHAT_TITLE_MODEL="$title_model"
 export LIBRECHAT_SUMMARY_MODEL="$summary_model"
 export LIBRECHAT_MODEL_LIST_YAML="$model_yaml"
@@ -34,8 +34,8 @@ import os
 
 template = Path('/app/librechat.yaml.template').read_text()
 for key in [
-    'AGENT_PROXY_API_KEY',
-    'AGENT_PROXY_BASE_URL',
+    'LLM_GATEWAY_API_KEY',
+    'LLM_GATEWAY_BASE_URL',
     'LIBRECHAT_TITLE_MODEL',
     'LIBRECHAT_SUMMARY_MODEL',
     'LIBRECHAT_MODEL_LIST_YAML',
