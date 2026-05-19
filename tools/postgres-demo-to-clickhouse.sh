@@ -1,10 +1,19 @@
 #!/bin/sh
 set -eu
 
+# Скрипт поднимает demo PostgreSQL -> Debezium/Kafka -> ClickHouse pipeline
+# и загружает осмысленные demo-данные по складам автомобилей.
+
+# Корень репозитория нужен, чтобы docker compose и относительные пути работали стабильно.
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# Количество строк автомобилей, которое будет вставлено в PostgreSQL и затем доедет до ClickHouse.
 POSTGRES_DEMO_ROWS=${POSTGRES_DEMO_ROWS:-3000}
+
+# Сколько секунд ждать, пока Debezium и ClickHouse sink перенесут строки.
 WAIT_SECONDS=${POSTGRES_DEMO_WAIT_SECONDS:-180}
 
+# Проверяем, что POSTGRES_DEMO_ROWS - число, чтобы не подставить мусор в SQL.
 case "$POSTGRES_DEMO_ROWS" in
   ''|*[!0-9]*)
     echo "POSTGRES_DEMO_ROWS must be a positive integer, got: $POSTGRES_DEMO_ROWS" >&2
@@ -12,6 +21,7 @@ case "$POSTGRES_DEMO_ROWS" in
     ;;
 esac
 
+# Проверяем timeout ожидания загрузки.
 case "$WAIT_SECONDS" in
   ''|*[!0-9]*)
     echo "POSTGRES_DEMO_WAIT_SECONDS must be a positive integer, got: $WAIT_SECONDS" >&2
@@ -19,6 +29,7 @@ case "$WAIT_SECONDS" in
     ;;
 esac
 
+# Для этого сценария принудительно включаем demo-режим и локальный PostgreSQL profile.
 export SOURCE_MODE=demo
 export ACTIVE_SOURCE_DB=postgres
 export COMPOSE_PROFILES=postgres-source
@@ -27,6 +38,7 @@ export POSTGRES_DB=${POSTGRES_DB:-app_logs}
 export POSTGRES_USER=${POSTGRES_USER:-app}
 export POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-app_password}
 
+# Эти переменные использует postgres-source.json при регистрации Debezium source connector.
 export POSTGRES_SOURCE_HOST=postgres
 export POSTGRES_SOURCE_PORT=5432
 export POSTGRES_SOURCE_USER=${POSTGRES_SOURCE_USER:-$POSTGRES_USER}
@@ -40,6 +52,7 @@ export POSTGRES_SOURCE_PUBLICATION=${POSTGRES_SOURCE_PUBLICATION:-car_inventory_
 export POSTGRES_SOURCE_SSL_MODE=disable
 export POSTGRES_SOURCE_TOPIC=${POSTGRES_SOURCE_TOPIC:-pg_flat.public.car_inventory}
 
+# Эти переменные использует clickhouse-sink.json.
 export CLICKHOUSE_DB=${CLICKHOUSE_DB:-analytics}
 export CLICKHOUSE_USER=${CLICKHOUSE_USER:-analytics}
 export CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-analytics_password}
@@ -47,7 +60,10 @@ export CLICKHOUSE_SINK_TABLE=car_inventory_raw
 
 cd "$ROOT_DIR"
 
+# Поднимаем минимальный стек для CDC: source DB, Kafka, ClickHouse и Kafka Connect runtime.
 docker compose up -d --build postgres kafka clickhouse debezium
+
+# Одноразовый контейнер регистрирует source/sink connectors в Kafka Connect REST API.
 docker compose run --rm --build \
   -e SOURCE_MODE \
   -e ACTIVE_SOURCE_DB \
@@ -69,6 +85,8 @@ docker compose run --rm --build \
   -e CLICKHOUSE_SINK_TABLE \
   connectors-init
 
+# На всякий случай создаем целевую таблицу в ClickHouse.
+# Это делает команду самодостаточной даже после очистки/пересоздания volume.
 docker compose exec -T clickhouse clickhouse-client \
   --user "$CLICKHOUSE_USER" \
   --password "$CLICKHOUSE_PASSWORD" \
@@ -97,6 +115,7 @@ docker compose exec -T clickhouse clickhouse-client \
     ORDER BY (city, brand, model, id)
   "
 
+# View для быстрых агрегатов по складам автомобилей.
 docker compose exec -T clickhouse clickhouse-client \
   --user "$CLICKHOUSE_USER" \
   --password "$CLICKHOUSE_PASSWORD" \
@@ -118,13 +137,17 @@ docker compose exec -T clickhouse clickhouse-client \
     ORDER BY city ASC, cars DESC, brand ASC
   "
 
+# Очищаем только текущую целевую таблицу, чтобы результат команды был предсказуемым.
 docker compose exec -T clickhouse clickhouse-client \
   --user "$CLICKHOUSE_USER" \
   --password "$CLICKHOUSE_PASSWORD" \
   --query "TRUNCATE TABLE \`$CLICKHOUSE_DB\`.\`$CLICKHOUSE_SINK_TABLE\`"
 
+# batch_id нужен, чтобы отличать текущую загрузку от старых строк, если они где-то остались.
 batch_id="car-demo-$(date -u '+%Y%m%d%H%M%S')"
 
+# Создаем/обновляем demo-таблицу в PostgreSQL и вставляем складские данные.
+# Дальше Debezium сам увидит INSERT'ы и отправит изменения через Kafka в ClickHouse.
 docker compose exec -T postgres psql \
   -U "$POSTGRES_USER" \
   -d "$POSTGRES_DB" \
@@ -158,6 +181,7 @@ docker compose exec -T postgres psql \
     ALTER TABLE car_inventory REPLICA IDENTITY FULL;
 
     WITH city_data AS (
+      -- Три города и коэффициенты спроса, чтобы цены отличались по рынкам.
       SELECT *
       FROM (VALUES
         ('Tokyo', 'Tokyo Bay Auto Hub', 'JPY', 1.12),
@@ -166,6 +190,7 @@ docker compose exec -T postgres psql \
       ) AS t(city, warehouse_name, local_currency, demand_multiplier)
     ),
     model_data AS (
+      -- Каталог брендов/моделей. Это делает demo-данные похожими на реальную инвентаризацию.
       SELECT *
       FROM (VALUES
         ('Toyota', 'Corolla', 'sedan', 22100),
@@ -191,12 +216,14 @@ docker compose exec -T postgres psql \
       ) AS t(brand, model, body_type, base_price_usd)
     ),
     colors AS (
+      -- Набор цветов равномерно распределяется по generated rows.
       SELECT *
       FROM (VALUES
         ('White'), ('Black'), ('Silver'), ('Blue'), ('Red'), ('Graphite')
       ) AS t(color)
     ),
     generated AS (
+      -- generated связывает города, модели и цвета с generate_series.
       SELECT
         gs,
         c.city,
@@ -276,6 +303,7 @@ docker compose exec -T postgres psql \
     FROM generated;
   "
 
+# Ждем, пока ClickHouse sink connector перенесет все строки текущего batch_id.
 for attempt in $(seq 1 "$WAIT_SECONDS"); do
   count=$(docker compose exec -T clickhouse clickhouse-client \
     --user "$CLICKHOUSE_USER" \
@@ -283,6 +311,7 @@ for attempt in $(seq 1 "$WAIT_SECONDS"); do
     --query "SELECT count() FROM \`$CLICKHOUSE_DB\`.\`$CLICKHOUSE_SINK_TABLE\` WHERE batch_id = '$batch_id'")
   if [ "$count" -ge "$POSTGRES_DEMO_ROWS" ]; then
     echo "Loaded $count car inventory rows into $CLICKHOUSE_DB.$CLICKHOUSE_SINK_TABLE"
+    # Печатаем короткую сводку, чтобы пользователь сразу видел, что данные осмысленные.
     docker compose exec -T clickhouse clickhouse-client \
       --user "$CLICKHOUSE_USER" \
       --password "$CLICKHOUSE_PASSWORD" \
