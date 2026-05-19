@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 
 # Этот init job регистрирует Debezium source connector и ClickHouse sink connector.
-# Поток данных после регистрации: Postgres -> Debezium/Kafka Connect -> Redpanda -> ClickHouse sink -> ClickHouse.
+# Поток данных после регистрации: Postgres -> Debezium/Kafka Connect -> Apache Kafka -> ClickHouse sink -> ClickHouse.
 
 CONNECT_URL = os.getenv("CONNECT_URL", "http://debezium:8083").rstrip("/")
 SOURCE_MODE = os.getenv("SOURCE_MODE", "external").strip().lower()

@@ -26,26 +26,29 @@ services:
       timeout: 5s
       retries: 10
 
-  redpanda:
-    image: redpandadata/redpanda:v24.2.8
-    command:
-      - redpanda
-      - start
-      - --overprovisioned
-      - --smp=1
-      - --memory=1G
-      - --reserve-memory=0M
-      - --node-id=0
-      - --check=false
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      # Apache Kafka запускается в KRaft-режиме, поэтому ZooKeeper не нужен.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
     ports:
       - "9092:9092"
-      - "9644:9644"
     volumes:
-      - redpanda_data:/var/lib/redpanda/data
+      - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -90,12 +93,12 @@ services:
   debezium:
     image: debezium/connect:2.7.3.Final
     depends_on:
-      redpanda:
+      kafka:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
     environment:
-      BOOTSTRAP_SERVERS: redpanda:9092
+      BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: ads-connect
       CONFIG_STORAGE_TOPIC: ads_connect_configs
       OFFSET_STORAGE_TOPIC: ads_connect_offsets
@@ -491,7 +494,7 @@ services:
 
 volumes:
   postgres_data:
-  redpanda_data:
+  kafka_data:
   clickhouse_data:
   airflow_db_data:
   grafana_data:

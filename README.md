@@ -26,7 +26,7 @@ prometheus-synthetic-lab/README.md
 
 | Сервис | Что Делает | Когда Смотреть |
 |---|---|---|
-| Debezium | читает изменения из source-БД и пишет события в Redpanda | когда не появляются новые строки в ClickHouse |
+| Debezium | читает изменения из source-БД и пишет события в Kafka | когда не появляются новые строки в ClickHouse |
 | Prometheus connector | принимает `remote_write` и выполняет batch backfill в ClickHouse | когда нужны metrics history и operational dashboards |
 | ClickHouse | хранит analytics tables, Prometheus samples и Langfuse events | когда нужны быстрые агрегаты, таблицы и Grafana |
 | MCP server | публикует безопасные tools для LibreChat | когда модель должна отвечать по live-данным без догадок |
@@ -56,11 +56,11 @@ ___
 
 В других проектах такой connector используют, когда Prometheus хорош для scraping и alerting, а ClickHouse нужен для долгого хранения, дешевой аналитики и запросов через LLM.
 ___
-**Redpanda** — Kafka-compatible брокер сообщений.
+**Kafka** — Kafka-compatible брокер сообщений.
 
 Здесь он работает как транспорт между Debezium и ClickHouse sink connector. Debezium пишет изменения в **topic**, а ClickHouse sink читает этот **topic**.
 
-В других проектах Redpanda или Kafka обычно используют как надежную “шину событий” между сервисами.
+В других проектах Kafka или Kafka обычно используют как надежную “шину событий” между сервисами.
 ___
 **ClickHouse** — аналитическая БД.
 
@@ -137,7 +137,7 @@ ACTIVE_SOURCE_DB=postgres
 
 **table** или **collection** — что именно читаем.
 
-**topic** — поток сообщений в Redpanda/Kafka, куда Debezium пишет изменения.
+**topic** — поток сообщений в Apache Kafka, куда Debezium пишет изменения.
 
 ## Source-БД Первична
 
@@ -401,7 +401,7 @@ Demo-режим нужен только для проверки проекта �
 sh tools/postgres-demo-to-clickhouse.sh
 ```
 
-Команда поднимает demo PostgreSQL, Redpanda, Debezium и ClickHouse, регистрирует connectors, вставляет свежую пачку строк в `public.car_inventory` и ждёт, пока они появятся в `analytics.car_inventory_raw`.
+Команда поднимает demo PostgreSQL, Kafka, Debezium и ClickHouse, регистрирует connectors, вставляет свежую пачку строк в `public.car_inventory` и ждёт, пока они появятся в `analytics.car_inventory_raw`.
 
 По умолчанию вставляется 3000 строк. Количество можно изменить:
 
@@ -458,21 +458,21 @@ CLICKHOUSE_SINK_TABLE=car_inventory_raw
 
 Он не читает внешнюю БД сам.
 
-Он читает сообщения из **Redpanda/Kafka topic** и записывает их в **ClickHouse**.
+Он читает сообщения из **Apache Kafka topic** и записывает их в **ClickHouse**.
 
 Вся цепочка выглядит так:
 
 ```text
 External DB / demo PostgreSQL
   -> Debezium source connector
-  -> Redpanda topic
+  -> Kafka topic
   -> ClickHouse sink connector
   -> ClickHouse table analytics.car_inventory_raw
 ```
 
 То есть **Debezium source connector** отвечает за чтение source-БД.
 
-**Redpanda** хранит поток изменений в topic.
+**Kafka** хранит поток изменений в topic.
 
 **ClickHouse sink connector** забирает этот поток и вставляет строки в ClickHouse.
 
@@ -845,9 +845,8 @@ docker compose up -d --force-recreate librechat
 - `http://localhost:8123/play` — ClickHouse Web UI.
 - `http://localhost:8123` — ClickHouse HTTP API.
 - `localhost:9000` — ClickHouse native TCP port.
-- `localhost:9092` — Redpanda Kafka API.
-- `localhost:9644` — Redpanda admin API.
-- `localhost:5432` — demo PostgreSQL, только при `COMPOSE_PROFILES=postgres-source`.
+- `localhost:9092` — Kafka Kafka API.
+- `- `localhost:5432` — demo PostgreSQL, только при `COMPOSE_PROFILES=postgres-source`.
 
 Grafana внутри Docker работает на `grafana:3000`.
 

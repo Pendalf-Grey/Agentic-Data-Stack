@@ -47,7 +47,7 @@ export CLICKHOUSE_SINK_TABLE=car_inventory_raw
 
 cd "$ROOT_DIR"
 
-docker compose up -d --build postgres redpanda clickhouse debezium
+docker compose up -d --build postgres kafka clickhouse debezium
 docker compose run --rm --build \
   -e SOURCE_MODE \
   -e ACTIVE_SOURCE_DB \

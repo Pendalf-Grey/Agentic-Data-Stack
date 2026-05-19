@@ -89,7 +89,7 @@ def architecture_flow():
     boxes = [
         ((70, 180, 340, 325), "External DB\nPostgreSQL / MySQL\nMongoDB", PALETTE["blue_soft"], PALETTE["blue"]),
         ((425, 180, 695, 325), "Debezium\nCDC connectors", PALETTE["green_soft"], PALETTE["green"]),
-        ((780, 180, 1050, 325), "Redpanda\nKafka-compatible\ntransport", PALETTE["amber_soft"], PALETTE["amber"]),
+        ((780, 180, 1050, 325), "Apache Kafka\nbroker\ntransport", PALETTE["amber_soft"], PALETTE["amber"]),
         ((1135, 180, 1450, 325), "ClickHouse Sink\nKafka Connect", PALETTE["green_soft"], PALETTE["green"]),
         ((1135, 405, 1450, 550), "ClickHouse\nanalytics +\nprometheus_samples", PALETTE["blue_soft"], PALETTE["blue"]),
         ((780, 405, 1050, 550), "MCP Server\nsafe data tools", PALETTE["slate_soft"], "#64748B"),
@@ -122,7 +122,7 @@ def architecture_flow():
         arrow(draw, start, end)
 
     draw.rounded_rectangle((56, 840, 1544, 868), radius=14, fill=PALETTE["slate_soft"], outline=PALETTE["grid"])
-    text_left(draw, (78, 844), "Читать слева направо: CDC-данные идут через Debezium/Redpanda, метрики Prometheus идут через connector, анализ и dashboards читают ClickHouse.", FONT_SMALL, PALETTE["muted"])
+    text_left(draw, (78, 844), "Читать слева направо: CDC-данные идут через Debezium/Apache Kafka, метрики Prometheus идут через connector, анализ и dashboards читают ClickHouse.", FONT_SMALL, PALETTE["muted"])
     img.save(OUT / "guide_architecture_flow.png")
 
 

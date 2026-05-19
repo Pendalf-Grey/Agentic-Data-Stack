@@ -4,7 +4,7 @@
 
 Он написан так, будто инфраструктуру разворачивает junior DevOps, который видит проект впервые.
 
-Цель: развернуть отказоустойчивую систему, где компоненты находятся на разных машинах, данные из внешней БД попадают в ClickHouse через Debezium и Redpanda, а метрики Prometheus попадают в ClickHouse через отдельный Prometheus connector.
+Цель: развернуть отказоустойчивую систему, где компоненты находятся на разных машинах, данные из внешней БД попадают в ClickHouse через Debezium и Apache Kafka, а метрики Prometheus попадают в ClickHouse через отдельный Prometheus connector.
 
 ## 1. Что Мы Строим
 
@@ -23,7 +23,7 @@
 ```text
 External Database
   -> Debezium source connector
-  -> Redpanda topic
+  -> Apache Kafka topic
   -> ClickHouse sink connector
   -> ClickHouse
   -> Grafana / MCP / LibreChat
@@ -45,8 +45,8 @@ Prometheus
 По-человечески:
 
 1. **Debezium** подключается к внешней БД и читает изменения.
-2. **Redpanda** принимает эти изменения как поток сообщений.
-3. **ClickHouse sink** читает поток из Redpanda и пишет строки в ClickHouse.
+2. **Apache Kafka** принимает эти изменения как поток сообщений.
+3. **ClickHouse sink** читает поток из Apache Kafka и пишет строки в ClickHouse.
 4. **Grafana** строит графики по ClickHouse.
 5. **MCP server** дает LLM-модели инструменты для безопасной аналитики.
 6. **LibreChat** дает человеку web UI для общения с моделью.
@@ -58,7 +58,7 @@ Prometheus
 |---|---|---|---|
 | Source | PostgreSQL, MySQL, MongoDB, Prometheus | отдает бизнес-данные или metrics | доступность host/port, права пользователя, freshness |
 | Capture | Debezium, Prometheus connector | переносит изменения и samples | status connector, лаг, ошибки backfill/remote_write |
-| Transport | Redpanda | хранит поток событий для sink | broker health, topics, consumer lag |
+| Transport | Apache Kafka | хранит поток событий для sink | broker health, topics, consumer lag |
 | Storage | ClickHouse | хранит analytics, Prometheus samples и Langfuse data | строки, disk usage, query latency |
 | UI/API | Grafana, MCP, LibreChat | показывает dashboards и дает LLM безопасные tools | health endpoints, dashboards, MCP tool responses |
 | LLM Observability | agent-proxy, Langfuse | вызывает модель и пишет traces | latency, errors, token usage, traces |
@@ -135,9 +135,9 @@ analytics.prometheus_samples
 Labels Prometheus сохраняются в поле `labels_json`.
 
 ___
-### Redpanda
+### Apache Kafka
 
-**Redpanda** — Kafka-compatible брокер сообщений.
+**Apache Kafka** — Kafka-compatible брокер сообщений.
 
 Он хранит изменения в **topics**.
 
@@ -151,7 +151,7 @@ Debezium пишет события в topic.
 
 ClickHouse sink читает этот topic.
 
-Redpanda нужен, чтобы система не зависела от мгновенной доступности ClickHouse. Если ClickHouse временно недоступен, поток событий может ждать в Redpanda.
+Apache Kafka нужен, чтобы система не зависела от мгновенной доступности ClickHouse. Если ClickHouse временно недоступен, поток событий может ждать в Apache Kafka.
 ___
 ### ClickHouse
 
@@ -189,9 +189,9 @@ ___
 
 **ClickHouse sink** — это Kafka Connect connector.
 
-Он читает данные из Redpanda topic и пишет их в ClickHouse table.
+Он читает данные из Apache Kafka topic и пишет их в ClickHouse table.
 
-**Важно**: ClickHouse sink не подключается к внешней БД, а работает только после Debezium и Redpanda.
+**Важно**: ClickHouse sink не подключается к внешней БД, а работает только после Debezium и Apache Kafka.
 
 Конфиг лежит здесь:
 
@@ -428,7 +428,7 @@ COMPOSE_PROFILES=postgres-source
 
 | VM | Компоненты | CPU | RAM | Disk | Комментарий |
 |---|---|---:|---:|---:|---|
-| `vm-data` | Redpanda, ClickHouse, demo PostgreSQL | 4 vCPU | 10-12 GB | 100 GB | data plane и ClickHouse для analytics/langfuse |
+| `vm-data` | Apache Kafka, ClickHouse, demo PostgreSQL | 4 vCPU | 10-12 GB | 100 GB | data plane и ClickHouse для analytics/langfuse |
 | `vm-orch` | Airflow DB, Airflow webserver, Airflow scheduler | 2 vCPU | 4 GB | 40 GB | расписание миграций |
 | `vm-app` | Grafana, MCP, agent-proxy, LibreChat, MongoDB, Langfuse, Redis, MinIO | 4 vCPU | 10 GB | 80 GB | UI/API и LLM observability |
 
@@ -436,7 +436,7 @@ COMPOSE_PROFILES=postgres-source
 
 | VM | Компоненты | CPU | RAM | Disk |
 |---|---|---:|---:|---:|
-| `vm-data` | Redpanda, ClickHouse, Debezium, demo PostgreSQL | 5 vCPU | 12 GB | 100 GB |
+| `vm-data` | Apache Kafka, ClickHouse, Debezium, demo PostgreSQL | 5 vCPU | 12 GB | 100 GB |
 | `vm-app` | Airflow, Grafana, MCP, agent-proxy, LibreChat, MongoDB, Langfuse, Redis, MinIO | 5 vCPU | 10 GB | 100 GB |
 
 Главная цель такой минимальной схемы — проверить сетевое взаимодействие.
@@ -451,9 +451,9 @@ ___
 
 | Машина | Компоненты | CPU | RAM | Disk | Комментарий |
 |---|---|---:|---:|---:|---|
-| `rp-1` | Redpanda broker 1 | 4 vCPU | 16 GB | 200 GB NVMe | Kafka-compatible broker |
-| `rp-2` | Redpanda broker 2 | 4 vCPU | 16 GB | 200 GB NVMe | второй broker |
-| `rp-3` | Redpanda broker 3 | 4 vCPU | 16 GB | 200 GB NVMe | третий broker, quorum |
+| `kafka-1` | Apache Kafka broker 1 | 4 vCPU | 16 GB | 200 GB NVMe | Kafka-compatible broker |
+| `kafka-2` | Apache Kafka broker 2 | 4 vCPU | 16 GB | 200 GB NVMe | второй broker |
+| `kafka-3` | Apache Kafka broker 3 | 4 vCPU | 16 GB | 200 GB NVMe | третий broker, quorum |
 | `ch-1` | ClickHouse replica 1 | 8 vCPU | 32 GB | 1 TB NVMe | аналитика |
 | `ch-2` | ClickHouse replica 2 | 8 vCPU | 32 GB | 1 TB NVMe | отказоустойчивость |
 | `connect-1` | Debezium/Kafka Connect worker 1 | 4 vCPU | 8-16 GB | 100 GB SSD | CDC worker |
@@ -467,7 +467,7 @@ ___
 
 ### Почему Так
 
-Redpanda лучше запускать минимум в 3 узла, так кластер может пережить потерю одного broker.
+Apache Kafka лучше запускать минимум в 3 узла, так кластер может пережить потерю одного broker.
 
 ClickHouse лучше держать минимум в 2 реплики - так можно читать аналитику даже при проблеме на одной машине.
 
@@ -491,9 +491,9 @@ Langfuse ClickHouse database можно держать в том же ClickHouse
 Можно использовать внутренний DNS, например:
 
 ```text
-rp-1.internal
-rp-2.internal
-rp-3.internal
+kafka-1.internal
+kafka-2.internal
+kafka-3.internal
 ch-1.internal
 ch-2.internal
 connect-1.internal
@@ -513,9 +513,9 @@ sudo nano /etc/hosts
 Добавить:
 
 ```text
-10.10.0.11 rp-1.internal
-10.10.0.12 rp-2.internal
-10.10.0.13 rp-3.internal
+10.10.0.11 kafka-1.internal
+10.10.0.12 kafka-2.internal
+10.10.0.13 kafka-3.internal
 10.10.0.21 ch-1.internal
 10.10.0.22 ch-2.internal
 10.10.0.31 connect-1.internal
@@ -532,8 +532,7 @@ sudo nano /etc/hosts
 
 | Компонент | Порт | Откуда Доступ | Для Чего |
 |---|---:|---|---|
-| Redpanda Kafka API | `9092` | Debezium workers | чтение/запись topics |
-| Redpanda Admin API | `9644` | ops/admin only | диагностика |
+| Apache Kafka API | `9092` | Debezium workers | чтение/запись topics |
 | Debezium Connect REST | `8083` | Airflow, ops/admin | регистрация connectors |
 | ClickHouse HTTP | `8123` | Grafana, MCP, sink | SQL по HTTP |
 | ClickHouse native | `9000` | ops/admin | native client |
@@ -2416,7 +2415,7 @@ docker compose exec -T librechat sed -n '12,30p' /app/librechat.yaml
 Минимально он должен содержать:
 
 - `postgres` demo profile;
-- `redpanda`;
+- `kafka`;
 - `clickhouse`;
 - `debezium`;
 - `connectors-init`;
@@ -2493,67 +2492,48 @@ openssl rand -hex 32
 
 Файл `.env` уже должен быть в `.gitignore`.
 
-## 9. Развертывание Redpanda
+## 9. Развертывание Apache Kafka
 
 В production нужен кластер из 3 broker.
 
-На `rp-1`, `rp-2`, `rp-3` создать `docker-compose.redpanda.yml`.
+На `kafka-1`, `kafka-2`, `kafka-3` создать `docker-compose.kafka.yml`.
 
-Пример для `rp-1`:
+Локальный single-node пример без ZooKeeper, в KRaft-режиме:
 
 ```yaml
 services:
-  redpanda:
-    image: redpandadata/redpanda:v24.2.8
-    command:
-      - redpanda
-      - start
-      - --smp=2
-      - --memory=12G
-      - --reserve-memory=1G
-      - --node-id=0
-      - --check=false
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://rp-1.internal:9092
-      - --rpc-addr=0.0.0.0:33145
-      - --advertise-rpc-addr=rp-1.internal:33145
-      - --seeds=rp-1.internal:33145,rp-2.internal:33145,rp-3.internal:33145
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1.internal:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1.internal:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
     ports:
       - "9092:9092"
-      - "9644:9644"
-      - "33145:33145"
     volumes:
-      - redpanda_data:/var/lib/redpanda/data
+      - kafka_data:/var/lib/kafka/data
 volumes:
-  redpanda_data:
-```
-
-Для `rp-2` поменять:
-
-```text
---node-id=1
---advertise-kafka-addr=PLAINTEXT://rp-2.internal:9092
---advertise-rpc-addr=rp-2.internal:33145
-```
-
-Для `rp-3` поменять:
-
-```text
---node-id=2
---advertise-kafka-addr=PLAINTEXT://rp-3.internal:9092
---advertise-rpc-addr=rp-3.internal:33145
+  kafka_data:
 ```
 
 Запустить на каждом broker:
 
 ```bash
-docker compose -f docker-compose.redpanda.yml up -d
+docker compose -f docker-compose.kafka.yml up -d
 ```
 
 Проверить:
 
 ```bash
-docker exec -it $(docker ps -qf name=redpanda) rpk cluster health
+docker exec -it $(docker ps -qf name=kafka) /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 ```
 
 Ожидаем:
@@ -2623,7 +2603,7 @@ curl 'http://localhost:8123/?user=analytics&password=change-me' \
 Debezium workers должны видеть:
 
 - внешнюю source-БД;
-- Redpanda brokers;
+- Apache Kafka brokers;
 - ClickHouse HTTP endpoint;
 - connector templates, созданные в разделе 7.
 
@@ -2661,7 +2641,7 @@ services:
   debezium:
     image: debezium/connect:2.7.3.Final
     environment:
-      BOOTSTRAP_SERVERS: rp-1.internal:9092,rp-2.internal:9092,rp-3.internal:9092
+      BOOTSTRAP_SERVERS: kafka-1.internal:9092,kafka-2.internal:9092,kafka-3.internal:9092
       GROUP_ID: ads-connect
       CONFIG_STORAGE_TOPIC: ads_connect_configs
       OFFSET_STORAGE_TOPIC: ads_connect_offsets
@@ -3337,10 +3317,10 @@ clickhouse-analytics
 
 ## 18. Проверки После Развертывания
 
-Проверить Redpanda:
+Проверить Apache Kafka:
 
 ```bash
-rpk cluster health
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
 ```
 
 Проверить Debezium:
@@ -3464,7 +3444,7 @@ mc mirror minio/langfuse ./langfuse-minio-backup
 
 ![Monitoring signal map](images/guide_monitoring_map.png)
 
-- Redpanda health;
+- Apache Kafka health;
 - consumer lag ClickHouse sink connector;
 - Debezium connector status;
 - ClickHouse disk usage;
@@ -3674,7 +3654,7 @@ sh tools/prometheus-batch-to-clickhouse.sh
 2. Настроить DNS или `/etc/hosts`.
 3. Открыть только нужные firewall ports.
 4. Установить Docker на все машины.
-5. Поднять Redpanda cluster.
+5. Поднять Apache Kafka cluster.
 6. Поднять ClickHouse.
 7. Проверить, что Debezium workers видят external source-БД.
 8. Поднять Debezium workers.
