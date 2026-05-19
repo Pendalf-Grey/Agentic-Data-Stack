@@ -445,12 +445,14 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
+      GENERATED_CONNECTORS_DIR: /user-mcp-connectors
+      GENERATED_CONNECTORS_PUBLIC_DIR: /Users/subbotaevgenij/mcp-connectors
     ports:
       - "3333:3333"
     volumes:
       # Сюда модель через MCP сохраняет generated JS-коннекторы.
-      # Файлы остаются в репозитории на хосте, их можно читать, править и коммитить.
-      - ./mcp-server/generated-connectors:/app/generated-connectors
+      # Файлы лежат вне репозитория, чтобы модель не использовала старые коннекторы как примеры.
+      - /Users/subbotaevgenij/mcp-connectors:/user-mcp-connectors
 
   librechat:
     image: ghcr.io/danny-avila/librechat:latest

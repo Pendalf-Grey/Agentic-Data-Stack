@@ -19,6 +19,9 @@ const chartStore = new Map();
 const generatedConnectorsDir = path.resolve(
   process.env.GENERATED_CONNECTORS_DIR || path.join(process.cwd(), 'generated-connectors'),
 );
+const generatedConnectorsPublicDir = (
+  process.env.GENERATED_CONNECTORS_PUBLIC_DIR || generatedConnectorsDir
+).replace(/\/$/, '');
 
 // Кэш уже загруженных generated-коннекторов. При update/create конкретный коннектор сбрасывается из кэша.
 const generatedConnectorCache = new Map();
@@ -72,8 +75,11 @@ const baseTools = [
           type: 'string',
           description: 'Table or view name in the analytics database, without database prefix.',
         },
+        table_name: {
+          type: 'string',
+          description: 'Compatibility alias for table; the handler forwards this to the same ClickHouse lookup.',
+        },
       },
-      required: ['table'],
     },
   },
   {
@@ -86,13 +92,16 @@ const baseTools = [
           type: 'string',
           description: 'Table or view name in the analytics database, without database prefix.',
         },
+        table_name: {
+          type: 'string',
+          description: 'Compatibility alias for table; the handler forwards this to the same ClickHouse lookup.',
+        },
         limit: {
           type: 'number',
           description: 'Maximum number of rows to return.',
           default: 10,
         },
       },
-      required: ['table'],
     },
   },
   {
@@ -105,13 +114,16 @@ const baseTools = [
           type: 'string',
           description: 'Table or view name in the analytics database, without database prefix.',
         },
+        table_name: {
+          type: 'string',
+          description: 'Compatibility alias for table; the handler forwards this to the same ClickHouse lookup.',
+        },
         sample_limit: {
           type: 'number',
           description: 'Maximum number of sample rows to return.',
           default: 5,
         },
       },
-      required: ['table'],
     },
   },
   {
@@ -124,6 +136,10 @@ const baseTools = [
           type: 'string',
           description: 'Table or view name in the analytics database, without database prefix.',
         },
+        table_name: {
+          type: 'string',
+          description: 'Compatibility alias for table; the handler forwards this to the same ClickHouse lookup.',
+        },
         column: {
           type: 'string',
           description: 'Column name.',
@@ -134,7 +150,7 @@ const baseTools = [
           default: 100,
         },
       },
-      required: ['table', 'column'],
+      required: ['column'],
     },
   },
   {
@@ -146,6 +162,10 @@ const baseTools = [
         table: {
           type: 'string',
           description: 'Table or view name in the analytics database, without database prefix.',
+        },
+        table_name: {
+          type: 'string',
+          description: 'Compatibility alias for table; the handler forwards this to the same ClickHouse lookup.',
         },
         dimensions: {
           type: 'array',
@@ -185,7 +205,7 @@ const baseTools = [
           default: 100,
         },
       },
-      required: ['table', 'dimensions'],
+      required: ['dimensions'],
     },
   },
   {
@@ -628,15 +648,26 @@ function safeGeneratedConnectorName(value) {
   return text;
 }
 
-// Возвращает абсолютный путь к JS-файлу generated-коннектора внутри рабочей директории MCP server.
+// Нормализует имя таблицы для старых и новых схем tool-call.
+// LibreChat иногда присылает table_name вместо table; здесь мы принимаем оба варианта,
+// чтобы запрос дошел до ClickHouse, а не падал на уровне JSON schema.
+function analyticsTableArgument(args) {
+  const table = args?.table ?? args?.table_name;
+  if (!table) {
+    throw new Error('Table name is required. Use argument "table" or "table_name".');
+  }
+  return table;
+}
+
+// Возвращает абсолютный путь к JS-файлу generated-коннектора внутри отдельной папки этого коннектора.
 function generatedConnectorPath(connectorName) {
   const safeName = safeGeneratedConnectorName(connectorName);
-  return path.join(generatedConnectorsDir, `${safeName}.js`);
+  return path.join(generatedConnectorsDir, safeName, 'connector.js');
 }
 
 // Возвращает человекочитаемый путь, который модель должна показывать пользователю в чате.
 function publicGeneratedConnectorPath(connectorName) {
-  return `mcp-server/generated-connectors/${safeGeneratedConnectorName(connectorName)}.js`;
+  return `${generatedConnectorsPublicDir}/${safeGeneratedConnectorName(connectorName)}/connector.js`;
 }
 
 // Валидирует JS-код, который модель пытается сохранить как MCP-коннектор.
@@ -707,6 +738,10 @@ async function ensureGeneratedConnectorsDir() {
   await mkdir(generatedConnectorsDir, { recursive: true });
 }
 
+async function ensureGeneratedConnectorDir(connectorName) {
+  await mkdir(path.dirname(generatedConnectorPath(connectorName)), { recursive: true });
+}
+
 // Загружает JS-коннектор из файла и кладет его в кэш. force=true нужен после create/update,
 // чтобы модель сразу могла вызвать новую версию без перезапуска контейнера.
 async function loadGeneratedConnector(connectorName, { force = false } = {}) {
@@ -729,13 +764,25 @@ async function loadGeneratedConnector(connectorName, { force = false } = {}) {
   return loaded;
 }
 
-// Сканирует папку generated-connectors и возвращает только безопасные имена JS-файлов.
+// Сканирует внешнюю папку generated-коннекторов и возвращает имена подпапок, где есть connector.js.
 async function listGeneratedConnectorFiles() {
   await ensureGeneratedConnectorsDir();
   const entries = await readdir(generatedConnectorsDir, { withFileTypes: true });
-  return entries
-    .filter(entry => entry.isFile() && entry.name.endsWith('.js'))
-    .map(entry => entry.name.replace(/\.js$/, ''))
+  const connectorNames = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const name = entry.name;
+    try {
+      safeGeneratedConnectorName(name);
+      await readFile(path.join(generatedConnectorsDir, name, 'connector.js'), 'utf8');
+      connectorNames.push(name);
+    } catch {
+      // Папки без валидного connector.js не публикуются как MCP tools.
+    }
+  }
+  return connectorNames
     .filter(name => {
       try {
         safeGeneratedConnectorName(name);
@@ -1806,7 +1853,7 @@ async function handleRpc(payload) {
       const filePath = generatedConnectorPath(connectorName);
       const overwrite = name === 'update_generated_connector' || args.overwrite === true;
       const source = validateGeneratedConnectorSource(connectorName, args.source_code);
-      await ensureGeneratedConnectorsDir();
+      await ensureGeneratedConnectorDir(connectorName);
       if (!overwrite) {
         try {
           await readFile(filePath, 'utf8');
@@ -1897,7 +1944,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'describe_analytics_table') {
-      const { tableName, columns } = await analyticsColumns(args.table);
+      const { tableName, columns } = await analyticsColumns(analyticsTableArgument(args));
       const metadata = await runQuery(`
         SELECT
           database,
@@ -1916,7 +1963,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'sample_analytics_table') {
-      const tableName = await analyticsTableExists(args.table);
+      const tableName = await analyticsTableExists(analyticsTableArgument(args));
       const limit = boundedLimit(args.limit, 10, 100);
       const rows = await runQuery(`
         SELECT *
@@ -1929,7 +1976,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'profile_analytics_table') {
-      const { tableName, columns } = await analyticsColumns(args.table);
+      const { tableName, columns } = await analyticsColumns(analyticsTableArgument(args));
       const sampleLimit = boundedLimit(args.sample_limit, 5, 50);
       const metadata = await runQuery(`
         SELECT
@@ -1954,7 +2001,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'distinct_analytics_values') {
-      const { tableName, columnName } = await analyticsColumnExists(args.table, args.column);
+      const { tableName, columnName } = await analyticsColumnExists(analyticsTableArgument(args), args.column);
       const limit = boundedLimit(args.limit, 100, 500);
       const rows = await runQuery(`
         SELECT
@@ -1971,7 +2018,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'count_analytics_by') {
-      const tableName = await analyticsTableExists(args.table);
+      const tableName = await analyticsTableExists(analyticsTableArgument(args));
       const dimensions = Array.isArray(args.dimensions) ? args.dimensions.slice(0, 3) : [];
       if (dimensions.length === 0) {
         throw new Error('count_analytics_by requires at least one dimension.');

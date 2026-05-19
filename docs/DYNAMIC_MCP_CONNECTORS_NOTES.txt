@@ -1,38 +1,73 @@
-Dynamic MCP connectors: implemented changes
-===========================================
+Динамические MCP-коннекторы: журнал решений и изменений
+=======================================================
 
-Date: 2026-05-19
-Project: Agentic-Data-Stack
+Дата: 2026-05-19
+Проект: Agentic-Data-Stack
 
-Goal
+Цель
 ----
 
-The model should be able to create a task-specific MCP connector from a user's ClickHouse question.
+Модель должна уметь создавать MCP-коннектор под конкретный вопрос пользователя к ClickHouse.
 
-The created connector must be a JavaScript file that can be reviewed, edited by hand, committed to Git, and reused later.
+Созданный коннектор должен быть JavaScript-файлом, который можно открыть, прочитать, вручную поправить и переиспользовать.
 
-Main implementation
--------------------
+Где хранятся создаваемые коннекторы
+-----------------------------------
 
-1. Added file-based generated connector storage:
+Коннекторы больше не хранятся внутри репозитория проекта.
 
-    mcp-server/generated-connectors/
+Папка для всех пользовательских MCP-коннекторов:
 
-Generated connectors are saved as JavaScript files:
+    /Users/subbotaevgenij/mcp-connectors
 
-    mcp-server/generated-connectors/clickhouse_some_task.js
+Каждый коннектор хранится отдельно от остальных:
 
-Connector names must start with:
+    /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.js
 
-    clickhouse_
+Пример:
 
-2. Added generated connector loading to the MCP server.
+    /Users/subbotaevgenij/mcp-connectors/clickhouse_schema_car_inventory_question/connector.js
+    /Users/subbotaevgenij/mcp-connectors/clickhouse_data_car_inventory_question/connector.js
 
-The MCP server scans:
+Причина такого решения: модель не должна смотреть на старые коннекторы внутри проекта как на готовые примеры и копировать их. Правила создания описываются в prompt, а сами файлы лежат отдельно и доступны для ручного просмотра.
 
-    mcp-server/generated-connectors/*.js
+Основная схема работы
+---------------------
 
-Each generated connector must export this shape:
+Для нового нетривиального вопроса к ClickHouse модель должна создать два generated MCP-коннектора.
+
+1. Сначала создается schema discovery connector.
+
+Его задача:
+
+    - сходить в system.tables/system.columns;
+    - узнать реальные имена таблиц;
+    - узнать реальные имена колонок;
+    - вернуть только фактическую структуру БД, подходящую под вопрос пользователя.
+
+2. Потом создается data extraction connector.
+
+Его задача:
+
+    - использовать только найденные на первом шаге таблицы и колонки;
+    - валидировать таблицы и колонки через helpers;
+    - выполнить SELECT-only запрос;
+    - вернуть пользователю данные.
+
+Итоговый ответ модели в чат должен содержать:
+
+    - имя schema-коннектора;
+    - путь schema-коннектора;
+    - имя data-коннектора;
+    - путь data-коннектора;
+    - результат из ClickHouse.
+
+Модель не должна выводить исходный код коннектора в чат, если пользователь явно этого не попросил.
+
+Контракт generated-коннектора
+-----------------------------
+
+Каждый generated-коннектор должен экспортировать объект такого вида:
 
     export default {
       name: "clickhouse_some_task",
@@ -47,7 +82,14 @@ Each generated connector must export this shape:
       }
     };
 
-3. Added generated connector lifecycle tools to ClickHouse MCP:
+Имена generated-коннекторов должны начинаться с:
+
+    clickhouse_
+
+Добавленные MCP tools
+---------------------
+
+В MCP server добавлены lifecycle tools для generated-коннекторов:
 
     list_generated_connectors
     describe_generated_connector
@@ -55,76 +97,81 @@ Each generated connector must export this shape:
     update_generated_connector
     run_generated_connector
 
-4. Added direct generated connector calls.
+После сохранения коннектор также появляется как обычный MCP tool со своим именем.
 
-After a connector is saved, it also appears as a normal MCP tool with its own name.
+Например, пользователь может сказать:
 
-Example:
+    Используй коннектор clickhouse_data_car_inventory_question
 
-    clickhouse_cars_by_city_mileage
+Или:
 
-The user can say:
+    Измени коннектор clickhouse_data_car_inventory_question
 
-    Use connector clickhouse_cars_by_city_mileage
+Что изменено в Docker
+---------------------
 
-or:
+В docker-compose для mcp-server добавлен bind mount:
 
-    Modify connector clickhouse_cars_by_city_mileage
+    /Users/subbotaevgenij/mcp-connectors:/user-mcp-connectors
 
-5. Added Docker support.
+Внутри контейнера MCP server пишет generated-коннекторы сюда:
 
-The mcp-server image now includes:
+    /user-mcp-connectors
 
-    COPY generated-connectors ./generated-connectors
+Наружу пользователю показывается путь:
 
-The docker-compose service now bind-mounts:
+    /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.js
 
-    ./mcp-server/generated-connectors:/app/generated-connectors
+Что изменено в LibreChat prompt
+-------------------------------
 
-This means generated connector JS files created from LibreChat inside the container are visible on the host machine and can be inspected or edited manually.
+LibreChat получает правила:
 
-6. Added LibreChat MCP instructions.
+    - не гадать по памяти;
+    - сначала создать schema discovery connector;
+    - выполнить schema discovery connector;
+    - затем создать data extraction connector;
+    - использовать только реальные таблицы и колонки из результата первого коннектора;
+    - выполнить data extraction connector;
+    - в финальном ответе дать имена коннекторов, пути и результат;
+    - не показывать исходный код коннекторов без явной просьбы пользователя.
 
-LibreChat is instructed to:
+Также добавлено правило совместимости:
 
-    - inspect live schema first;
-    - create a generated connector when no existing purpose-built tool fits;
-    - run the generated connector;
-    - answer with connector name, saved path, and returned ClickHouse data;
-    - use a named generated connector when the user explicitly asks for it;
-    - update an existing generated connector when the user asks to modify it;
-    - avoid dumping generated source code into chat unless explicitly requested.
+    describe_analytics_table
+    sample_analytics_table
+    profile_analytics_table
+    distinct_analytics_values
+    count_analytics_by
 
-7. Fixed Prometheus Grafana dashboard time windows.
+должны использовать аргумент:
 
-Prometheus dashboard SQL no longer uses system now() as the default anchor.
+    table
 
-Instead, the MCP server uses:
+но MCP server также принимает:
 
-    max(sample_time)
+    table_name
 
-from analytics.prometheus_samples, or from a specific metric when the dashboard is metric-specific.
+Это сделано потому, что модель в LibreChat пыталась вызывать describe_analytics_table с table_name, из-за чего раньше получала ошибку schema validation.
 
-This matters because demo Prometheus data can be loaded from historical/synthetic timestamps. A dashboard should still render useful panels even when the local machine date is later than the sample timestamps.
+Ограничения безопасности
+------------------------
 
-Safety constraints currently implemented
-----------------------------------------
+1. Имена generated-коннекторов валидируются.
 
-1. Generated connector names are validated.
+2. Исходный код generated-коннектора должен:
 
-2. Generated connector source must:
+    - быть непустым;
+    - не превышать лимит размера;
+    - использовать export default;
+    - экспортировать ожидаемое имя коннектора.
 
-    - be non-empty;
-    - be below the configured size cap;
-    - use export default;
-    - export the expected connector name.
-
-3. Generated connectors that query analytics.* must validate referenced columns before runQuery:
+3. Коннекторы, которые читают analytics.*, обязаны валидировать используемые колонки до runQuery:
 
     helpers.analyticsColumnExists
     helpers.analyticsColumns
 
-4. Some dangerous source patterns are rejected:
+4. Запрещены опасные паттерны в исходном коде generated-коннектора:
 
     import
     require(...)
@@ -137,7 +184,7 @@ Safety constraints currently implemented
     fetch(...)
     XMLHttpRequest
 
-5. Generated connectors receive read-only helpers:
+5. Generated-коннекторы получают read-only helpers:
 
     runQuery
     analyticsTableExists
@@ -150,12 +197,25 @@ Safety constraints currently implemented
     safeSqlIdentifier
     sqlLiteral
 
-6. runQuery still enforces SELECT-only queries and rejects mutating SQL words.
+6. runQuery по-прежнему разрешает только SELECT-запросы и отсекает мутирующие SQL-операции.
 
-QA questions used
------------------
+Исправление Grafana dashboards по Prometheus
+--------------------------------------------
 
-Car inventory database questions used for generated MCP connector tests:
+Prometheus dashboard SQL больше не использует системный now() как якорь временного окна.
+
+Теперь MCP server берет:
+
+    max(sample_time)
+
+из analytics.prometheus_samples или из конкретной метрики, если dashboard строится по одной метрике.
+
+Причина: synthetic Prometheus data может быть исторической. Если строить dashboard от текущего now(), Grafana показывает пустые или красные панели, хотя данные в ClickHouse есть.
+
+Вопросы, которые использовались для проверки
+--------------------------------------------
+
+Вопросы по БД с машинами, на которых проверялись generated MCP-коннекторы:
 
 1. Какие города есть в автомобильной БД и сколько машин в каждом городе?
 
@@ -177,7 +237,7 @@ Car inventory database questions used for generated MCP connector tests:
 
 10. Какие топ-10 самых дорогих машин есть на складах?
 
-Prometheus questions used for Grafana dashboard tests:
+Вопросы по Prometheus, на которых проверялись Grafana dashboards:
 
 1. Создай dashboard: какие instance и когда down/up за последние 24 часа?
 
@@ -199,57 +259,56 @@ Prometheus questions used for Grafana dashboard tests:
 
 10. Создай dashboard scrape duration по job.
 
-QA findings
------------
+Найденные проблемы и исправления
+--------------------------------
 
-1. A deliberately model-like connector first tried to use production_year.
+1. Модель попыталась использовать колонку production_year.
 
-That column does not exist in live ClickHouse schema. The real column is:
+Такой колонки нет в live-схеме ClickHouse. Реальная колонка:
 
     model_year
 
-The guardrail was tightened so generated connectors that query analytics.* must validate referenced columns with helpers.analyticsColumnExists or helpers.analyticsColumns before runQuery.
+После этого усилено правило: generated-коннекторы, которые читают analytics.*, должны валидировать колонки через helpers.analyticsColumnExists или helpers.analyticsColumns перед runQuery.
 
-2. The first visual Grafana check showed empty/red Prometheus panels.
+2. Первый визуальный тест Grafana показал пустые/красные Prometheus panels.
 
-The reason was that dashboard SQL used now() - INTERVAL ... while synthetic Prometheus samples were historical. The fix anchors dashboard windows to max(sample_time) in ClickHouse data.
+Причина: dashboard SQL использовал now() - INTERVAL ..., а synthetic Prometheus samples были историческими.
 
-Important behavior
-------------------
+Исправление: dashboard time window теперь якорится на max(sample_time) в ClickHouse.
 
-The model should not hardcode current demo tables.
+3. LibreChat отправлял describe_analytics_table с аргументом table_name.
 
-Existing tables such as:
+Tool schema ожидала table, поэтому запрос падал до выполнения кода.
+
+Исправление: MCP server принимает оба варианта:
+
+    table
+    table_name
+
+Важное поведение
+----------------
+
+Модель не должна хардкодить текущие demo-таблицы.
+
+Таблицы:
 
     car_inventory_raw
     prometheus_samples
 
-may be used only when live schema inspection shows that they exist and match the user's question.
+можно использовать только если schema discovery connector или live schema tool подтвердили, что они существуют и подходят под вопрос пользователя.
 
-The intended flow for a new question is:
-
-    1. User asks a ClickHouse data question.
-    2. Model calls schema/table inspection tools.
-    3. Model creates a generated JS connector with create_generated_connector.
-    4. Model runs it with run_generated_connector or by calling the generated tool directly.
-    5. Model replies with:
-       - connector name;
-       - saved path;
-       - result summary from ClickHouse.
-
-Files changed
--------------
+Измененные файлы
+----------------
 
     mcp-server/src/server.js
     mcp-server/Dockerfile
     docker-compose.yml
     librechat/librechat.yaml
-    mcp-server/generated-connectors/.gitkeep
     docs/DYNAMIC_MCP_CONNECTORS_NOTES.txt
 
-Remaining engineering note
---------------------------
+Инженерная заметка
+------------------
 
-This implementation intentionally supports generated JavaScript files because that is the requested behavior.
+Текущая реализация намеренно поддерживает generated JavaScript files, потому что именно это требуется пользователю.
 
-For stronger production hardening, generated connectors should eventually run in a stricter sandbox or be limited to a declarative query DSL. The current implementation adds validation and read-only ClickHouse execution, but generated JavaScript is still a powerful mechanism and should be reviewed before use in sensitive environments.
+Для более жесткого production-режима позже можно добавить sandbox или перейти на декларативный DSL. Сейчас безопасность обеспечивается валидацией имени, запретом опасных паттернов, проверкой колонок и SELECT-only выполнением через runQuery.
