@@ -4,12 +4,23 @@
 Дата: 2026-05-19
 Проект: Agentic-Data-Stack
 
+Что сделано в этом изменении
+----------------------------
+
+MCP server переписан с JavaScript на Python.
+
+Теперь основной код находится здесь:
+
+    mcp-server/src/server.py
+
+Контейнер mcp-server больше не устанавливает npm-зависимости и запускает Python-файл напрямую.
+
 Цель
 ----
 
 Модель должна уметь создавать MCP-коннектор под конкретный вопрос пользователя к ClickHouse.
 
-Созданный коннектор должен быть JavaScript-файлом, который можно открыть, прочитать, вручную поправить и переиспользовать.
+Созданный коннектор должен быть Python-файлом, который можно открыть, прочитать, вручную поправить и переиспользовать.
 
 Где хранятся создаваемые коннекторы
 -----------------------------------
@@ -22,12 +33,12 @@
 
 Каждый коннектор хранится отдельно от остальных:
 
-    /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.js
+    /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.py
 
 Пример:
 
-    /Users/subbotaevgenij/mcp-connectors/clickhouse_schema_car_inventory_question/connector.js
-    /Users/subbotaevgenij/mcp-connectors/clickhouse_data_car_inventory_question/connector.js
+    /Users/subbotaevgenij/mcp-connectors/clickhouse_schema_car_inventory_question/connector.py
+    /Users/subbotaevgenij/mcp-connectors/clickhouse_data_car_inventory_question/connector.py
 
 Причина такого решения: модель не должна смотреть на старые коннекторы внутри проекта как на готовые примеры и копировать их. Правила создания описываются в prompt, а сами файлы лежат отдельно и доступны для ручного просмотра.
 
@@ -68,19 +79,20 @@
 -----------------------------
 
 Каждый generated-коннектор должен экспортировать объект такого вида:
+В Python это означает: файл должен определить словарь CONNECTOR и функцию handler.
 
-    export default {
-      name: "clickhouse_some_task",
-      description: "Useful human-readable description.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-        additionalProperties: false
-      },
-      async handler({ args, runQuery, helpers }) {
-        return [];
-      }
-    };
+    CONNECTOR = {
+        "name": "clickhouse_some_task",
+        "description": "Useful human-readable description.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False
+        }
+    }
+
+    def handler(args, run_query, helpers):
+        return []
 
 Имена generated-коннекторов должны начинаться с:
 
@@ -120,7 +132,7 @@
 
 Наружу пользователю показывается путь:
 
-    /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.js
+    /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.py
 
 Что изменено в LibreChat prompt
 -------------------------------
@@ -163,41 +175,44 @@ LibreChat получает правила:
 
     - быть непустым;
     - не превышать лимит размера;
-    - использовать export default;
-    - экспортировать ожидаемое имя коннектора.
+    - определить CONNECTOR;
+    - определить функцию handler(args, run_query, helpers);
+    - указать в CONNECTOR ожидаемое имя коннектора.
 
-3. Коннекторы, которые читают analytics.*, обязаны валидировать используемые колонки до runQuery:
+3. Коннекторы, которые читают analytics.*, обязаны валидировать используемые колонки до run_query:
 
-    helpers.analyticsColumnExists
-    helpers.analyticsColumns
+    helpers.analytics_column_exists
+    helpers.analytics_columns
 
 4. Запрещены опасные паттерны в исходном коде generated-коннектора:
 
     import
-    require(...)
-    process
-    child_process
-    node:
-    fs
+    __import__
+    open(...)
+    os
+    sys
+    subprocess
+    socket
     eval(...)
-    Function(...)
-    fetch(...)
-    XMLHttpRequest
+    exec(...)
+    compile(...)
+    requests
+    urllib
 
 5. Generated-коннекторы получают read-only helpers:
 
-    runQuery
-    analyticsTableExists
-    analyticsColumns
-    analyticsColumnExists
-    boundedLimit
-    normalizeFilterOperator
-    quoteIdent
-    quoteString
-    safeSqlIdentifier
-    sqlLiteral
+    run_query
+    analytics_table_exists
+    analytics_columns
+    analytics_column_exists
+    bounded_limit
+    normalize_filter_operator
+    quote_ident
+    quote_string
+    safe_sql_identifier
+    sql_literal
 
-6. runQuery по-прежнему разрешает только SELECT-запросы и отсекает мутирующие SQL-операции.
+6. run_query по-прежнему разрешает только SELECT-запросы и отсекает мутирующие SQL-операции.
 
 Исправление Grafana dashboards по Prometheus
 --------------------------------------------
@@ -212,10 +227,10 @@ Prometheus dashboard SQL больше не использует системны
 
 Причина: synthetic Prometheus data может быть исторической. Если строить dashboard от текущего now(), Grafana показывает пустые или красные панели, хотя данные в ClickHouse есть.
 
-Вопросы, которые использовались для проверки
---------------------------------------------
+Контрольные вопросы для проверки
+--------------------------------
 
-Вопросы по БД с машинами, на которых проверялись generated MCP-коннекторы:
+Вопросы по БД с машинами, которыми проверялась логика generated MCP-коннекторов:
 
 1. Какие города есть в автомобильной БД и сколько машин в каждом городе?
 
@@ -237,7 +252,7 @@ Prometheus dashboard SQL больше не использует системны
 
 10. Какие топ-10 самых дорогих машин есть на складах?
 
-Вопросы по Prometheus, на которых проверялись Grafana dashboards:
+Вопросы по Prometheus, которыми проверялась логика Grafana dashboards:
 
 1. Создай dashboard: какие instance и когда down/up за последние 24 часа?
 
@@ -268,7 +283,7 @@ Prometheus dashboard SQL больше не использует системны
 
     model_year
 
-После этого усилено правило: generated-коннекторы, которые читают analytics.*, должны валидировать колонки через helpers.analyticsColumnExists или helpers.analyticsColumns перед runQuery.
+После этого усилено правило: generated-коннекторы, которые читают analytics.*, должны валидировать колонки через helpers.analytics_column_exists или helpers.analytics_columns перед run_query.
 
 2. Первый визуальный тест Grafana показал пустые/красные Prometheus panels.
 
@@ -300,15 +315,16 @@ Tool schema ожидала table, поэтому запрос падал до в
 Измененные файлы
 ----------------
 
-    mcp-server/src/server.js
+    mcp-server/src/server.py
     mcp-server/Dockerfile
     docker-compose.yml
     librechat/librechat.yaml
+    librechat/librechat.yaml.template
     docs/DYNAMIC_MCP_CONNECTORS_NOTES.txt
 
 Инженерная заметка
 ------------------
 
-Текущая реализация намеренно поддерживает generated JavaScript files, потому что именно это требуется пользователю.
+Текущая реализация намеренно поддерживает generated Python files, потому что именно это требуется пользователю.
 
-Для более жесткого production-режима позже можно добавить sandbox или перейти на декларативный DSL. Сейчас безопасность обеспечивается валидацией имени, запретом опасных паттернов, проверкой колонок и SELECT-only выполнением через runQuery.
+Для более жесткого production-режима позже можно добавить sandbox или перейти на декларативный DSL. Сейчас безопасность обеспечивается валидацией имени, запретом опасных паттернов, проверкой колонок и SELECT-only выполнением через run_query.

@@ -32,7 +32,7 @@ mcpServers:
     url: http://mcp-server:3333/mcp
     timeout: 60000
     # Этот prompt учит модель не гадать про ClickHouse, а каждый раз идти через MCP tools.
-    # Для нестандартных вопросов модель должна создать JS-коннектор, сохранить его и затем выполнить.
+    # Для нестандартных вопросов модель должна создать Python-коннектор, сохранить его и затем выполнить.
     serverInstructions: |
       You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
       If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
@@ -49,8 +49,8 @@ mcpServers:
       Never paste raw MCP tool output, metadata JSON, SQL snippets, dashboard internals, or tool debug text into the chat. For Grafana dashboard tools, return only the ready browserUrl/browserShortUrl and a short human summary from rows.
       Do not claim that you executed SQL unless a tool call actually returned results. Never invent table names, columns, rows, JSON/tool results, or Prometheus metric tables.
       For every new non-trivial ClickHouse question, use a two-generated-connector flow. First create a schema discovery generated connector that reads system.tables/system.columns and returns the real candidate tables and columns for the user's question. Run it. Second create a data extraction generated connector that uses only the discovered real table/column names and returns the requested data. Run it with run_generated_connector or by calling the generated connector tool directly.
-      Generated connector names must start with clickhouse_. Use clear suffixes, for example clickhouse_schema_car_inventory_question and clickhouse_data_car_inventory_question. Generated connector files are saved outside the project under /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.js.
-      Generated JavaScript connectors must validate every referenced analytics table and column with helpers.analyticsTableExists and helpers.analyticsColumnExists/helpers.analyticsColumns before runQuery. Never write a generated connector from guessed column names; if the needed column is not present in live schema, explain that instead of inventing it.
+      Generated connector names must start with clickhouse_. Use clear suffixes, for example clickhouse_schema_car_inventory_question and clickhouse_data_car_inventory_question. Generated connector files are saved outside the project under /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.py.
+      Generated Python connectors must define CONNECTOR and handler(args, run_query, helpers). They must validate every referenced analytics table and column with helpers.analytics_table_exists and helpers.analytics_column_exists/helpers.analytics_columns before run_query. Never write a generated connector from guessed column names; if the needed column is not present in live schema, explain that instead of inventing it.
       If the user explicitly names a generated connector, use that connector. If the user asks to change a generated connector, use update_generated_connector, then run the updated connector if a data answer is expected.
       When using generated connectors, the final chat answer must include only the schema connector name, the data connector name, the saved paths returned by the tools, and the resulting ClickHouse data summary. Do not paste connector source code unless the user explicitly asks for it.
       Prefer purpose-built tools such as describe_analytics_table, sample_analytics_table, profile_analytics_table, distinct_analytics_values, count_analytics_by, list_non_empty_analytics_tables, list_analytics_tables, prometheus_metric_summary, prometheus_targets, sample_prometheus_metrics, prometheus_label_values, event_summary, route_performance, model_usage, and error_trends.
