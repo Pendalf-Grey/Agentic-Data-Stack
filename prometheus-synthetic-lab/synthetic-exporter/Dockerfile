@@ -1,7 +1,5 @@
-FROM node:22-alpine
+FROM python:3.12-alpine
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
 COPY src ./src
 EXPOSE 9201
-CMD ["npm", "start"]
+CMD ["python", "src/server.py"]

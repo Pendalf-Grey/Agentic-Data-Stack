@@ -139,7 +139,7 @@ synthetic_process_restarts_total
 
 - `prometheus` — Prometheus TSDB на порту `9095`.
 - `synthetic-exporter` — приложение, которое отдает realistic metrics на `/metrics`.
-- `scripts/generate-openmetrics.mjs` — генератор исторических OpenMetrics samples.
+- `scripts/generate_openmetrics.py` — генератор исторических OpenMetrics samples.
 - `scripts/import-history.sh` — импортирует историю в Prometheus TSDB через `promtool`.
 
 ## Быстрый Запуск

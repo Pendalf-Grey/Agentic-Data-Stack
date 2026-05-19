@@ -516,7 +516,30 @@ def format_tool_rows(rows, limit=20):
     return "\n".join([header, separator, *body]) + suffix
 
 
-def grafana_dashboard_response(request_id, rows, metadata):
+def generated_grafana_dashboard_response(dashboard, rows=None, metadata=None):
+    """Helper для generated-коннекторов: создать dashboard и вернуть URL как обычный Python dict."""
+    created = create_grafana_dashboard(dashboard)
+    dashboard_path = created.get("url") or f"/d/{dashboard.get('uid', '')}/{dashboard.get('uid', '')}"
+    grafana_url = f"{GRAFANA_BASE_URL}{dashboard_path}"
+    short_url = ""
+    try:
+        short_url = create_grafana_short_url_for_path(dashboard_path.lstrip("/"))
+    except Exception as error:
+        print(f"Grafana short URL failed: {error}")
+    return {
+        "browserUrl": grafana_url,
+        "browserShortUrl": short_url or grafana_url,
+        "dashboardPath": dashboard_path,
+        "rows": rows or [],
+        "metadata": metadata or {},
+    }
+
+
+HelperBag.grafana_dashboard_response = staticmethod(generated_grafana_dashboard_response)
+HelperBag.grafana_clickhouse_target = staticmethod(clickhouse_grafana_target)
+
+
+def mcp_grafana_dashboard_response(request_id, rows, metadata):
     """Возвращает модели только URL dashboard и компактную таблицу строк для summary."""
     grafana_url = f"{GRAFANA_BASE_URL}{metadata['dashboardPath']}"
     short_url = ""
@@ -758,7 +781,7 @@ def create_prometheus_availability_dashboard_response(request_id, args):
         ],
     }
     created = create_grafana_dashboard(dashboard)
-    return grafana_dashboard_response(
+    return mcp_grafana_dashboard_response(
         request_id,
         preview_rows,
         {
@@ -865,7 +888,7 @@ def create_prometheus_metric_dashboard_response(request_id, args):
         ],
     }
     created = create_grafana_dashboard(dashboard)
-    return grafana_dashboard_response(
+    return mcp_grafana_dashboard_response(
         request_id,
         preview_rows,
         {"title": title, "dashboardPath": created.get("url") or f"/d/{uid}/{uid}"},
@@ -873,48 +896,8 @@ def create_prometheus_metric_dashboard_response(request_id, args):
 
 
 def base_tools():
-    """Описание MCP tools, которое LibreChat получает через tools/list."""
-    table_property = {"type": "string", "description": "Table or view name in the analytics database."}
-    table_name_property = {"type": "string", "description": "Compatibility alias for table."}
+    """LibreChat видит только lifecycle tools, чтобы пользовательские запросы шли через generated-коннекторы."""
     return [
-        {"name": "describe_analytics_schema", "description": "Describe ClickHouse analytics tables and views available for analysis.", "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "list_analytics_tables", "description": "List real tables and views in ClickHouse analytics database.", "inputSchema": {"type": "object", "properties": {"include_empty": {"type": "boolean", "default": True}}}},
-        {"name": "list_non_empty_analytics_tables", "description": "Live authoritative list of real non-empty analytics tables.", "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "describe_analytics_table", "description": "Describe one analytics table or view by name.", "inputSchema": {"type": "object", "properties": {"table": table_property, "table_name": table_name_property}}},
-        {"name": "sample_analytics_table", "description": "Return live sample rows from any analytics table or view.", "inputSchema": {"type": "object", "properties": {"table": table_property, "table_name": table_name_property, "limit": {"type": "number", "default": 10}}}},
-        {"name": "profile_analytics_table", "description": "Profile any analytics table or view.", "inputSchema": {"type": "object", "properties": {"table": table_property, "table_name": table_name_property, "sample_limit": {"type": "number", "default": 5}}}},
-        {"name": "distinct_analytics_values", "description": "Return distinct values from one column.", "inputSchema": {"type": "object", "properties": {"table": table_property, "table_name": table_name_property, "column": {"type": "string"}, "limit": {"type": "number", "default": 100}}, "required": ["column"]}},
-        {
-            "name": "count_analytics_by",
-            "description": "Count rows grouped by one to three columns with optional filters.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "table": table_property,
-                    "table_name": table_name_property,
-                    "dimensions": {"type": "array", "items": {"type": "string"}},
-                    "filters": {"type": "object"},
-                    "filter_conditions": {"type": "array", "items": {"type": "object"}},
-                    "limit": {"type": "number", "default": 100},
-                },
-                "required": ["dimensions"],
-            },
-        },
-        {"name": "create_car_inventory_dashboard", "description": "Create a Grafana dashboard for car inventory data.", "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "min_mileage_km": {"type": "number"}, "max_mileage_km": {"type": "number"}, "city": {"type": "string"}, "brand": {"type": "string"}, "stock_status": {"type": "string"}}}},
-        {"name": "sample_app_events", "description": "Return recent rows migrated from PostgreSQL to ClickHouse.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 10}}}},
-        {"name": "event_summary", "description": "Return hourly event metrics.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 50}}}},
-        {"name": "route_performance", "description": "Analyze request volume, users, error rate, and latency by route.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 20}}}},
-        {"name": "model_usage", "description": "Analyze model/token usage and cost by model_name.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 20}}}},
-        {"name": "prometheus_metric_summary", "description": "Analyze Prometheus metrics stored in ClickHouse by metric_name.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 50}}}},
-        {"name": "prometheus_targets", "description": "Return Prometheus up target health.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 50}}}},
-        {"name": "sample_prometheus_metrics", "description": "Return recent Prometheus samples for one metric_name.", "inputSchema": {"type": "object", "properties": {"metric_name": {"type": "string"}, "limit": {"type": "number", "default": 50}}, "required": ["metric_name"]}},
-        {"name": "prometheus_label_values", "description": "Return frequent label values for a Prometheus metric.", "inputSchema": {"type": "object", "properties": {"metric_name": {"type": "string"}, "label": {"type": "string"}, "limit": {"type": "number", "default": 50}}, "required": ["metric_name", "label"]}},
-        {"name": "create_prometheus_availability_dashboard", "description": "Create a rich Grafana dashboard for Prometheus synthetic availability.", "inputSchema": {"type": "object", "properties": {"hours": {"type": "number", "default": 24}, "bucket_minutes": {"type": "number", "default": 1}, "title": {"type": "string"}}}},
-        {"name": "create_prometheus_metric_dashboard", "description": "Create a Grafana dashboard for one Prometheus metric.", "inputSchema": {"type": "object", "properties": {"metric_name": {"type": "string"}, "group_by_label": {"type": "string", "default": "job"}, "aggregation": {"type": "string", "enum": ["avg", "min", "max", "p95", "sum", "count", "last"], "default": "avg"}, "hours": {"type": "number", "default": 24}, "bucket_minutes": {"type": "number", "default": 1}, "title": {"type": "string"}}, "required": ["metric_name"]}},
-        {"name": "error_trends", "description": "Analyze hourly errors by route and status code.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "number", "default": 50}}}},
-        {"name": "visualize_event_volume", "description": "Render an SVG line chart of event volume.", "inputSchema": {"type": "object", "properties": {"hours": {"type": "number", "default": 24}}}},
-        {"name": "visualize_route_performance", "description": "Render an SVG bar chart for route performance.", "inputSchema": {"type": "object", "properties": {"metric": {"type": "string"}, "limit": {"type": "number", "default": 10}}}},
-        {"name": "visualize_model_usage", "description": "Render an SVG bar chart for model usage.", "inputSchema": {"type": "object", "properties": {"metric": {"type": "string"}, "limit": {"type": "number", "default": 10}}}},
         {"name": "list_generated_connectors", "description": "List generated Python MCP connectors.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "describe_generated_connector", "description": "Describe one saved generated Python MCP connector.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}}, "required": ["connector_name"]}},
         {"name": "create_generated_connector", "description": "Create a Python MCP connector file for a specific user database question.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}, "required": ["connector_name", "source_code"]}},
@@ -1167,7 +1150,7 @@ def create_car_inventory_dashboard(request_id, args):
         ],
     }
     created = create_grafana_dashboard(dashboard)
-    return grafana_dashboard_response(request_id, preview_rows, {"title": title, "dashboardPath": created.get("url") or f"/d/{uid}/{uid}"})
+    return mcp_grafana_dashboard_response(request_id, preview_rows, {"title": title, "dashboardPath": created.get("url") or f"/d/{uid}/{uid}"})
 
 
 def handle_rpc(payload):

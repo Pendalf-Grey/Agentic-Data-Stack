@@ -7,7 +7,7 @@ mkdir -p data/openmetrics
 rm -rf data/prometheus
 mkdir -p data/prometheus
 
-node scripts/generate-openmetrics.mjs
+python3 scripts/generate_openmetrics.py
 
 docker run --rm \
   --entrypoint promtool \

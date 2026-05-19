@@ -9,6 +9,14 @@
 
 MCP server переписан с JavaScript на Python.
 
+Остальные собственные сервисы проекта тоже переведены на Python:
+
+    agent-proxy
+    prometheus-connector
+    prometheus-synthetic-lab/synthetic-exporter
+    prometheus-synthetic-lab/scripts/generate_openmetrics.py
+    debezium/register_connectors.py
+
 Теперь основной код находится здесь:
 
     mcp-server/src/server.py
@@ -111,6 +119,20 @@ MCP server переписан с JavaScript на Python.
 
 После сохранения коннектор также появляется как обычный MCP tool со своим именем.
 
+Важно: заранее подготовленные аналитические tools больше не публикуются в tools/list для LibreChat.
+
+LibreChat видит только:
+
+    list_generated_connectors
+    describe_generated_connector
+    create_generated_connector
+    update_generated_connector
+    run_generated_connector
+
+и уже сохраненные generated-коннекторы.
+
+Старые аналитические функции оставлены внутри Python-кода как внутренняя библиотека/совместимость, но модель не должна вызывать их напрямую как готовый путь ответа на пользовательский вопрос.
+
 Например, пользователь может сказать:
 
     Используй коннектор clickhouse_data_car_inventory_question
@@ -147,6 +169,7 @@ LibreChat получает правила:
     - выполнить data extraction connector;
     - в финальном ответе дать имена коннекторов, пути и результат;
     - не показывать исходный код коннекторов без явной просьбы пользователя.
+    - не использовать заранее подготовленные analytics/dashboard tools для пользовательских вопросов к БД.
 
 Также добавлено правило совместимости:
 
@@ -316,7 +339,17 @@ Tool schema ожидала table, поэтому запрос падал до в
 ----------------
 
     mcp-server/src/server.py
+    agent-proxy/src/server.py
+    prometheus-connector/src/server.py
+    prometheus-synthetic-lab/synthetic-exporter/src/server.py
+    prometheus-synthetic-lab/synthetic-exporter/src/metrics.py
+    prometheus-synthetic-lab/synthetic-exporter/src/scenario.py
+    prometheus-synthetic-lab/scripts/generate_openmetrics.py
+    debezium/register_connectors.py
     mcp-server/Dockerfile
+    agent-proxy/Dockerfile
+    prometheus-connector/Dockerfile
+    prometheus-synthetic-lab/synthetic-exporter/Dockerfile
     docker-compose.yml
     librechat/librechat.yaml
     librechat/librechat.yaml.template

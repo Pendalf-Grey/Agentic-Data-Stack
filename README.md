@@ -260,33 +260,27 @@ sh tools/clickhouse-clear.sh
 CLICKHOUSE_CLEAR_DATABASE=langfuse sh tools/clickhouse-clear.sh
 ```
 
-Для LibreChat доступны ClickHouse MCP tools:
+Для LibreChat опубликованы только lifecycle MCP tools для generated Python-коннекторов:
 
-- `list_analytics_tables`;
-- `list_non_empty_analytics_tables`;
-- `describe_analytics_schema`;
-- `describe_analytics_table`;
-- `sample_analytics_table`;
-- `profile_analytics_table`;
-- `distinct_analytics_values`;
-- `count_analytics_by`;
-- `create_car_inventory_dashboard`;
-- `prometheus_metric_summary`;
-- `prometheus_targets`;
-- `sample_prometheus_metrics`;
-- `prometheus_label_values`;
-- `create_prometheus_availability_dashboard`;
-- `create_prometheus_metric_dashboard`.
+- `list_generated_connectors`;
+- `describe_generated_connector`;
+- `create_generated_connector`;
+- `update_generated_connector`;
+- `run_generated_connector`.
 
-Модель не должна показывать пользователю SQL или JSON payload tool-call. Правильная схема такая: модель понимает вопрос, вызывает один или несколько MCP tools, получает live-ответ от ClickHouse и только потом формулирует короткий человеческий ответ.
+Модель не должна отвечать на пользовательский вопрос через заранее подготовленный аналитический tool. Правильная схема такая: модель создает schema discovery connector, выполняет его, затем создает data/dashboard connector по реальной схеме ClickHouse, выполняет его и только потом формулирует короткий человеческий ответ.
 
-Если пользователь просит создать dashboard в Grafana по PostgreSQL demo inventory-данным, модель должна вызвать `create_car_inventory_dashboard` и отправить в чат прямой `browserUrl`, который вернул tool.
+Generated-коннекторы хранятся вне репозитория:
 
-Если пользователь просит создать dashboard в Grafana по Prometheus up/down, instance health, availability, incidents, service health, DB health или HTTP health, модель должна вызвать `create_prometheus_availability_dashboard` и отправить в чат прямой `browserUrl`, который вернул tool.
+```text
+/Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.py
+```
+
+Если пользователь явно назвал существующий generated-коннектор, модель может переиспользовать или изменить именно его. В остальных случаях коннекторы создаются на ходу под текущий вопрос.
 
 Важно: Prometheus metric `up` в этом проекте показывает, жив ли scrape target `synthetic-exporter`. Это не список всех сервисов и БД. Для реального operational dashboard tool использует `synthetic_service_up`, `synthetic_incident_active`, HTTP latency/traffic и DB disk/lag/query метрики. В availability-панелях служебный `synthetic-exporter:9201` скрывается, чтобы dashboard показывал реальные application/database targets.
 
-Если пользователь просит dashboard по одной конкретной Prometheus-метрике, например `synthetic_log_events_total`, модель должна вызвать `create_prometheus_metric_dashboard`. `/goto` short URL остается вторичной ссылкой: основная ссылка должна быть вида `http://localhost:3001/d/<uid>/<slug>`.
+Если пользователь просит dashboard по Prometheus или PostgreSQL demo inventory, модель также создает generated Python-коннектор. Dashboard connector после чтения ClickHouse создает Grafana dashboard и возвращает прямую ссылку вида `http://localhost:3001/d/<uid>/<slug>`.
 
 
 Пример запроса в LibreChat:
@@ -456,7 +450,7 @@ CLICKHOUSE_SINK_TABLE=car_inventory_raw
 
 Старые demo-логи приложения по-прежнему могут жить в `analytics.app_events_raw`, но новая PostgreSQL demo-команда использует автомобильный складской домен.
 
-Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema, `CLICKHOUSE_SINK_TABLE` и Grafana panels. Generic MCP tools (`describe_analytics_table`, `sample_analytics_table`, `profile_analytics_table`, `distinct_analytics_values`, `count_analytics_by`) читают актуальные таблицы и колонки из ClickHouse, поэтому их не нужно хардкодить под demo-набор.
+Если внешняя БД имеет другую структуру, нужно адаптировать ClickHouse schema и `CLICKHOUSE_SINK_TABLE`. LibreChat не должен хардкодить demo-набор: schema discovery generated connector каждый раз читает актуальные таблицы и колонки из ClickHouse.
 
 ### Ремарка Про ClickHouse Sink
 
