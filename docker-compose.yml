@@ -424,6 +424,8 @@ services:
       - "3344:3344"
 
   mcp-server:
+    # Контейнер MCP server принимает tool calls от LibreChat, читает ClickHouse
+    # и создает Grafana dashboards через Grafana HTTP API.
     build:
       context: ./mcp-server
     depends_on:
@@ -432,7 +434,9 @@ services:
       grafana:
         condition: service_started
     environment:
+      # PUBLIC_BASE_URL попадает в ссылки, которые MCP возвращает модели и далее пользователю.
       PUBLIC_BASE_URL: http://localhost:3333
+      # Внешний URL нужен для браузера пользователя, внутренний API URL нужен контейнеру MCP.
       GRAFANA_BASE_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
       GRAFANA_API_URL: http://grafana:3000
       GRAFANA_USER: ${GRAFANA_ADMIN_USER}
@@ -444,6 +448,8 @@ services:
     ports:
       - "3333:3333"
     volumes:
+      # Сюда модель через MCP сохраняет generated JS-коннекторы.
+      # Файлы остаются в репозитории на хосте, их можно читать, править и коммитить.
       - ./mcp-server/generated-connectors:/app/generated-connectors
 
   librechat:

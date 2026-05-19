@@ -13,9 +13,14 @@ const grafanaApiUrl = (process.env.GRAFANA_API_URL || 'http://grafana:3000').rep
 const grafanaUser = process.env.GRAFANA_USER || 'admin';
 const grafanaPassword = process.env.GRAFANA_PASSWORD || 'admin';
 const chartStore = new Map();
+
+// Папка, куда MCP server сохраняет JS-коннекторы, созданные моделью под конкретный вопрос пользователя.
+// В docker-compose эта директория примонтирована наружу, поэтому файлы можно открыть и поправить вручную.
 const generatedConnectorsDir = path.resolve(
   process.env.GENERATED_CONNECTORS_DIR || path.join(process.cwd(), 'generated-connectors'),
 );
+
+// Кэш уже загруженных generated-коннекторов. При update/create конкретный коннектор сбрасывается из кэша.
 const generatedConnectorCache = new Map();
 
 const clickhouse = createClient({
@@ -25,6 +30,7 @@ const clickhouse = createClient({
   database: process.env.CLICKHOUSE_DATABASE || 'analytics',
 });
 
+// Базовые MCP tools. К ним на лету добавляются JS-коннекторы из mcp-server/generated-connectors.
 const baseTools = [
   {
     name: 'describe_analytics_schema',
@@ -609,6 +615,8 @@ function quoteIdent(value) {
   return `\`${String(value).replaceAll('`', '``')}\``;
 }
 
+// Проверяет имя generated-коннектора до записи файла и до динамического import.
+// Это защищает путь сохранения и одновременно задает понятный namespace для model-created tools.
 function safeGeneratedConnectorName(value) {
   const text = String(value || '').trim();
   if (!/^[a-z][a-z0-9_]{2,80}$/.test(text)) {
@@ -620,15 +628,19 @@ function safeGeneratedConnectorName(value) {
   return text;
 }
 
+// Возвращает абсолютный путь к JS-файлу generated-коннектора внутри рабочей директории MCP server.
 function generatedConnectorPath(connectorName) {
   const safeName = safeGeneratedConnectorName(connectorName);
   return path.join(generatedConnectorsDir, `${safeName}.js`);
 }
 
+// Возвращает человекочитаемый путь, который модель должна показывать пользователю в чате.
 function publicGeneratedConnectorPath(connectorName) {
   return `mcp-server/generated-connectors/${safeGeneratedConnectorName(connectorName)}.js`;
 }
 
+// Валидирует JS-код, который модель пытается сохранить как MCP-коннектор.
+// Здесь мы не выполняем код, а отсекаем опасные/бесполезные варианты до записи на диск.
 function validateGeneratedConnectorSource(connectorName, sourceCode) {
   const safeName = safeGeneratedConnectorName(connectorName);
   const source = String(sourceCode || '').trim();
@@ -644,6 +656,9 @@ function validateGeneratedConnectorSource(connectorName, sourceCode) {
   const expectedNamePattern = new RegExp(`["']?name["']?\\s*:\\s*["']${safeName}["']`);
   if (!expectedNamePattern.test(source)) {
     throw new Error(`Generated connector source must export name ${safeName}.`);
+  }
+  if (source.includes('analytics.') && !source.includes('analyticsColumnExists') && !source.includes('analyticsColumns')) {
+    throw new Error('Generated connectors that query analytics.* must validate referenced columns with helpers.analyticsColumnExists or helpers.analyticsColumns before runQuery.');
   }
   const forbiddenPatterns = [
     /\bimport\s+/,
@@ -665,6 +680,8 @@ function validateGeneratedConnectorSource(connectorName, sourceCode) {
   return `${source}\n`;
 }
 
+// Проверяет runtime-контракт уже импортированного generated-коннектора.
+// MCP server регистрирует только объекты с name/description/inputSchema/handler.
 function validateGeneratedConnectorModule(connector, expectedName = '') {
   if (!connector || typeof connector !== 'object') {
     throw new Error('Generated connector must export an object.');
@@ -685,10 +702,13 @@ function validateGeneratedConnectorModule(connector, expectedName = '') {
   return connectorName;
 }
 
+// Создает директорию для generated-коннекторов, если она еще не была создана на хосте или внутри контейнера.
 async function ensureGeneratedConnectorsDir() {
   await mkdir(generatedConnectorsDir, { recursive: true });
 }
 
+// Загружает JS-коннектор из файла и кладет его в кэш. force=true нужен после create/update,
+// чтобы модель сразу могла вызвать новую версию без перезапуска контейнера.
 async function loadGeneratedConnector(connectorName, { force = false } = {}) {
   const safeName = safeGeneratedConnectorName(connectorName);
   await ensureGeneratedConnectorsDir();
@@ -709,6 +729,7 @@ async function loadGeneratedConnector(connectorName, { force = false } = {}) {
   return loaded;
 }
 
+// Сканирует папку generated-connectors и возвращает только безопасные имена JS-файлов.
 async function listGeneratedConnectorFiles() {
   await ensureGeneratedConnectorsDir();
   const entries = await readdir(generatedConnectorsDir, { withFileTypes: true });
@@ -726,6 +747,7 @@ async function listGeneratedConnectorFiles() {
     .sort();
 }
 
+// Преобразует сохраненные JS-коннекторы в MCP tool definitions, которые LibreChat видит в tools/list.
 async function loadGeneratedConnectorTools() {
   const connectorNames = await listGeneratedConnectorFiles();
   const loaded = [];
@@ -744,6 +766,8 @@ async function loadGeneratedConnectorTools() {
   return loaded;
 }
 
+// Единая точка запуска generated-коннектора.
+// В handler передаются read-only ClickHouse-клиент, runQuery и helpers для проверки схемы/колонок.
 async function callGeneratedConnector(connectorName, args) {
   const connector = await loadGeneratedConnector(connectorName, { force: true });
   const result = await connector.handler({
@@ -1201,6 +1225,42 @@ function clickhouseGrafanaTarget(rawSql, refId = 'A', format = 1) {
   };
 }
 
+// Преобразует время из ClickHouse в формат, который Grafana принимает в dashboard.time.
+function grafanaIsoTime(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return 'now';
+  }
+  return `${text.replace(' ', 'T')}Z`;
+}
+
+// Строит временное окно Prometheus не от системного now(), а от max(sample_time) в данных.
+// Это важно для синтетического demo-набора: данные могут быть загружены в прошлом, но dashboards все равно должны быть непустыми.
+async function prometheusTimeWindow(hours, metricName = '') {
+  const metricFilter = metricName ? `WHERE metric_name = ${quoteString(metricName)}` : '';
+  const rows = await runQuery(`
+    SELECT
+      max(sample_time) - INTERVAL ${hours} HOUR AS from_time,
+      max(sample_time) AS to_time
+    FROM analytics.prometheus_samples
+    ${metricFilter}
+  `);
+  const row = rows[0] || {};
+  if (!row.from_time || !row.to_time) {
+    const suffix = metricName ? ` for metric ${metricName}` : '';
+    throw new Error(`No Prometheus samples found${suffix}.`);
+  }
+  return {
+    fromTime: row.from_time,
+    toTime: row.to_time,
+    grafanaFrom: grafanaIsoTime(row.from_time),
+    grafanaTo: grafanaIsoTime(row.to_time),
+    sqlFilter: `sample_time >= parseDateTime64BestEffort(${quoteString(row.from_time)}) AND sample_time <= parseDateTime64BestEffort(${quoteString(row.to_time)})`,
+  };
+}
+
+// Создает большой Grafana dashboard по доступности сервисов/БД из Prometheus samples в ClickHouse.
+// На выход MCP отдает URL dashboard и компактные строки, по которым модель формирует ответ пользователю.
 async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
   const hours = boundedLimit(args.hours, 24, 24 * 30);
   const bucketMinutes = boundedLimit(args.bucket_minutes, 1, 60);
@@ -1210,7 +1270,8 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     type: 'grafana-clickhouse-datasource',
     uid: 'clickhouse-analytics',
   };
-  const timeFilter = `sample_time >= now() - INTERVAL ${hours} HOUR`;
+  const timeWindow = await prometheusTimeWindow(hours);
+  const timeFilter = timeWindow.sqlFilter;
   const bucket = `toStartOfInterval(sample_time, INTERVAL ${bucketMinutes} MINUTE)`;
   const serviceLabel = "JSONExtractString(labels_json, 'service')";
   const instanceLabel = "JSONExtractString(labels_json, 'instance')";
@@ -1428,8 +1489,8 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     version: 0,
     refresh: '30s',
     time: {
-      from: `now-${hours}h`,
-      to: 'now',
+      from: timeWindow.grafanaFrom,
+      to: timeWindow.grafanaTo,
     },
     panels: [
       {
@@ -1636,6 +1697,8 @@ async function createPrometheusAvailabilityDashboardResponse(id, args = {}) {
     primaryMetric: 'synthetic_service_up',
     note: 'Use synthetic_service_up for monitored service/database availability. Raw Prometheus up is only scrape health for the exporter target.',
     hours,
+    fromTime: timeWindow.fromTime,
+    toTime: timeWindow.toTime,
     bucketMinutes,
     datasourceUid: 'clickhouse-analytics',
     sql: {
@@ -1684,6 +1747,8 @@ async function handleRpc(payload) {
   }
 
   if (method === 'tools/list') {
+    // LibreChat запрашивает tools/list перед выбором инструмента.
+    // Здесь мы объединяем статические tools и JS-коннекторы, созданные моделью ранее.
     const generatedTools = await loadGeneratedConnectorTools();
     return jsonRpc(id, { tools: [...baseTools, ...generatedTools] });
   }
@@ -1693,6 +1758,7 @@ async function handleRpc(payload) {
     const args = params?.arguments || {};
 
     if (name === 'list_generated_connectors') {
+      // Показывает пользователю и модели, какие generated-коннекторы уже сохранены в репозитории.
       const connectorNames = await listGeneratedConnectorFiles();
       const rows = [];
       for (const connectorName of connectorNames) {
@@ -1718,6 +1784,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'describe_generated_connector') {
+      // Возвращает контракт конкретного generated-коннектора без раскрытия исходного кода.
       const connector = await loadGeneratedConnector(args.connector_name, { force: true });
       return jsonRpc(id, {
         content: [{
@@ -1733,6 +1800,8 @@ async function handleRpc(payload) {
     }
 
     if (name === 'create_generated_connector' || name === 'update_generated_connector') {
+      // Сохраняет JS-код, который модель написала под вопрос пользователя, затем сразу валидирует import/export.
+      // После успешного ответа этот файл доступен как обычный MCP tool.
       const connectorName = safeGeneratedConnectorName(args.connector_name);
       const filePath = generatedConnectorPath(connectorName);
       const overwrite = name === 'update_generated_connector' || args.overwrite === true;
@@ -1765,6 +1834,7 @@ async function handleRpc(payload) {
     }
 
     if (name === 'run_generated_connector') {
+      // Явный запуск saved-коннектора по имени. Данные идут из ClickHouse обратно в модель, а затем в чат.
       const payload = await callGeneratedConnector(args.connector_name, args.arguments || {});
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
@@ -2321,6 +2391,7 @@ async function handleRpc(payload) {
         });
       }
       const uid = `prom-${randomUUID().replaceAll('-', '').slice(0, 18)}`;
+      const timeWindow = await prometheusTimeWindow(hours, metricName);
       const labelExpression = `JSONExtractString(labels_json, ${quoteString(groupByLabel)})`;
       const valueExpressionByAggregation = {
         avg: 'avg(value)',
@@ -2339,7 +2410,7 @@ async function handleRpc(payload) {
           ${valueExpression} AS value
         FROM analytics.prometheus_samples
         WHERE metric_name = ${quoteString(metricName)}
-          AND sample_time >= now() - INTERVAL ${hours} HOUR
+          AND ${timeWindow.sqlFilter}
         GROUP BY time, series
         ORDER BY time ASC, series ASC
       `.trim();
@@ -2351,7 +2422,7 @@ async function handleRpc(payload) {
           count() AS samples
         FROM analytics.prometheus_samples
         WHERE metric_name = ${quoteString(metricName)}
-          AND sample_time >= now() - INTERVAL ${hours} HOUR
+          AND ${timeWindow.sqlFilter}
         GROUP BY series
         ORDER BY series ASC
       `.trim();
@@ -2365,7 +2436,7 @@ async function handleRpc(payload) {
           argMax(value, sample_time) AS last_value
         FROM analytics.prometheus_samples
         WHERE metric_name = ${quoteString(metricName)}
-          AND sample_time >= now() - INTERVAL ${hours} HOUR
+          AND ${timeWindow.sqlFilter}
         GROUP BY series
         ORDER BY samples DESC, series ASC
         LIMIT 50
@@ -2380,8 +2451,8 @@ async function handleRpc(payload) {
         version: 0,
         refresh: '30s',
         time: {
-          from: `now-${hours}h`,
-          to: 'now',
+          from: timeWindow.grafanaFrom,
+          to: timeWindow.grafanaTo,
         },
         panels: [
           {
@@ -2455,6 +2526,8 @@ async function handleRpc(payload) {
         groupByLabel,
         aggregation,
         hours,
+        fromTime: timeWindow.fromTime,
+        toTime: timeWindow.toTime,
         bucketMinutes,
         datasourceUid: 'clickhouse-analytics',
         timeseriesSql,
@@ -2572,6 +2645,7 @@ async function handleRpc(payload) {
     }
 
     if (typeof name === 'string' && name.startsWith('clickhouse_')) {
+      // Прямой вызов generated-коннектора как обычного MCP tool, без обертки run_generated_connector.
       const payload = await callGeneratedConnector(name, args);
       return jsonRpc(id, {
         content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],

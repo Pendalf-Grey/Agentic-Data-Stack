@@ -95,6 +95,18 @@ LibreChat is instructed to:
     - update an existing generated connector when the user asks to modify it;
     - avoid dumping generated source code into chat unless explicitly requested.
 
+7. Fixed Prometheus Grafana dashboard time windows.
+
+Prometheus dashboard SQL no longer uses system now() as the default anchor.
+
+Instead, the MCP server uses:
+
+    max(sample_time)
+
+from analytics.prometheus_samples, or from a specific metric when the dashboard is metric-specific.
+
+This matters because demo Prometheus data can be loaded from historical/synthetic timestamps. A dashboard should still render useful panels even when the local machine date is later than the sample timestamps.
+
 Safety constraints currently implemented
 ----------------------------------------
 
@@ -107,7 +119,12 @@ Safety constraints currently implemented
     - use export default;
     - export the expected connector name.
 
-3. Some dangerous source patterns are rejected:
+3. Generated connectors that query analytics.* must validate referenced columns before runQuery:
+
+    helpers.analyticsColumnExists
+    helpers.analyticsColumns
+
+4. Some dangerous source patterns are rejected:
 
     import
     require(...)
@@ -120,7 +137,7 @@ Safety constraints currently implemented
     fetch(...)
     XMLHttpRequest
 
-4. Generated connectors receive read-only helpers:
+5. Generated connectors receive read-only helpers:
 
     runQuery
     analyticsTableExists
@@ -133,7 +150,69 @@ Safety constraints currently implemented
     safeSqlIdentifier
     sqlLiteral
 
-5. runQuery still enforces SELECT-only queries and rejects mutating SQL words.
+6. runQuery still enforces SELECT-only queries and rejects mutating SQL words.
+
+QA questions used
+-----------------
+
+Car inventory database questions used for generated MCP connector tests:
+
+1. Какие города есть в автомобильной БД и сколько машин в каждом городе?
+
+2. Какие бренды представлены и сколько машин каждого бренда?
+
+3. Сколько машин с пробегом больше 20000 по городам?
+
+4. Какие склады самые загруженные?
+
+5. Сколько доступных, зарезервированных и машин на обслуживании по городам?
+
+6. Какая средняя цена автомобилей по брендам?
+
+7. Где больше всего Toyota и какие склады?
+
+8. Какие машины 2021 года или старше по брендам?
+
+9. Какая средняя стоимость по городам и статусам?
+
+10. Какие топ-10 самых дорогих машин есть на складах?
+
+Prometheus questions used for Grafana dashboard tests:
+
+1. Создай dashboard: какие instance и когда down/up за последние 24 часа?
+
+2. Создай dashboard доступности сервисов за последние 6 часов.
+
+3. Создай dashboard по raw up с разбивкой по job.
+
+4. Создай dashboard p95 latency HTTP по service.
+
+5. Создай dashboard HTTP requests total по service.
+
+6. Создай dashboard DB disk usage ratio по service.
+
+7. Создай dashboard DB replication lag по service.
+
+8. Создай dashboard DB query p95 latency по service.
+
+9. Создай dashboard DB connections по service.
+
+10. Создай dashboard scrape duration по job.
+
+QA findings
+-----------
+
+1. A deliberately model-like connector first tried to use production_year.
+
+That column does not exist in live ClickHouse schema. The real column is:
+
+    model_year
+
+The guardrail was tightened so generated connectors that query analytics.* must validate referenced columns with helpers.analyticsColumnExists or helpers.analyticsColumns before runQuery.
+
+2. The first visual Grafana check showed empty/red Prometheus panels.
+
+The reason was that dashboard SQL used now() - INTERVAL ... while synthetic Prometheus samples were historical. The fix anchors dashboard windows to max(sample_time) in ClickHouse data.
 
 Important behavior
 ------------------
