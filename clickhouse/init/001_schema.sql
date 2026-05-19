@@ -1,7 +1,19 @@
+-- Этот файл выполняется официальным Docker entrypoint контейнера clickhouse
+-- при первом создании volume clickhouse_data.
+-- Его задача: создать стартовую аналитическую БД и таблицы, в которые пишут demo-пайплайны.
+
+-- analytics - не таблица, а база данных ClickHouse.
+-- В ней лежат данные проекта, которые пользователь обычно хочет анализировать через LibreChat/MCP.
+-- Если в будущем понадобится другая БД, ее можно создать отдельно и передать через CLICKHOUSE_DB,
+-- но текущие demo-инструменты и Grafana provisioning по умолчанию смотрят в analytics.
 CREATE DATABASE IF NOT EXISTS analytics;
 
+-- app_events_raw - сырая таблица событий приложения.
+-- Ее наполняет ClickHouse sink connector из Kafka topic, куда Debezium кладет изменения PostgreSQL.
 CREATE TABLE IF NOT EXISTS analytics.app_events_raw
 (
+  -- Колонки повторяют app_events из PostgreSQL.
+  -- Часть дат хранится как String, потому что Debezium/Kafka Connect передают timestamp в JSON-формате.
   id UInt64,
   event_time String,
   user_id String,
@@ -15,11 +27,15 @@ CREATE TABLE IF NOT EXISTS analytics.app_events_raw
   completion_tokens Nullable(Int32),
   total_cost_usd Nullable(Decimal(12, 6)),
   metadata String,
+  -- ingest_time показывает, когда строка попала именно в ClickHouse.
   ingest_time DateTime DEFAULT now()
 )
 ENGINE = MergeTree
+-- ORDER BY в MergeTree не уникальный ключ, а физический порядок хранения и primary index.
 ORDER BY (event_time, id);
 
+-- v_event_summary - удобное представление поверх сырых app_events_raw.
+-- View не хранит копию данных, а выполняет SELECT при обращении к нему.
 CREATE VIEW IF NOT EXISTS analytics.v_event_summary AS
 SELECT
   toStartOfHour(parseDateTimeBestEffortOrNull(event_time)) AS hour,
@@ -32,6 +48,8 @@ FROM analytics.app_events_raw
 GROUP BY hour, event_type
 ORDER BY hour DESC, event_type;
 
+-- car_inventory_raw - сырая таблица складов автомобилей.
+-- Сюда попадают строки из PostgreSQL car_inventory после CDC-пайплайна.
 CREATE TABLE IF NOT EXISTS analytics.car_inventory_raw
 (
   id UInt64,
@@ -53,8 +71,11 @@ CREATE TABLE IF NOT EXISTS analytics.car_inventory_raw
   ingest_time DateTime DEFAULT now()
 )
 ENGINE = MergeTree
+-- Такой порядок ускоряет вопросы по городам, брендам и моделям.
 ORDER BY (city, brand, model, id);
 
+-- v_car_inventory_summary - агрегированное представление по складам и брендам.
+-- Оно нужно для быстрых dashboard/summary вопросов, но не заменяет сырую таблицу.
 CREATE VIEW IF NOT EXISTS analytics.v_car_inventory_summary AS
 SELECT
   city,
@@ -71,21 +92,34 @@ FROM analytics.car_inventory_raw
 GROUP BY city, warehouse_name, brand
 ORDER BY city ASC, cars DESC, brand ASC;
 
+-- prometheus_samples - универсальная таблица для Prometheus samples.
+-- Prometheus sample - это одно значение метрики в конкретный момент времени.
+-- Например: metric_name='synthetic_service_up', labels_json='{"service":"api-gateway"}', value=1.
 CREATE TABLE IF NOT EXISTS analytics.prometheus_samples
 (
+  -- Имя метрики: up, synthetic_service_up, synthetic_db_query_duration_seconds_p95 и т.д.
   metric_name LowCardinality(String),
+  -- Labels Prometheus храним JSON-строкой, потому что у разных метрик разные наборы label'ов.
   labels_json String,
+  -- fingerprint - стабильный hash metric_name+labels, чтобы различать series.
   fingerprint FixedString(64),
+  -- Время самой метрики, не время загрузки.
   sample_time DateTime64(3, 'UTC'),
   value Float64,
+  -- source/ingest_mode помогают отличать источники и режимы загрузки.
   source LowCardinality(String) DEFAULT 'prometheus',
   ingest_mode LowCardinality(String) DEFAULT 'remote_write',
+  -- Время попадания sample в ClickHouse.
   ingest_time DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(ingest_time)
+-- Партиционирование по месяцу sample_time упрощает хранение временных рядов.
 PARTITION BY toYYYYMM(sample_time)
+-- В ReplacingMergeTree одинаковые ORDER BY ключи могут схлопываться по самой новой ingest_time.
 ORDER BY (metric_name, fingerprint, sample_time, source, ingest_mode);
 
+-- v_prometheus_metric_summary - минутные агрегаты по метрикам.
+-- Это не отдельное хранилище, а view для быстрых обзоров.
 CREATE VIEW IF NOT EXISTS analytics.v_prometheus_metric_summary AS
 SELECT
   toStartOfMinute(sample_time) AS minute,
@@ -99,6 +133,8 @@ FROM analytics.prometheus_samples
 GROUP BY minute, metric_name
 ORDER BY minute DESC, metric_name ASC;
 
+-- v_prometheus_targets - обзор scrape health по стандартной метрике up.
+-- Важно: up показывает здоровье scrape target, а не бизнес-состояние приложения.
 CREATE VIEW IF NOT EXISTS analytics.v_prometheus_targets AS
 SELECT
   JSONExtractString(labels_json, 'job') AS job,

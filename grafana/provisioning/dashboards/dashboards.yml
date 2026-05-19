@@ -1,12 +1,19 @@
 apiVersion: 1
 
+# Dashboard provisioning - это автоматическая загрузка dashboard JSON при старте Grafana.
+# Без provisioning dashboard пришлось бы импортировать вручную через UI.
 providers:
   - name: Agentic Data Stack
     orgId: 1
+    # Папка в UI Grafana, куда попадут dashboard'ы из JSON-файлов.
     folder: Agentic Data Stack
     type: file
+    # false значит: если JSON исчезнет из каталога, Grafana может удалить provisioned dashboard.
     disableDeletion: false
+    # Grafana перечитывает каталог с dashboard JSON каждые 30 секунд.
     updateIntervalSeconds: 30
+    # Разрешает правки через UI. При этом source-of-truth для стартового состояния остается JSON.
     allowUiUpdates: true
     options:
+      # Этот путь внутри контейнера смонтирован из ./grafana/dashboards.
       path: /var/lib/grafana/dashboards

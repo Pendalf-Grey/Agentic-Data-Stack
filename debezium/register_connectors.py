@@ -8,16 +8,37 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-# Этот init job регистрирует Debezium source connector и ClickHouse sink connector.
-# Поток данных после регистрации: Postgres -> Debezium/Kafka Connect -> Apache Kafka -> ClickHouse sink -> ClickHouse.
+# Этот файл запускается контейнером connectors-init.
+# Контейнер одноразовый: стартует, регистрирует Kafka Connect connectors через REST API и завершается.
+# Мы вынесли регистрацию в отдельный контейнер, потому что Kafka Connect - это runtime,
+# а сами connectors нужно создать HTTP-запросами после того, как debezium/connect уже поднялся.
+#
+# Поток данных после регистрации:
+# source DB -> Debezium source connector -> Apache Kafka topic -> ClickHouse sink connector -> ClickHouse table.
 
+# Внутренний URL Kafka Connect REST API внутри docker-compose сети.
 CONNECT_URL = os.getenv("CONNECT_URL", "http://debezium:8083").rstrip("/")
+
+# SOURCE_MODE нужен, чтобы явно различать demo и external сценарии.
 SOURCE_MODE = os.getenv("SOURCE_MODE", "external").strip().lower()
+
+# ACTIVE_SOURCE_DB выбирает один source template: postgres-source.json, mysql-source.json или mongodb-source.json.
 ACTIVE_SOURCE = os.getenv("ACTIVE_SOURCE_DB", "postgres").strip().lower()
+
+# /connectors - read-only mount из ./debezium/connectors.
 CONNECTORS_DIR = Path("/connectors")
+
+# Source connector читает изменения из исходной БД.
 SOURCE_TEMPLATE = CONNECTORS_DIR / f"{ACTIVE_SOURCE}-source.json"
+
+# Sink connector читает Kafka topic и пишет данные в ClickHouse.
 SINK_TEMPLATE = CONNECTORS_DIR / "clickhouse-sink.json"
+
+# Префикс env-переменных активного источника, например POSTGRES_SOURCE_*.
 ACTIVE_PREFIX = f"{ACTIVE_SOURCE.upper()}_SOURCE"
+
+# ClickHouse sink template использует ACTIVE_SOURCE_TOPIC,
+# поэтому выставляем его из env-переменной выбранного source.
 os.environ["ACTIVE_SOURCE_TOPIC"] = os.getenv(f"{ACTIVE_PREFIX}_TOPIC", "")
 
 
@@ -30,12 +51,12 @@ def required_env(name):
 
 
 def render_template(text):
-    """Подставляет ${ENV_NAME} внутри connector JSON."""
+    """Подставляет ${ENV_NAME} внутри connector JSON перед отправкой в Kafka Connect."""
     return re.sub(r"\$\{([A-Z0-9_]+)\}", lambda match: required_env(match.group(1)), text)
 
 
 def read_connector(path):
-    """Читает и рендерит connector template."""
+    """Читает JSON-шаблон, подставляет env и возвращает готовый connector config."""
     return json.loads(render_template(path.read_text(encoding="utf-8")))
 
 
@@ -57,6 +78,8 @@ def request(path, method="GET", body=None):
             text = error.read().decode("utf-8", errors="replace")
             is_rebalance = "rebalance" in text.lower()
             if is_rebalance and attempt < 12:
+                # Kafka Connect может временно отклонять REST-запросы во время rebalance.
+                # Вместо падения ждем и повторяем запрос.
                 print(f"{method} {path} is waiting for Kafka Connect rebalance; retry {attempt}/12")
                 time.sleep(5)
                 continue
@@ -100,12 +123,14 @@ def wait_for_source():
 def upsert_connector(connector):
     """Создает connector или обновляет config, если он уже существует."""
     try:
+        # Если connector найден, обновляем только его config.
         request(f"/connectors/{connector['name']}")
         print(f"Updating connector {connector['name']}")
         request(f"/connectors/{connector['name']}/config", method="PUT", body=connector["config"])
     except RuntimeError as error:
         if "404" not in str(error):
             raise
+        # Если connector не найден, регистрируем его впервые.
         print(f"Registering connector {connector['name']}")
         request("/connectors", method="POST", body=connector)
 
@@ -136,14 +161,19 @@ def main():
     wait_for_source()
     wait_for_connect()
 
+    # На этом этапе шаблоны становятся реальными JSON payload'ами для Kafka Connect REST API.
     active_connector = read_connector(SOURCE_TEMPLATE)
     sink_connector = read_connector(SINK_TEMPLATE)
 
+    # Одновременно активным должен быть только один source connector.
+    # Иначе разные источники могут писать в разные topics и путать demo-сценарий.
     for path in list_source_templates():
         if path.name == f"{ACTIVE_SOURCE}-source.json":
             continue
         delete_connector(read_connector_name(path))
 
+    # Source connector начинает читать исходную БД.
+    # Sink connector начинает читать Kafka topic и писать строки в ClickHouse.
     upsert_connector(active_connector)
     upsert_connector(sink_connector)
     print(f"Debezium source is {ACTIVE_SOURCE}; connectors are ready")

@@ -1,17 +1,28 @@
 apiVersion: 1
 
+# Grafana provisioning - это способ заранее создать datasource при старте контейнера.
+# Без этого нужно было бы руками заходить в UI Grafana и добавлять ClickHouse datasource.
 datasources:
   - name: ClickHouse Analytics
+    # Плагин grafana-clickhouse-datasource ставится через GF_INSTALL_PLUGINS в docker-compose.yml.
     type: grafana-clickhouse-datasource
+    # access: proxy означает, что браузер пользователя не ходит в ClickHouse напрямую.
+    # Запросы идут через backend Grafana внутри docker-compose сети.
     access: proxy
+    # uid используется в dashboard JSON и generated dashboards, чтобы панели знали,
+    # из какого datasource читать данные.
     uid: clickhouse-analytics
     isDefault: true
     jsonData:
+      # Внутреннее имя контейнера ClickHouse в docker-compose сети.
       host: clickhouse
       port: 9000
+      # native protocol быстрее и удобнее для ClickHouse datasource.
       protocol: native
+      # Обычно analytics, но значение приходит из .env через docker-compose.
       defaultDatabase: ${CLICKHOUSE_DB}
       username: ${CLICKHOUSE_USER}
       tlsSkipVerify: false
     secureJsonData:
+      # Пароль хранится в secureJsonData, Grafana не показывает его обратно в UI/API.
       password: ${CLICKHOUSE_PASSWORD}
