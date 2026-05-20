@@ -5,20 +5,18 @@ import os
 import re
 import time
 import traceback
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
 # Этот файл заменяет прежний Node.js MCP server.
 # Данные идут так:
-# LibreChat -> HTTP POST /mcp -> этот Python server -> ClickHouse/Grafana/файлы коннекторов -> ответ обратно в LibreChat.
+# LibreChat -> HTTP POST /mcp -> этот Python server -> generated Python-коннектор -> ClickHouse/Grafana -> ответ обратно в LibreChat.
 
 PORT = int(os.getenv("PORT", "3333"))
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", f"http://localhost:{PORT}").rstrip("/")
 GRAFANA_BASE_URL = os.getenv("GRAFANA_BASE_URL", "http://localhost:3001").rstrip("/")
 GRAFANA_API_URL = os.getenv("GRAFANA_API_URL", "http://grafana:3000").rstrip("/")
 GRAFANA_USER = os.getenv("GRAFANA_USER", "admin")
@@ -32,10 +30,6 @@ GENERATED_CONNECTORS_PUBLIC_DIR = os.getenv(
     "GENERATED_CONNECTORS_PUBLIC_DIR",
     str(GENERATED_CONNECTORS_DIR),
 ).rstrip("/")
-
-
-# SVG-графики, которые создают visualize_* tools, живут в памяти и отдаются через GET /charts/<id>.
-CHART_STORE = {}
 
 # Python-модули generated-коннекторов кэшируются, но при create/update конкретный модуль перечитывается.
 GENERATED_CONNECTOR_CACHE = {}
@@ -75,30 +69,12 @@ def bounded_limit(value, fallback=50, maximum=500):
     return min(parsed, maximum)
 
 
-def safe_choice(value, allowed, fallback):
-    """Выбирает только разрешенное значение enum."""
-    return value if value in allowed else fallback
-
-
-def safe_identifier(value, fallback=""):
-    """Проверяет identifier-like значения, например Prometheus metric_name."""
-    text = str(value or fallback)
-    if not re.match(r"^[A-Za-z_:][A-Za-z0-9_:]*$", text):
-        raise ValueError(f"Unsafe identifier-like value: {text}")
-    return text
-
-
 def safe_sql_identifier(value, fallback=""):
     """Проверяет SQL identifier: таблицы и колонки без кавычек и спецсимволов."""
     text = str(value or fallback)
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", text):
         raise ValueError(f"Unsafe SQL identifier: {text}")
     return text
-
-
-def safe_label_name(value, fallback="job"):
-    """Проверяет имя Prometheus label перед JSONExtractString."""
-    return safe_sql_identifier(value or fallback)
 
 
 def safe_dashboard_title(value, fallback):
@@ -412,42 +388,6 @@ def clickhouse_grafana_target(raw_sql, ref_id="A", fmt=1):
     }
 
 
-def grafana_iso_time(value):
-    """Преобразует ClickHouse DateTime/DateTime64 в формат dashboard.time."""
-    text = str(value or "").strip()
-    if not text:
-        return "now"
-    return f"{text.replace(' ', 'T')}Z"
-
-
-def prometheus_time_window(hours, metric_name=""):
-    """Строит окно Prometheus dashboard от max(sample_time), чтобы исторические demo-данные были видны."""
-    metric_filter = f"WHERE metric_name = {quote_string(metric_name)}" if metric_name else ""
-    rows = run_query(
-        f"""
-        SELECT
-          max(sample_time) - INTERVAL {hours} HOUR AS from_time,
-          max(sample_time) AS to_time
-        FROM analytics.prometheus_samples
-        {metric_filter}
-        """
-    )
-    row = rows[0] if rows else {}
-    if not row.get("from_time") or not row.get("to_time"):
-        suffix = f" for metric {metric_name}" if metric_name else ""
-        raise ValueError(f"No Prometheus samples found{suffix}.")
-    return {
-        "from_time": row["from_time"],
-        "to_time": row["to_time"],
-        "grafana_from": grafana_iso_time(row["from_time"]),
-        "grafana_to": grafana_iso_time(row["to_time"]),
-        "sql_filter": (
-            f"sample_time >= parseDateTime64BestEffort({quote_string(row['from_time'])}) "
-            f"AND sample_time <= parseDateTime64BestEffort({quote_string(row['to_time'])})"
-        ),
-    }
-
-
 def grafana_auth_header():
     """Готовит Basic Auth для Grafana HTTP API."""
     token = base64.b64encode(f"{GRAFANA_USER}:{GRAFANA_PASSWORD}".encode("utf-8")).decode("ascii")
@@ -493,29 +433,6 @@ def create_grafana_dashboard(dashboard):
     )
 
 
-def format_tool_rows(rows, limit=20):
-    """Сжимает строки для ответа модели, чтобы она не вставляла огромный JSON в чат."""
-    if not rows:
-        return "No rows returned."
-    limited_rows = rows[:limit]
-    columns = []
-    for row in limited_rows:
-        for key in row.keys():
-            if key not in columns:
-                columns.append(key)
-    header = "| " + " | ".join(columns) + " |"
-    separator = "| " + " | ".join(["---"] * len(columns)) + " |"
-    body = []
-    for row in limited_rows:
-        cells = []
-        for column in columns:
-            value = row.get(column, "")
-            cells.append(str(value).replace("|", "\\|").replace("\n", " ")[:120])
-        body.append("| " + " | ".join(cells) + " |")
-    suffix = f"\n\n... {len(rows) - limit} more rows omitted." if len(rows) > limit else ""
-    return "\n".join([header, separator, *body]) + suffix
-
-
 def generated_grafana_dashboard_response(dashboard, rows=None, metadata=None):
     """Helper для generated-коннекторов: создать dashboard и вернуть URL как обычный Python dict."""
     created = create_grafana_dashboard(dashboard)
@@ -539,362 +456,6 @@ HelperBag.grafana_dashboard_response = staticmethod(generated_grafana_dashboard_
 HelperBag.grafana_clickhouse_target = staticmethod(clickhouse_grafana_target)
 
 
-def mcp_grafana_dashboard_response(request_id, rows, metadata):
-    """Возвращает модели только URL dashboard и компактную таблицу строк для summary."""
-    grafana_url = f"{GRAFANA_BASE_URL}{metadata['dashboardPath']}"
-    short_url = ""
-    try:
-        short_url = create_grafana_short_url_for_path(metadata["dashboardPath"].lstrip("/"))
-    except Exception as error:
-        print(f"Grafana short URL failed: {error}")
-    text = "\n".join(
-        [
-            f"Dashboard URL for the final answer: {grafana_url}",
-            f"Secondary short URL: {short_url}" if short_url else "Secondary short URL: not available",
-            "Final answer instruction: return only the dashboard URL above and a short summary from the rows below. Do not paste raw tool output, JSON, SQL, metadata, UID, path, or debug text. Do not rewrite the URL host or port.",
-            "",
-            f"Dashboard title: {metadata.get('title', 'Grafana dashboard')}",
-            f"Note: {metadata.get('note', '')}" if metadata.get("note") else "",
-            "",
-            "Rows for summary:",
-            format_tool_rows(rows),
-        ]
-    )
-    return json_rpc(request_id, text_result(text))
-
-
-def create_prometheus_availability_dashboard_response(request_id, args):
-    """Создает большой operational dashboard по availability/incident/http/db метрикам Prometheus."""
-    hours = bounded_limit((args or {}).get("hours"), 24, 24 * 30)
-    bucket_minutes = bounded_limit((args or {}).get("bucket_minutes"), 1, 60)
-    title = safe_dashboard_title((args or {}).get("title"), "Prometheus Availability Overview")
-    uid = f"prom-avail-{uuid.uuid4().hex[:14]}"
-    datasource = {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"}
-    time_window = prometheus_time_window(hours)
-    time_filter = time_window["sql_filter"]
-    bucket = f"toStartOfInterval(sample_time, INTERVAL {bucket_minutes} MINUTE)"
-    service_label = "JSONExtractString(labels_json, 'service')"
-    instance_label = "JSONExtractString(labels_json, 'instance')"
-    severity_label = "JSONExtractString(labels_json, 'severity')"
-    incident_label = "JSONExtractString(labels_json, 'incident')"
-    real_target_filter = f"{instance_label} != 'synthetic-exporter:9201'"
-
-    target_count_sql = f"""
-      SELECT uniqExact({instance_label}) AS targets
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_service_up' AND {time_filter} AND {real_target_filter}
-    """.strip()
-    down_now_sql = f"""
-      SELECT countIf(last_value = 0) AS down_targets
-      FROM (
-        SELECT {instance_label} AS instance, argMax(value, sample_time) AS last_value
-        FROM analytics.prometheus_samples
-        WHERE metric_name = 'synthetic_service_up' AND {time_filter} AND {real_target_filter}
-        GROUP BY instance
-      )
-    """.strip()
-    active_incidents_sql = f"""
-      SELECT countIf(last_value = 1) AS active_incidents
-      FROM (
-        SELECT {incident_label} AS incident, {service_label} AS service, argMax(value, sample_time) AS last_value
-        FROM analytics.prometheus_samples
-        WHERE metric_name = 'synthetic_incident_active' AND {time_filter}
-        GROUP BY incident, service
-      )
-    """.strip()
-    exporter_up_sql = f"""
-      SELECT min(value) AS scrape_up_min
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'up' AND {time_filter}
-    """.strip()
-    availability_timeline_sql = f"""
-      SELECT
-        {bucket} AS time,
-        concat(if({service_label} = '', 'unknown-service', {service_label}), ' / ', if({instance_label} = '', 'unknown-instance', {instance_label})) AS series,
-        min(value) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_service_up' AND {time_filter} AND {real_target_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    down_windows_sql = f"""
-      SELECT
-        if({service_label} = '', 'unknown-service', {service_label}) AS service,
-        if({instance_label} = '', 'unknown-instance', {instance_label}) AS instance,
-        min(sample_time) AS first_seen_down,
-        max(sample_time) AS last_seen_down,
-        count() AS down_samples
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_service_up' AND value = 0 AND {time_filter} AND {real_target_filter}
-      GROUP BY service, instance
-      ORDER BY last_seen_down DESC, down_samples DESC
-      LIMIT 100
-    """.strip()
-    uptime_sql = f"""
-      SELECT
-        if({service_label} = '', 'unknown-service', {service_label}) AS service,
-        if({instance_label} = '', 'unknown-instance', {instance_label}) AS instance,
-        round(100 * avg(value), 2) AS uptime_percent,
-        countIf(value = 0) AS down_samples,
-        count() AS samples
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_service_up' AND {time_filter} AND {real_target_filter}
-      GROUP BY service, instance
-      ORDER BY uptime_percent ASC, down_samples DESC, service ASC
-      LIMIT 100
-    """.strip()
-    incident_timeline_sql = f"""
-      SELECT
-        {bucket} AS time,
-        concat(if({severity_label} = '', 'unknown', {severity_label}), ': ', if({incident_label} = '', 'incident', {incident_label})) AS series,
-        max(value) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_incident_active' AND {time_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    http_latency_sql = f"""
-      SELECT {bucket} AS time, if({service_label} = '', 'unknown-service', {service_label}) AS series, quantile(0.95)(value) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_http_request_duration_seconds_p95' AND {time_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    http_traffic_sql = f"""
-      SELECT
-        toStartOfInterval(sample_time, INTERVAL 5 MINUTE) AS time,
-        concat(if({service_label} = '', 'unknown-service', {service_label}), ' ', if(JSONExtractString(labels_json, 'status_class') = '', 'status', JSONExtractString(labels_json, 'status_class'))) AS series,
-        greatest(max(value) - min(value), 0) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_http_requests_total' AND {time_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    db_disk_sql = f"""
-      SELECT {bucket} AS time, if({service_label} = '', 'unknown-db', {service_label}) AS series, max(value) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_db_disk_usage_ratio' AND {time_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    db_lag_sql = f"""
-      SELECT {bucket} AS time, if({service_label} = '', 'unknown-db', {service_label}) AS series, max(value) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_db_replication_lag_seconds' AND {time_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    db_query_sql = f"""
-      SELECT {bucket} AS time, if({service_label} = '', 'unknown-db', {service_label}) AS series, quantile(0.95)(value) AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = 'synthetic_db_query_duration_seconds_p95' AND {time_filter}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-
-    preview_rows = run_query(
-        f"""
-        SELECT
-          if({service_label} = '', 'unknown-service', {service_label}) AS service,
-          if({instance_label} = '', 'unknown-instance', {instance_label}) AS instance,
-          round(100 * avg(value), 2) AS uptime_percent,
-          countIf(value = 0) AS down_samples,
-          if(countIf(value = 0) = 0, '', toString(minIf(sample_time, value = 0))) AS first_seen_down,
-          if(countIf(value = 0) = 0, '', toString(maxIf(sample_time, value = 0))) AS last_seen_down,
-          argMax(value, sample_time) AS current_value
-        FROM analytics.prometheus_samples
-        WHERE metric_name = 'synthetic_service_up' AND {time_filter} AND {real_target_filter}
-        GROUP BY service, instance
-        ORDER BY current_value ASC, uptime_percent ASC, down_samples DESC
-        LIMIT 50
-        """
-    )
-
-    state_mappings = [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]
-    red_green = {"mode": "absolute", "steps": [{"color": "red", "value": None}, {"color": "green", "value": 1}]}
-    incident_mappings = [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ACTIVE", "color": "red"}}}]
-    incident_thresholds = {"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "red", "value": 1}]}
-
-    def stat_panel(panel_id, panel_title, x, sql, mappings=None, thresholds=None):
-        return {
-            "id": panel_id,
-            "title": panel_title,
-            "type": "stat",
-            "datasource": datasource,
-            "gridPos": {"h": 4, "w": 6, "x": x, "y": 0},
-            "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": mappings or [], "thresholds": thresholds or red_green}, "overrides": []},
-            "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}, "textMode": "auto"},
-            "targets": [clickhouse_grafana_target(sql, "A", 1)],
-        }
-
-    def timeline_panel(panel_id, panel_title, y, h, sql, mappings=None, thresholds=None):
-        return {
-            "id": panel_id,
-            "title": panel_title,
-            "type": "state-timeline",
-            "datasource": datasource,
-            "gridPos": {"h": h, "w": 24, "x": 0, "y": y},
-            "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": mappings or state_mappings, "thresholds": thresholds or red_green}, "overrides": []},
-            "options": {"alignValue": "center", "legend": {"displayMode": "list", "placement": "bottom", "showLegend": True}, "mergeValues": True, "showValue": "auto", "tooltip": {"mode": "multi", "sort": "none"}},
-            "transformations": [{"id": "renameByRegex", "options": {"regex": "^value (.*)$", "renamePattern": "$1"}}],
-            "targets": [clickhouse_grafana_target(sql, "A", 0)],
-        }
-
-    def timeseries_panel(panel_id, panel_title, x, y, w, h, sql, unit="short"):
-        return {
-            "id": panel_id,
-            "title": panel_title,
-            "type": "timeseries",
-            "datasource": datasource,
-            "gridPos": {"h": h, "w": w, "x": x, "y": y},
-            "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": unit, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"}}, "overrides": []},
-            "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": True}, "tooltip": {"mode": "multi", "sort": "desc"}},
-            "transformations": [{"id": "renameByRegex", "options": {"regex": "^value (.*)$", "renamePattern": "$1"}}],
-            "targets": [clickhouse_grafana_target(sql, "A", 0)],
-        }
-
-    dashboard = {
-        "id": None,
-        "uid": uid,
-        "title": title,
-        "description": "Synthetic Prometheus operational dashboard generated from ClickHouse metrics.",
-        "tags": ["agentic-data-stack", "prometheus", "availability", "clickhouse"],
-        "timezone": "browser",
-        "schemaVersion": 39,
-        "version": 0,
-        "refresh": "30s",
-        "time": {"from": time_window["grafana_from"], "to": time_window["grafana_to"]},
-        "panels": [
-            stat_panel(1, "Monitored targets", 0, target_count_sql, thresholds=red_green),
-            stat_panel(2, "Down now", 6, down_now_sql, thresholds={"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "red", "value": 1}]}),
-            stat_panel(3, "Active incidents", 12, active_incidents_sql, thresholds={"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "orange", "value": 1}, {"color": "red", "value": 3}]}),
-            stat_panel(4, "Prometheus scrape health", 18, exporter_up_sql, mappings=state_mappings, thresholds=red_green),
-            timeline_panel(5, "Service availability timeline", 4, 9, availability_timeline_sql),
-            {"id": 6, "title": "Down windows", "type": "table", "datasource": datasource, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13}, "targets": [clickhouse_grafana_target(down_windows_sql, "A", 1)]},
-            {"id": 7, "title": "Uptime by service", "type": "table", "datasource": datasource, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13}, "targets": [clickhouse_grafana_target(uptime_sql, "A", 1)]},
-            timeline_panel(8, "Incident timeline", 21, 7, incident_timeline_sql, incident_mappings, incident_thresholds),
-            timeseries_panel(9, "HTTP p95 latency by service", 0, 28, 12, 8, http_latency_sql, "s"),
-            timeseries_panel(10, "HTTP requests per 5 min by status class", 12, 28, 12, 8, http_traffic_sql, "short"),
-            timeseries_panel(11, "DB disk usage ratio", 0, 36, 8, 8, db_disk_sql, "percentunit"),
-            timeseries_panel(12, "DB replication lag", 8, 36, 8, 8, db_lag_sql, "s"),
-            timeseries_panel(13, "DB query p95 latency", 16, 36, 8, 8, db_query_sql, "s"),
-        ],
-    }
-    created = create_grafana_dashboard(dashboard)
-    return mcp_grafana_dashboard_response(
-        request_id,
-        preview_rows,
-        {
-            "title": title,
-            "dashboardPath": created.get("url") or f"/d/{uid}/{uid}",
-            "note": "Use synthetic_service_up for monitored service/database availability. Raw Prometheus up is only scrape health for the exporter target.",
-        },
-    )
-
-
-def create_prometheus_metric_dashboard_response(request_id, args):
-    """Создает простой Grafana dashboard по одной Prometheus metric_name."""
-    metric_name = safe_identifier((args or {}).get("metric_name"))
-    group_by_label = safe_label_name((args or {}).get("group_by_label"), "job")
-    aggregation = safe_choice((args or {}).get("aggregation"), ["avg", "min", "max", "p95", "sum", "count", "last"], "avg")
-    hours = bounded_limit((args or {}).get("hours"), 24, 24 * 30)
-    bucket_minutes = bounded_limit((args or {}).get("bucket_minutes"), 1, 60)
-    title = safe_dashboard_title((args or {}).get("title"), f"Prometheus {metric_name}")
-    if metric_name == "up" and group_by_label in ["job", "instance"]:
-        return create_prometheus_availability_dashboard_response(
-            request_id,
-            {**(args or {}), "hours": hours, "bucket_minutes": bucket_minutes, "title": title},
-        )
-
-    uid = f"prom-{uuid.uuid4().hex[:18]}"
-    time_window = prometheus_time_window(hours, metric_name)
-    label_expr = f"JSONExtractString(labels_json, {quote_string(group_by_label)})"
-    value_expression = {
-        "avg": "avg(value)",
-        "min": "min(value)",
-        "max": "max(value)",
-        "p95": "quantile(0.95)(value)",
-        "sum": "sum(value)",
-        "count": "count()",
-        "last": "argMax(value, sample_time)",
-    }[aggregation]
-    timeseries_sql = f"""
-      SELECT
-        toStartOfInterval(sample_time, INTERVAL {bucket_minutes} MINUTE) AS time,
-        if({label_expr} = '', 'unknown', {label_expr}) AS series,
-        {value_expression} AS value
-      FROM analytics.prometheus_samples
-      WHERE metric_name = {quote_string(metric_name)} AND {time_window['sql_filter']}
-      GROUP BY time, series
-      ORDER BY time ASC, series ASC
-    """.strip()
-    latest_sql = f"""
-      SELECT
-        if({label_expr} = '', 'unknown', {label_expr}) AS series,
-        max(sample_time) AS last_sample_time,
-        argMax(value, sample_time) AS last_value,
-        count() AS samples
-      FROM analytics.prometheus_samples
-      WHERE metric_name = {quote_string(metric_name)} AND {time_window['sql_filter']}
-      GROUP BY series
-      ORDER BY series ASC
-    """.strip()
-    preview_rows = run_query(
-        f"""
-        SELECT
-          if({label_expr} = '', 'unknown', {label_expr}) AS series,
-          count() AS samples,
-          min(value) AS min_value,
-          max(value) AS max_value,
-          avg(value) AS avg_value,
-          argMax(value, sample_time) AS last_value
-        FROM analytics.prometheus_samples
-        WHERE metric_name = {quote_string(metric_name)} AND {time_window['sql_filter']}
-        GROUP BY series
-        ORDER BY samples DESC, series ASC
-        LIMIT 50
-        """
-    )
-    datasource = {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"}
-    dashboard = {
-        "id": None,
-        "uid": uid,
-        "title": title,
-        "tags": ["agentic-data-stack", "prometheus", "clickhouse", metric_name],
-        "timezone": "browser",
-        "schemaVersion": 39,
-        "version": 0,
-        "refresh": "30s",
-        "time": {"from": time_window["grafana_from"], "to": time_window["grafana_to"]},
-        "panels": [
-            {
-                "id": 1,
-                "title": f"{metric_name} by {group_by_label}",
-                "type": "timeseries",
-                "datasource": datasource,
-                "gridPos": {"h": 14, "w": 24, "x": 0, "y": 0},
-                "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never"}}, "overrides": []},
-                "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": True}, "tooltip": {"mode": "multi", "sort": "none"}},
-                "targets": [clickhouse_grafana_target(timeseries_sql, "A", 0)],
-            },
-            {
-                "id": 2,
-                "title": f"Latest {metric_name} values",
-                "type": "table",
-                "datasource": datasource,
-                "gridPos": {"h": 9, "w": 24, "x": 0, "y": 14},
-                "targets": [clickhouse_grafana_target(latest_sql, "A", 1)],
-            },
-        ],
-    }
-    created = create_grafana_dashboard(dashboard)
-    return mcp_grafana_dashboard_response(
-        request_id,
-        preview_rows,
-        {"title": title, "dashboardPath": created.get("url") or f"/d/{uid}/{uid}"},
-    )
-
-
 def base_tools():
     """LibreChat видит только lifecycle tools, чтобы пользовательские запросы шли через generated-коннекторы."""
     return [
@@ -906,32 +467,8 @@ def base_tools():
     ]
 
 
-def simple_bar_svg(title, rows, label_key, value_key):
-    """Простой SVG для legacy visualize_* tools."""
-    width, height = 920, 520
-    max_value = max([float(row.get(value_key) or 0) for row in rows] + [1])
-    bars = []
-    for index, row in enumerate(rows[:20]):
-        value = float(row.get(value_key) or 0)
-        bar_height = int((value / max_value) * 320)
-        x = 70 + index * 40
-        y = 420 - bar_height
-        label = str(row.get(label_key, ""))[:12]
-        bars.append(f'<rect x="{x}" y="{y}" width="26" height="{bar_height}" fill="#2563eb"/><text x="{x}" y="445" font-size="10" transform="rotate(45 {x} 445)">{label}</text>')
-    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><rect width="100%" height="100%" fill="white"/><text x="40" y="40" font-size="24" font-weight="700">{title}</text>{"".join(bars)}</svg>'
-
-
-def chart_response(request_id, svg, rows, title):
-    """Сохраняет SVG в памяти и возвращает URL модели."""
-    chart_id = f"{uuid.uuid4()}.svg"
-    CHART_STORE[chart_id] = {"svg": svg, "created_at": time.time()}
-    chart_url = f"{PUBLIC_BASE_URL}/charts/{chart_id}"
-    text = f"Chart URL: {chart_url}\n\nMarkdown image: ![{title}]({chart_url})\n\n" + json.dumps({"rows": rows}, ensure_ascii=False, indent=2)
-    return json_rpc(request_id, text_result(text))
-
-
 def handle_tool_call(request_id, name, args):
-    """Маршрутизирует tools/call: вход от LibreChat, выход в ClickHouse/Grafana/коннектор."""
+    """Маршрутизирует tools/call: lifecycle tools или запуск saved generated-коннектора."""
     args = args or {}
 
     if name == "list_generated_connectors":
@@ -984,173 +521,10 @@ def handle_tool_call(request_id, name, args):
     if name == "run_generated_connector":
         return json_rpc(request_id, json_text_result(call_generated_connector(args.get("connector_name"), args.get("arguments") or {})))
 
-    if name == "describe_analytics_schema":
-        rows = run_query("SELECT table, name, type, default_kind, default_expression FROM system.columns WHERE database = 'analytics' ORDER BY table, position")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "list_analytics_tables":
-        include_empty = args.get("include_empty") is not False
-        filter_sql = "" if include_empty else "AND ifNull(total_rows, 0) > 0"
-        rows = run_query(f"SELECT database, name AS table, engine, total_rows AS rows, formatReadableSize(total_bytes) AS bytes FROM system.tables WHERE database = 'analytics' {filter_sql} ORDER BY database, name")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "list_non_empty_analytics_tables":
-        rows = run_query("SELECT database, name AS table, engine, total_rows AS rows, formatReadableSize(total_bytes) AS bytes FROM system.tables WHERE database = 'analytics' AND engine NOT LIKE '%View' AND ifNull(total_rows, 0) > 0 ORDER BY database, name")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "describe_analytics_table":
-        table_name, columns = analytics_columns(analytics_table_argument(args))
-        metadata = run_query(f"SELECT database, name AS table, engine, total_rows AS rows, formatReadableSize(total_bytes) AS bytes FROM system.tables WHERE database = 'analytics' AND name = {quote_string(table_name)} LIMIT 1")
-        return json_rpc(request_id, json_text_result({"metadata": metadata[0] if metadata else None, "columns": columns}))
-
-    if name == "sample_analytics_table":
-        table_name = analytics_table_exists(analytics_table_argument(args))
-        limit = bounded_limit(args.get("limit"), 10, 100)
-        rows = run_query(f"SELECT * FROM analytics.{quote_ident(table_name)} LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "profile_analytics_table":
-        table_name, columns = analytics_columns(analytics_table_argument(args))
-        sample_limit = bounded_limit(args.get("sample_limit"), 5, 50)
-        metadata = run_query(f"SELECT database, name AS table, engine, total_rows AS rows, formatReadableSize(total_bytes) AS bytes FROM system.tables WHERE database = 'analytics' AND name = {quote_string(table_name)} LIMIT 1")
-        sample_rows = run_query(f"SELECT * FROM analytics.{quote_ident(table_name)} LIMIT {sample_limit}")
-        return json_rpc(request_id, json_text_result({"metadata": metadata[0] if metadata else None, "columns": columns, "sampleRows": sample_rows}))
-
-    if name == "distinct_analytics_values":
-        table_name, column_name, _ = analytics_column_exists(analytics_table_argument(args), args.get("column"))
-        limit = bounded_limit(args.get("limit"), 100, 500)
-        rows = run_query(f"SELECT {quote_ident(column_name)} AS value, count() AS rows FROM analytics.{quote_ident(table_name)} GROUP BY value ORDER BY rows DESC, value ASC LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "count_analytics_by":
-        table_name = analytics_table_exists(analytics_table_argument(args))
-        dimensions = (args.get("dimensions") or [])[:3]
-        if not dimensions:
-            raise ValueError("count_analytics_by requires at least one dimension.")
-        validated = [analytics_column_exists(table_name, dimension)[1] for dimension in dimensions]
-        where_parts = []
-        for column, value in (args.get("filters") or {}).items():
-            column_name = analytics_column_exists(table_name, column)[1]
-            where_parts.append(f"{quote_ident(column_name)} = {sql_literal(value)}")
-        for condition in args.get("filter_conditions") or []:
-            column_name = analytics_column_exists(table_name, condition.get("column"))[1]
-            where_parts.append(f"{quote_ident(column_name)} {normalize_filter_operator(condition.get('operator'))} {sql_literal(condition.get('value'))}")
-        limit = bounded_limit(args.get("limit"), 100, 500)
-        group_by = ", ".join(quote_ident(column) for column in validated)
-        where_sql = "WHERE " + " AND ".join(where_parts) if where_parts else ""
-        rows = run_query(f"SELECT {group_by}, count() AS rows FROM analytics.{quote_ident(table_name)} {where_sql} GROUP BY {group_by} ORDER BY rows DESC LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "create_car_inventory_dashboard":
-        return create_car_inventory_dashboard(request_id, args)
-
-    if name == "sample_app_events":
-        limit = bounded_limit(args.get("limit"), 10, 100)
-        rows = run_query(f"SELECT * FROM analytics.app_events_raw ORDER BY event_time DESC, id DESC LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "event_summary":
-        rows = run_query(f"SELECT * FROM analytics.v_event_summary LIMIT {bounded_limit(args.get('limit'), 50, 500)}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "route_performance":
-        limit = bounded_limit(args.get("limit"), 20, 100)
-        rows = run_query(f"SELECT route, count() AS events, uniqExact(user_id) AS users, countIf(status_code >= 400) AS errors, round(errors / events, 4) AS error_rate, round(avgOrNull(latency_ms), 2) AS avg_latency_ms, quantileOrNull(0.95)(latency_ms) AS p95_latency_ms FROM analytics.app_events_raw WHERE route IS NOT NULL GROUP BY route ORDER BY events DESC, errors DESC LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "model_usage":
-        limit = bounded_limit(args.get("limit"), 20, 100)
-        rows = run_query(f"SELECT model_name, count() AS events, countIf(event_type = 'model_completion') AS completions, sumOrNull(prompt_tokens) AS total_prompt_tokens, sumOrNull(completion_tokens) AS total_completion_tokens, sum(ifNull(prompt_tokens, 0) + ifNull(completion_tokens, 0)) AS total_tokens, sumOrNull(total_cost_usd) AS total_cost_usd, round(avgOrNull(latency_ms), 2) AS avg_latency_ms FROM analytics.app_events_raw WHERE model_name IS NOT NULL GROUP BY model_name ORDER BY total_cost_usd DESC, total_tokens DESC LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "prometheus_metric_summary":
-        rows = run_query(f"SELECT minute, metric_name, samples, min_value, max_value, round(avg_value, 4) AS avg_value, round(p95_value, 4) AS p95_value FROM analytics.v_prometheus_metric_summary ORDER BY minute DESC, metric_name ASC LIMIT {bounded_limit(args.get('limit'), 50, 500)}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "prometheus_targets":
-        rows = run_query(f"SELECT job, instance, last_sample_time, last_up, min_up, round(avg_up, 4) AS avg_up FROM analytics.v_prometheus_targets ORDER BY last_up ASC, min_up ASC, job ASC, instance ASC LIMIT {bounded_limit(args.get('limit'), 50, 500)}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "sample_prometheus_metrics":
-        metric_name = safe_identifier(args.get("metric_name"))
-        rows = run_query(f"SELECT metric_name, labels_json, sample_time, value, source, ingest_mode, ingest_time FROM analytics.prometheus_samples WHERE metric_name = {quote_string(metric_name)} ORDER BY sample_time DESC LIMIT {bounded_limit(args.get('limit'), 50, 500)}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "prometheus_label_values":
-        metric_name = safe_identifier(args.get("metric_name"))
-        label = safe_label_name(args.get("label"))
-        rows = run_query(f"SELECT JSONExtractString(labels_json, {quote_string(label)}) AS label_value, count() AS samples, max(sample_time) AS last_sample_time FROM analytics.prometheus_samples WHERE metric_name = {quote_string(metric_name)} AND label_value != '' GROUP BY label_value ORDER BY samples DESC, label_value ASC LIMIT {bounded_limit(args.get('limit'), 50, 500)}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "create_prometheus_availability_dashboard":
-        return create_prometheus_availability_dashboard_response(request_id, args)
-
-    if name == "create_prometheus_metric_dashboard":
-        return create_prometheus_metric_dashboard_response(request_id, args)
-
-    if name == "error_trends":
-        limit = bounded_limit(args.get("limit"), 50, 500)
-        rows = run_query(f"SELECT toStartOfHour(parseDateTimeBestEffortOrNull(event_time)) AS hour, route, status_code, count() AS errors, uniqExact(user_id) AS affected_users, round(avgOrNull(latency_ms), 2) AS avg_latency_ms FROM analytics.app_events_raw WHERE status_code >= 400 GROUP BY hour, route, status_code ORDER BY hour DESC, errors DESC LIMIT {limit}")
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "visualize_event_volume":
-        rows = run_query("SELECT event_type, count() AS events FROM analytics.app_events_raw GROUP BY event_type ORDER BY events DESC LIMIT 20")
-        return chart_response(request_id, simple_bar_svg("Event volume", rows, "event_type", "events"), rows, "Event volume")
-
-    if name == "visualize_route_performance":
-        metric = safe_choice(args.get("metric"), ["events", "error_rate", "avg_latency_ms", "p95_latency_ms"], "error_rate")
-        rows = run_query(f"SELECT route, count() AS events, round(countIf(status_code >= 400) / count(), 4) AS error_rate, round(avgOrNull(latency_ms), 2) AS avg_latency_ms, quantileOrNull(0.95)(latency_ms) AS p95_latency_ms FROM analytics.app_events_raw WHERE route IS NOT NULL GROUP BY route ORDER BY {metric} DESC LIMIT {bounded_limit(args.get('limit'), 10, 50)}")
-        return chart_response(request_id, simple_bar_svg("Route performance", rows, "route", metric), rows, "Route performance")
-
-    if name == "visualize_model_usage":
-        metric = safe_choice(args.get("metric"), ["events", "total_tokens", "total_cost_usd", "avg_latency_ms"], "total_cost_usd")
-        rows = run_query(f"SELECT model_name, count() AS events, sum(ifNull(prompt_tokens, 0) + ifNull(completion_tokens, 0)) AS total_tokens, sumOrNull(total_cost_usd) AS total_cost_usd, round(avgOrNull(latency_ms), 2) AS avg_latency_ms FROM analytics.app_events_raw WHERE model_name IS NOT NULL GROUP BY model_name ORDER BY {metric} DESC LIMIT {bounded_limit(args.get('limit'), 10, 50)}")
-        return chart_response(request_id, simple_bar_svg("Model usage", rows, "model_name", metric), rows, "Model usage")
-
     if isinstance(name, str) and name.startswith("clickhouse_"):
         return json_rpc(request_id, json_text_result(call_generated_connector(name, args)))
 
     return json_rpc_error(request_id, -32602, f"Unknown tool: {name}")
-
-
-def create_car_inventory_dashboard(request_id, args):
-    """Создает Grafana dashboard для таблицы analytics.car_inventory_raw."""
-    analytics_table_exists("car_inventory_raw")
-    title = safe_dashboard_title((args or {}).get("title"), "Car Inventory Dashboard")
-    uid = f"cars-{uuid.uuid4().hex[:18]}"
-    filters = []
-    for column, arg_name in [("city", "city"), ("brand", "brand"), ("stock_status", "stock_status")]:
-        if args.get(arg_name):
-            filters.append(f"{quote_ident(column)} = {quote_string(args[arg_name])}")
-    if args.get("min_mileage_km") is not None:
-        filters.append(f"mileage_km >= {sql_literal(float(args['min_mileage_km']))}")
-    if args.get("max_mileage_km") is not None:
-        filters.append(f"mileage_km <= {sql_literal(float(args['max_mileage_km']))}")
-    where_sql = "WHERE " + " AND ".join(filters) if filters else ""
-    city_brand_sql = f"SELECT city, brand, count() AS cars FROM analytics.car_inventory_raw {where_sql} GROUP BY city, brand ORDER BY city ASC, cars DESC, brand ASC"
-    stock_sql = f"SELECT city, stock_status, count() AS cars FROM analytics.car_inventory_raw {where_sql} GROUP BY city, stock_status ORDER BY city ASC, cars DESC"
-    price_sql = f"SELECT city, brand, round(avg(price_usd), 2) AS avg_price_usd, round(avg(mileage_km), 0) AS avg_mileage_km, count() AS cars FROM analytics.car_inventory_raw {where_sql} GROUP BY city, brand ORDER BY city ASC, cars DESC"
-    warehouse_sql = f"SELECT city, warehouse_name, brand, count() AS cars, countIf(stock_status = 'available') AS available_cars, countIf(stock_status = 'reserved') AS reserved_cars, countIf(stock_status = 'maintenance') AS maintenance_cars, round(avg(price_usd), 2) AS avg_price_usd, round(avg(mileage_km), 0) AS avg_mileage_km FROM analytics.car_inventory_raw {where_sql} GROUP BY city, warehouse_name, brand ORDER BY city ASC, warehouse_name ASC, cars DESC, brand ASC"
-    preview_rows = run_query(city_brand_sql + " LIMIT 50")
-    datasource = {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"}
-    dashboard = {
-        "id": None,
-        "uid": uid,
-        "title": title,
-        "tags": ["agentic-data-stack", "postgres", "car-inventory", "clickhouse"],
-        "timezone": "browser",
-        "schemaVersion": 39,
-        "version": 0,
-        "time": {"from": "now-30d", "to": "now"},
-        "panels": [
-            {"id": 1, "title": "Cars by city and brand", "type": "barchart", "datasource": datasource, "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0}, "targets": [clickhouse_grafana_target(city_brand_sql)]},
-            {"id": 2, "title": "Cars by city and stock status", "type": "barchart", "datasource": datasource, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10}, "targets": [clickhouse_grafana_target(stock_sql)]},
-            {"id": 3, "title": "Average price and mileage by city and brand", "type": "table", "datasource": datasource, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10}, "targets": [clickhouse_grafana_target(price_sql)]},
-            {"id": 4, "title": "Warehouse inventory detail", "type": "table", "datasource": datasource, "gridPos": {"h": 11, "w": 24, "x": 0, "y": 18}, "targets": [clickhouse_grafana_target(warehouse_sql)]},
-        ],
-    }
-    created = create_grafana_dashboard(dashboard)
-    return mcp_grafana_dashboard_response(request_id, preview_rows, {"title": title, "dashboardPath": created.get("url") or f"/d/{uid}/{uid}"})
 
 
 def handle_rpc(payload):
@@ -1177,7 +551,7 @@ def handle_rpc(payload):
 
 
 class McpHttpHandler(BaseHTTPRequestHandler):
-    """HTTP слой: принимает LibreChat requests и отдает MCP/health/charts responses."""
+    """HTTP слой: принимает LibreChat requests и отдает MCP/health responses."""
 
     def _send(self, status, body, content_type="application/json"):
         raw = body.encode("utf-8") if isinstance(body, str) else body
@@ -1192,14 +566,6 @@ class McpHttpHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._send(200, json.dumps({"ok": True, "runtime": "python"}, ensure_ascii=False))
-            return
-        if parsed.path.startswith("/charts/"):
-            chart_id = parsed.path.removeprefix("/charts/")
-            chart = CHART_STORE.get(chart_id)
-            if not chart:
-                self._send(404, json.dumps({"error": "Chart not found"}))
-                return
-            self._send(200, chart["svg"], "image/svg+xml; charset=utf-8")
             return
         self._send(404, json.dumps({"error": "Not found"}))
 
