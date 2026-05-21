@@ -257,8 +257,18 @@ def validate_generated_connector_source(connector_name, source_code):
         raise ValueError("Generated connector source_code is too large.")
     if "CONNECTOR" not in source or "def handler" not in source:
         raise ValueError("Generated Python connector must define CONNECTOR and def handler(...).")
+    if re.search(r"CONNECTOR\s*=\s*['\"]", source):
+        raise ValueError(
+            "Generated connector must define CONNECTOR as a dict, not a string. "
+            "Use: CONNECTOR = {'name': '<connector_name>', 'description': '...', "
+            "'input_schema': {'type': 'object', 'properties': {}}}."
+        )
     if not re.search(rf"['\"]name['\"]\s*:\s*['\"]{re.escape(safe_name)}['\"]", source):
-        raise ValueError(f"Generated connector source must export name {safe_name}.")
+        raise ValueError(
+            f"Generated connector source must export name {safe_name} inside CONNECTOR dict. "
+            f"Use: CONNECTOR = {{'name': '{safe_name}', 'description': '...', "
+            "'input_schema': {'type': 'object', 'properties': {}}}}."
+        )
     if "analytics." in source and "analytics_column_exists" not in source and "analytics_columns" not in source:
         raise ValueError(
             "Generated connectors that query analytics.* must validate referenced columns "
@@ -458,11 +468,17 @@ HelperBag.grafana_clickhouse_target = staticmethod(clickhouse_grafana_target)
 
 def base_tools():
     """LibreChat видит только lifecycle tools, чтобы пользовательские запросы шли через generated-коннекторы."""
+    connector_contract = (
+        "Create a Python MCP connector file. source_code must be plain Python without imports. "
+        "It must define CONNECTOR as a dict, not a string: "
+        "CONNECTOR = {'name': '<same connector_name>', 'description': '...', 'input_schema': {'type': 'object', 'properties': {}}}. "
+        "It must define handler(args, run_query, helpers). Use run_query(sql) and helpers only."
+    )
     return [
         {"name": "list_generated_connectors", "description": "List generated Python MCP connectors.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "describe_generated_connector", "description": "Describe one saved generated Python MCP connector.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}}, "required": ["connector_name"]}},
-        {"name": "create_generated_connector", "description": "Create a Python MCP connector file for a specific user database question.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}, "required": ["connector_name", "source_code"]}},
-        {"name": "update_generated_connector", "description": "Update an existing generated Python MCP connector file.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}}, "required": ["connector_name", "source_code"]}},
+        {"name": "create_generated_connector", "description": connector_contract, "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}, "required": ["connector_name", "source_code"]}},
+        {"name": "update_generated_connector", "description": connector_contract, "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}}, "required": ["connector_name", "source_code"]}},
         {"name": "run_generated_connector", "description": "Run a saved generated Python MCP connector by name.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "arguments": {"type": "object", "default": {}}}, "required": ["connector_name"]}},
     ]
 
@@ -576,14 +592,16 @@ class McpHttpHandler(BaseHTTPRequestHandler):
         if self.path != "/mcp":
             self._send(404, json.dumps({"error": "Not found"}))
             return
+        request_id = None
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            request_id = payload.get("id") if isinstance(payload, dict) else None
             response = handle_rpc(payload)
             self._send(200, response)
         except Exception as error:
             traceback.print_exc()
-            self._send(500, json_rpc_error(None, -32000, str(error)))
+            self._send(200, json_rpc_error(request_id, -32000, str(error)))
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")

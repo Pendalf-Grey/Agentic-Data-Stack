@@ -37,9 +37,35 @@ SINK_TEMPLATE = CONNECTORS_DIR / "clickhouse-sink.json"
 # Префикс env-переменных активного источника, например POSTGRES_SOURCE_*.
 ACTIVE_PREFIX = f"{ACTIVE_SOURCE.upper()}_SOURCE"
 
-# ClickHouse sink template использует ACTIVE_SOURCE_TOPIC,
-# поэтому выставляем его из env-переменной выбранного source.
-os.environ["ACTIVE_SOURCE_TOPIC"] = os.getenv(f"{ACTIVE_PREFIX}_TOPIC", "")
+
+def set_default_env(name, value):
+    """Заполняет производную env var только если пользователь не задал ее явно."""
+    if value and not os.getenv(name):
+        os.environ[name] = value
+
+
+def prepare_connector_env():
+    """Готовит явные списки таблиц/topics с обратной совместимостью для одной таблицы."""
+    if ACTIVE_SOURCE == "postgres":
+        schema = os.getenv("POSTGRES_SOURCE_SCHEMA", "")
+        table = os.getenv("POSTGRES_SOURCE_TABLE", "")
+        set_default_env("POSTGRES_SOURCE_TABLE_INCLUDE_LIST", f"{schema}.{table}" if schema and table else "")
+    elif ACTIVE_SOURCE == "mysql":
+        database = os.getenv("MYSQL_SOURCE_DB", "")
+        table = os.getenv("MYSQL_SOURCE_TABLE", "")
+        set_default_env("MYSQL_SOURCE_TABLE_INCLUDE_LIST", f"{database}.{table}" if database and table else "")
+    elif ACTIVE_SOURCE == "mongodb":
+        database = os.getenv("MONGODB_SOURCE_DB", "")
+        collection = os.getenv("MONGODB_SOURCE_COLLECTION", "")
+        set_default_env("MONGODB_SOURCE_COLLECTION_INCLUDE_LIST", f"{database}.{collection}" if database and collection else "")
+
+    source_topic = os.getenv(f"{ACTIVE_PREFIX}_TOPIC", "")
+    set_default_env("CLICKHOUSE_SINK_TOPICS", source_topic)
+    if source_topic and os.getenv("CLICKHOUSE_SINK_TABLE"):
+        set_default_env("CLICKHOUSE_TOPIC_TABLE_MAP", f"{source_topic}={os.getenv('CLICKHOUSE_SINK_TABLE')}")
+
+
+prepare_connector_env()
 
 
 def required_env(name):

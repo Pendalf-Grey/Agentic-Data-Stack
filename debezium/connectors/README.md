@@ -27,7 +27,7 @@ Source connector для PostgreSQL.
 - `plugin.name=pgoutput`: PostgreSQL logical replication plugin.
 - `database.*`: host, port, user, password и имя БД источника.
 - `topic.prefix`: префикс Kafka topic'ов, куда Debezium пишет изменения.
-- `schema.include.list` и `table.include.list`: ограничивают чтение одной нужной таблицей.
+- `schema.include.list` и `table.include.list`: ограничивают чтение нужными таблицами. Для одной таблицы можно оставить старую пару `POSTGRES_SOURCE_SCHEMA` + `POSTGRES_SOURCE_TABLE`; для группы таблиц задайте `POSTGRES_SOURCE_TABLE_INCLUDE_LIST=public.orders,public.payments,public.customers`.
 - `slot.name`: replication slot PostgreSQL, через который Debezium читает WAL.
 - `publication.name`: publication PostgreSQL для logical replication.
 - `publication.autocreate.mode=filtered`: Debezium сам создает publication только для выбранных таблиц.
@@ -37,6 +37,15 @@ Source connector для PostgreSQL.
 ## `mysql-source.json`
 
 Source connector для MySQL.
+
+Для одной таблицы можно оставить старую переменную `MYSQL_SOURCE_TABLE`.
+Для группы таблиц задайте явный список:
+
+```env
+MYSQL_SOURCE_TABLE_INCLUDE_LIST=customer_app.orders,customer_app.payments,customer_app.customers
+CLICKHOUSE_SINK_TOPICS=customer_mysql.customer_app.orders,customer_mysql.customer_app.payments,customer_mysql.customer_app.customers
+CLICKHOUSE_TOPIC_TABLE_MAP=customer_mysql.customer_app.orders=orders_raw,customer_mysql.customer_app.payments=payments_raw,customer_mysql.customer_app.customers=customers_raw
+```
 
 Важные поля:
 
@@ -67,7 +76,16 @@ Sink connector для ClickHouse.
 Важные поля:
 
 - `connector.class`: официальный ClickHouse Kafka Connect Sink connector.
-- `topics`: Kafka topic, который нужно читать. Значение подставляется через `${ACTIVE_SOURCE_TOPIC}`.
+- `topics`: Kafka topics, которые нужно читать. Значение подставляется через `${CLICKHOUSE_SINK_TOPICS}`.
+- `topic2TableMap`: соответствие Kafka topic -> ClickHouse table. Значение подставляется через `${CLICKHOUSE_TOPIC_TABLE_MAP}`.
+
+Пример для группы таблиц:
+
+```env
+POSTGRES_SOURCE_TABLE_INCLUDE_LIST=public.orders,public.payments,public.customers
+CLICKHOUSE_SINK_TOPICS=customer_pg.public.orders,customer_pg.public.payments,customer_pg.public.customers
+CLICKHOUSE_TOPIC_TABLE_MAP=customer_pg.public.orders=orders_raw,customer_pg.public.payments=payments_raw,customer_pg.public.customers=customers_raw
+```
 - `hostname`, `port`, `database`, `username`, `password`: подключение к ClickHouse.
 - `topic2TableMap`: соответствие Kafka topic -> ClickHouse table.
 - `schemas.enable=false`: сообщения идут как JSON без Kafka schema envelope.

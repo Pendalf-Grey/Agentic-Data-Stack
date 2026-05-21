@@ -12,7 +12,7 @@
     "database.sslmode": "${POSTGRES_SOURCE_SSL_MODE}",
     "topic.prefix": "${POSTGRES_SOURCE_TOPIC_PREFIX}",
     "schema.include.list": "${POSTGRES_SOURCE_SCHEMA}",
-    "table.include.list": "${POSTGRES_SOURCE_SCHEMA}.${POSTGRES_SOURCE_TABLE}",
+    "table.include.list": "${POSTGRES_SOURCE_TABLE_INCLUDE_LIST}",
     "slot.name": "${POSTGRES_SOURCE_SLOT}",
     "publication.name": "${POSTGRES_SOURCE_PUBLICATION}",
     "publication.autocreate.mode": "filtered",

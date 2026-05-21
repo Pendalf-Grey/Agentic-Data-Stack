@@ -224,17 +224,22 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.headers.get("content-type", "text/event-stream"))
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 self.end_headers()
                 streamed_output = []
                 while True:
-                    chunk = response.read(8192)
-                    if not chunk:
+                    # SSE от Ollama приходит строками `data: ...`.
+                    # Если читать крупными блоками через read(8192), proxy может ждать закрытия
+                    # upstream-соединения даже после `data: [DONE]`, а LibreChat видит `terminated`.
+                    line = response.readline()
+                    if not line:
                         break
-                    text = chunk.decode("utf-8", errors="replace")
+                    text = line.decode("utf-8", errors="replace")
                     streamed_output.append(parse_streaming_content(text))
-                    self.wfile.write(chunk)
+                    self.wfile.write(line)
                     self.wfile.flush()
+                    if text.strip() == "data: [DONE]":
+                        break
                 send_langfuse_trace(
                     body,
                     "".join(streamed_output),

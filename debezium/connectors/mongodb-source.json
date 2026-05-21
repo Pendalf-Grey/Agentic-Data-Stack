@@ -5,7 +5,7 @@
     "mongodb.connection.string": "${MONGODB_SOURCE_CONNECTION_STRING}",
     "topic.prefix": "${MONGODB_SOURCE_TOPIC_PREFIX}",
     "database.include.list": "${MONGODB_SOURCE_DB}",
-    "collection.include.list": "${MONGODB_SOURCE_DB}.${MONGODB_SOURCE_COLLECTION}",
+    "collection.include.list": "${MONGODB_SOURCE_COLLECTION_INCLUDE_LIST}",
     "snapshot.mode": "initial",
     "capture.mode": "change_streams_update_full",
     "tombstones.on.delete": "false",

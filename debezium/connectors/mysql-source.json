@@ -10,7 +10,7 @@
     "database.ssl.mode": "${MYSQL_SOURCE_SSL_MODE}",
     "topic.prefix": "${MYSQL_SOURCE_TOPIC_PREFIX}",
     "database.include.list": "${MYSQL_SOURCE_DB}",
-    "table.include.list": "${MYSQL_SOURCE_DB}.${MYSQL_SOURCE_TABLE}",
+    "table.include.list": "${MYSQL_SOURCE_TABLE_INCLUDE_LIST}",
     "snapshot.mode": "initial",
     "include.schema.changes": "false",
     "tombstones.on.delete": "false",
