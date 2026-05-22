@@ -147,3 +147,64 @@ FROM analytics.prometheus_samples
 WHERE metric_name = 'up'
 GROUP BY job, instance
 ORDER BY last_up ASC, job ASC, instance ASC;
+
+-- elasticsearch_events_raw - универсальный raw-слой для документов из Elasticsearch.
+-- Таблица не навязывает схему конкретного индекса: исходный документ хранится целиком в document_json.
+-- Служебные поля вынесены отдельно, чтобы быстро фильтровать по источнику, индексу, времени и id документа.
+CREATE TABLE IF NOT EXISTS analytics.elasticsearch_events_raw
+(
+  -- source_name различает несколько Elasticsearch-кластеров или несколько логических источников.
+  source_name LowCardinality(String),
+  -- index_name показывает, из какого Elasticsearch index пришел документ.
+  index_name String,
+  -- document_id - исходный Elasticsearch _id, нужен для дедупликации и трассировки.
+  document_id String,
+  -- event_time - время события из документа, обычно поле @timestamp.
+  event_time DateTime64(3, 'UTC'),
+  -- ingest_time - когда документ попал в ClickHouse.
+  ingest_time DateTime64(3, 'UTC') DEFAULT now64(3),
+  -- document_json хранит полный _source JSON без потери полей.
+  document_json String,
+  -- version помогает ReplacingMergeTree оставлять более свежую копию при повторной загрузке.
+  version UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (source_name, index_name, event_time, document_id);
+
+-- ingestion_offsets - checkpoint-таблица для потоковых и микро-батчевых загрузчиков.
+-- Она хранит "закладку": до какого времени конкретный connector уже успешно загрузил данные.
+CREATE TABLE IF NOT EXISTS analytics.ingestion_offsets
+(
+  source_name LowCardinality(String),
+  checkpoint_name String,
+  last_event_time DateTime64(3, 'UTC'),
+  last_document_id String,
+  updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (source_name, checkpoint_name);
+
+-- v_elasticsearch_index_summary - быстрый обзор объема данных по Elasticsearch index.
+CREATE VIEW IF NOT EXISTS analytics.v_elasticsearch_index_summary AS
+SELECT
+  source_name,
+  index_name,
+  count() AS documents,
+  min(event_time) AS first_event_time,
+  max(event_time) AS last_event_time,
+  max(ingest_time) AS last_ingest_time
+FROM analytics.elasticsearch_events_raw
+GROUP BY source_name, index_name
+ORDER BY documents DESC, source_name ASC, index_name ASC;
+
+-- v_elasticsearch_event_timeline - почасовая динамика документов из Elasticsearch.
+CREATE VIEW IF NOT EXISTS analytics.v_elasticsearch_event_timeline AS
+SELECT
+  toStartOfHour(event_time) AS hour,
+  source_name,
+  index_name,
+  count() AS documents
+FROM analytics.elasticsearch_events_raw
+GROUP BY hour, source_name, index_name
+ORDER BY hour DESC, source_name ASC, index_name ASC;
