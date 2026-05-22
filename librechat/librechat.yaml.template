@@ -9,17 +9,18 @@ mcpSettings:
 
 endpoints:
   custom:
-    - name: "Local Model Gateway"
+    - name: "Local Ollama"
       apiKey: "${LLM_GATEWAY_API_KEY}"
       baseURL: "${LLM_GATEWAY_BASE_URL}"
       models:
         default:
-${LIBRECHAT_MODEL_LIST_YAML}
+${LOCAL_OLLAMA_MODEL_LIST_YAML}
         fetch: false
       titleConvo: true
       titleModel: "${LIBRECHAT_TITLE_MODEL}"
       summarize: false
       summaryModel: "${LIBRECHAT_SUMMARY_MODEL}"
+${CLOUD_MODEL_ENDPOINT_YAML}
 
 mcpServers:
   clickhouse-analytics:
