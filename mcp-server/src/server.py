@@ -235,10 +235,30 @@ def analytics_table_argument(args):
     return table
 
 
+def normalize_analytics_sql(query):
+    """Исправляет частые model shortcuts на реальные analytics-таблицы."""
+    normalized = str(query or "").strip().rstrip(";")
+    replacements = {
+        r"\bcars\b": "v_car_inventory_summary",
+        r"\bcar_inventory\b": "v_car_inventory_summary",
+    }
+    for pattern, replacement in replacements.items():
+        normalized = re.sub(rf"(\bfrom\s+){pattern}\b", rf"\1{replacement}", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(rf"(\bjoin\s+){pattern}\b", rf"\1{replacement}", normalized, flags=re.IGNORECASE)
+    if re.search(r"\bfrom\s+v_car_inventory_summary\b", normalized, flags=re.IGNORECASE):
+        normalized = re.sub(
+            r"\bcount\s*\(\s*\*\s*\)\s+as\s+([A-Za-z_][A-Za-z0-9_]*)",
+            r"sum(cars) AS \1",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    return normalized
+
+
 def run_query(query):
     """Выполняет только SELECT в ClickHouse и возвращает JSONEachRow как list[dict]."""
     started_at = utc_now_iso()
-    normalized = query.strip().rstrip(";")
+    normalized = normalize_analytics_sql(query)
     try:
         if not re.match(r"^select\b", normalized, flags=re.IGNORECASE):
             raise ValueError("Only SELECT queries are allowed.")
@@ -724,7 +744,7 @@ def clickhouse_grafana_target(raw_sql, ref_id="A", fmt=1, format=None):
     return {
         "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"},
         "format": grafana_target_format(fmt),
-        "rawSql": raw_sql,
+        "rawSql": normalize_analytics_sql(raw_sql),
         "refId": ref_id,
     }
 
@@ -848,8 +868,34 @@ def generated_grafana_dashboard_response(dashboard, rows=None, metadata=None):
     }
 
 
+def generated_grafana_bar_chart_response(title, sql, rows=None, uid=None, panel_title=None, metadata=None):
+    """Создает простой bar chart dashboard без ручной сборки Grafana JSON моделью."""
+    if rows is None:
+        rows = run_query(sql)
+    dashboard_uid = normalize_generated_connector_name(uid or title or "clickhouse_dashboard")[:40]
+    dashboard = {
+        "uid": dashboard_uid,
+        "title": safe_dashboard_title(title, "Analytics Dashboard"),
+        "schemaVersion": 39,
+        "version": 0,
+        "panels": [
+            {
+                "id": 1,
+                "type": "barchart",
+                "title": safe_dashboard_title(panel_title or title, "Analytics Chart"),
+                "gridPos": {"h": 9, "w": 18, "x": 0, "y": 0},
+                "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"},
+                "targets": [clickhouse_grafana_target(sql, ref_id="A", format="table")],
+                "options": {"orientation": "auto", "xTickLabelRotation": 0, "xTickLabelSpacing": 0},
+            }
+        ],
+    }
+    return generated_grafana_dashboard_response(dashboard, rows=rows, metadata=metadata)
+
+
 HelperBag.grafana_dashboard_response = staticmethod(generated_grafana_dashboard_response)
 HelperBag.grafana_clickhouse_target = staticmethod(clickhouse_grafana_target)
+HelperBag.grafana_bar_chart_response = staticmethod(generated_grafana_bar_chart_response)
 
 
 def base_tools():

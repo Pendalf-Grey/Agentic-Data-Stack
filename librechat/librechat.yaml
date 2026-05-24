@@ -35,7 +35,8 @@ mcpServers:
     # Модель создает Python-коннектор под вопрос, выполняет его и только потом отвечает.
     serverInstructions: |
       Use these tools for analytics questions: create_and_run_generated_connector, update_generated_connector, run_generated_connector. Do not answer from memory.
-      Act immediately with tool calls. Do not write a plan, visible reasoning, fake tool JSON, SQL for the user, or raw MCP output.
+      Act immediately with tool calls. Do not write a plan, visible reasoning, fake tool JSON, SQL for the user, raw MCP output, waiting messages, or retry commentary.
+      Use concise neutral Russian. Do not use playful filler words such as "Почемучка", "Почемуче", or "Почемучу".
       Analytics means ClickHouse database analytics only. Generated connectors are ephemeral and deleted after run; never reuse old connector names.
 
       Required flow for each new database/dashboard question:
@@ -48,10 +49,11 @@ mcpServers:
 
       Connector contract: plain Python, no imports or external packages. Define CONNECTOR as {"name": "<same connector_name>", "description": "...", "input_schema": {"type": "object", "properties": {}}}. Define handler(args, run_query, helpers). run_query(sql) returns list[dict].
       For SQL in data/dashboard connectors, use one simple static triple-quoted SQL string. Do not build SQL from Python column lists, f-strings, escaped quote fragments, or printed fake tool JSON.
-      Helpers allowed exactly: analytics_schema_for_question(question, include_views=True), analytics_schema(include_views=True), analytics_list_tables(include_views=True), analytics_table_exists(table), analytics_columns(table), analytics_column_exists(table, column), bounded_limit(value, default=100, max_value=1000), quote_ident(name), quote_string(value), sql_literal(value), safe_sql_identifier(name), grafana_clickhouse_target(sql, ref_id='A', format='table'), grafana_dashboard_response(dashboard, rows=None, metadata=None).
+      Helpers allowed exactly: analytics_schema_for_question(question, include_views=True), analytics_schema(include_views=True), analytics_list_tables(include_views=True), analytics_table_exists(table), analytics_columns(table), analytics_column_exists(table, column), bounded_limit(value, default=100, max_value=1000), quote_ident(name), quote_string(value), sql_literal(value), safe_sql_identifier(name), grafana_clickhouse_target(sql, ref_id='A', format='table'), grafana_dashboard_response(dashboard, rows=None, metadata=None), grafana_bar_chart_response(title, sql, rows=None, uid=None, panel_title=None, metadata=None).
       helpers.analytics_schema_for_question(question, include_views=True) returns compact all_tables plus detailed candidate_tables; tables is an alias for candidate_tables.
       helpers.analytics_schema(include_views=True) returns {"database": "analytics", "tables": [{"name": "...", "rows": "...", "columns": [...], "column_types": {...}}]}.
       helpers.analytics_columns(table) returns list[dict]. Validate every referenced table/column before run_query. Do not invent tables, columns, rows, metrics, URLs, or helper names.
-      For categorical charts like city, brand, route, status, or model names, use panel type "barchart" and grafana_clickhouse_target(..., format='table'). Use "timeseries" only when SQL selects a column aliased as time.
+      For car inventory questions, prefer v_car_inventory_summary for city/brand aggregates. By default, "cars", "automobiles", or "machines" means total cars: use sum(cars), not sum(available_cars) and not count(*). Use sum(available_cars), sum(reserved_cars), or sum(maintenance_cars) only when the user explicitly asks for available, reserved, or maintenance cars. Use car_inventory_raw when the user asks for per-car fields such as model, vin, color, body_type, mileage, or price.
+      For categorical charts like city, brand, route, status, or model names, prefer helpers.grafana_bar_chart_response(...). First run rows = run_query(sql), then return helpers.grafana_bar_chart_response(title, sql, rows=rows, ...). If manually building panels, use panel type "barchart" and grafana_clickhouse_target(..., format='table'). Use "timeseries" only when SQL selects a column aliased as time.
       Grafana URLs must come from grafana_dashboard_response and use http://localhost:3001.
       Final answer for dashboard requests: short Russian summary, Grafana link, connector names used, and the returned data table. Do not include standalone SQL examples.
