@@ -1,0 +1,14 @@
+{
+  "output": "elasticsearch-synthetic-lab/fixtures/synthetic-logs.bulk.ndjson",
+  "documents": 720,
+  "indexPrefix": "nginx-logs",
+  "indexPattern": "nginx-logs-*",
+  "start": "2026-05-21T12:00:00.000Z",
+  "end": "2026-05-24T12:00:00.000Z",
+  "indices": {
+    "nginx-logs-2026.05.21": 120,
+    "nginx-logs-2026.05.22": 240,
+    "nginx-logs-2026.05.23": 240,
+    "nginx-logs-2026.05.24": 120
+  }
+}

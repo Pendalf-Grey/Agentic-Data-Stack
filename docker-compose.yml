@@ -216,6 +216,25 @@ services:
       CLICKHOUSE_OFFSETS_TABLE: ${CLICKHOUSE_OFFSETS_TABLE:-ingestion_offsets}
     restart: unless-stopped
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    profiles:
+      - elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
   airflow-db:
     image: postgres:16-alpine
     environment:
@@ -613,3 +632,4 @@ volumes:
   langfuse_postgres_data:
   langfuse_redis_data:
   langfuse_minio_data:
+  elasticsearch_data:

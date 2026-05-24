@@ -22,6 +22,14 @@ prometheus-synthetic-lab/README.md
 
 Она имитирует мониторинг 1 PostgreSQL, 2 MySQL, 2 MongoDB и 5 сервисов, включая нормальную работу и аварии.
 
+Для отдельной Elasticsearch demo-БД с синтетическими логами используйте:
+
+```text
+elasticsearch-synthetic-lab/README.md
+```
+
+Она генерирует HTTP/application logs в индексы `nginx-logs-*`, после чего их можно перенести в ClickHouse через `elasticsearch-connector`.
+
 ## Что Делают Сервисы
 
 | Сервис | Что Делает | Когда Смотреть |

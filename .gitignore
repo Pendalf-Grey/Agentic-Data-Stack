@@ -8,3 +8,4 @@ npm-debug.log*
 .env.*.local
 __pycache__/
 *.py[cod]
+elasticsearch-synthetic-lab/data/

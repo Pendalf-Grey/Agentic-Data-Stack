@@ -114,6 +114,18 @@ sh tools/clickhouse-tables.sh
 
 После `sh tools/postgres-demo-to-clickhouse.sh` ожидается минимум `3000` строк в `analytics.car_inventory_raw`.
 
+Для проверки Elasticsearch -> ClickHouse на synthetic logs:
+
+```bash
+sh tools/elasticsearch-demo-to-clickhouse.sh
+```
+
+После выполнения ожидаются строки в `analytics.elasticsearch_events_raw`, а сводку можно увидеть через:
+
+```bash
+sh tools/clickhouse-tables.sh
+```
+
 ## 5. UI
 
 - LibreChat: `http://localhost:3080`
