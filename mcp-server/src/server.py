@@ -238,6 +238,19 @@ def analytics_table_argument(args):
 def normalize_analytics_sql(query):
     """Исправляет частые model shortcuts на реальные analytics-таблицы."""
     normalized = str(query or "").strip().rstrip(";")
+    identifier_replacements = {
+        "город": "city",
+        "города": "city",
+        "машин": "car_count",
+        "машины": "car_count",
+        "автомобили": "car_count",
+        "автомобилей": "car_count",
+        "количество": "car_count",
+        "количество_машин": "car_count",
+        "количество_автомобилей": "car_count",
+    }
+    for shortcut, replacement in identifier_replacements.items():
+        normalized = re.sub(rf"(?<!['\"`])\b{shortcut}\b(?!['\"`])", replacement, normalized, flags=re.IGNORECASE)
     replacements = {
         r"\bcars\b": "v_car_inventory_summary",
         r"\bcar_inventory\b": "v_car_inventory_summary",
