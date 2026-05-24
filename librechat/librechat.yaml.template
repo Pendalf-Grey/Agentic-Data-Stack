@@ -32,32 +32,20 @@ mcpServers:
     # Этот prompt запрещает отвечать на вопросы к БД через заранее подготовленные аналитические tools.
     # Модель создает Python-коннектор под вопрос, выполняет его и только потом отвечает.
     serverInstructions: |
-      You do have access to ClickHouse through the clickhouse-analytics MCP tools, not by a direct database socket.
-      If the user asks "Do you have access to ClickHouse?" or asks for a yes/no answer about ClickHouse access, answer briefly: "Да, через MCP-инструмент clickhouse-analytics."
-      By default, "ClickHouse data", "project data", and "tables" mean the analytics database only. Do not report langfuse or system database tables unless the user explicitly asks for infrastructure/internal tables.
-      Do not satisfy user database or dashboard questions with prebuilt analytical tools such as describe_analytics_schema, list_analytics_tables, list_non_empty_analytics_tables, describe_analytics_table, sample_analytics_table, profile_analytics_table, distinct_analytics_values, count_analytics_by, prometheus_metric_summary, prometheus_targets, sample_prometheus_metrics, prometheus_label_values, event_summary, route_performance, model_usage, error_trends, create_car_inventory_dashboard, create_prometheus_availability_dashboard, or create_prometheus_metric_dashboard.
-      The only pre-existing tools allowed for user database/dashboard questions are generated-connector lifecycle tools: list_generated_connectors, describe_generated_connector, create_generated_connector, update_generated_connector, and run_generated_connector.
-      For every new ClickHouse data, table, column, Prometheus-sample, PostgreSQL-migrated-data, or Grafana-dashboard question, create a fresh schema discovery Python connector first. Run it. Then create a fresh data extraction or dashboard Python connector that uses only real table and column names returned by the schema connector. Run it.
-      Existing generated connectors may be reused only when the user explicitly names one, explicitly asks to reuse one, or asks to modify one. Otherwise create new connectors on the fly.
-      If the user asks what tables exist, which tables are non-empty, what columns a table has, what data is inside a table, what unique values exist, or asks for counts/distributions/filters, still use the two-generated-connector flow. Do not call the prebuilt table/column/count tools directly.
-      If the table name or column name is not explicit enough, the schema discovery connector must inspect system.tables/system.columns first and the data connector must not guess identifiers.
-      Never call Prometheus metric names tables. Names such as synthetic_log_events_total, synthetic_service_up, and up are metric_name values inside analytics.prometheus_samples, not ClickHouse tables.
-      For any ClickHouse data question, the first step must be a real MCP tool call to create_generated_connector, not a written plan. Do not answer "I will call a tool", do not print JSON with a tool name, and do not ask the user to run a tool. If lifecycle tools are available, call them.
-      Do not write SQL in the answer as if the user should run it. Do not show JSON tool-call payloads to the user. Get the answer through generated connectors, then summarize the returned rows.
-      Never paste raw MCP tool output, metadata JSON, SQL snippets, dashboard internals, or tool debug text into the chat. For Grafana dashboard tools, return only the ready browserUrl/browserShortUrl and a short human summary from rows.
-      Do not claim that you executed SQL unless a tool call actually returned results. Never invent table names, columns, rows, JSON/tool results, or Prometheus metric tables.
-      Generated connector names must start with clickhouse_. Use clear suffixes, for example clickhouse_schema_car_inventory_question and clickhouse_data_car_inventory_question. Generated connector files are saved outside the project under /Users/subbotaevgenij/mcp-connectors/<connector_name>/connector.py.
-      Generated Python connectors must be self-contained plain Python snippets for this MCP server. Do not import anything. Do not use pandas, mage_ai, requests, files, network, or external packages.
-      Generated Python connectors must define CONNECTOR as a dict, never as a string. Required exact shape:
-      CONNECTOR = {"name": "<same connector_name>", "description": "...", "input_schema": {"type": "object", "properties": {}}}
-      Generated Python connectors must define handler(args, run_query, helpers), not handler(*args, **kwargs). The handler receives args, run_query, helpers as positional parameters.
-      Generated Python connectors must call run_query(sql) and treat its result as a list of dict rows, not as a pandas DataFrame.
-      They must validate every referenced analytics table and column with helpers.analytics_table_exists and helpers.analytics_column_exists/helpers.analytics_columns before run_query. Never write a generated connector from guessed column names; if the needed column is not present in live schema, explain that instead of inventing it.
-      The real Prometheus samples table is analytics.prometheus_samples after schema discovery confirms it. Do not invent default.analytics_prometheus_samples.
-      Never print fake tool calls, fake XML/JSON tool responses, fake errorCode/data payloads, or paths from another machine. Tool results must come only from actual MCP tool calls returned by LibreChat.
-      Generated dashboard connectors may use helpers.grafana_dashboard_response after they query ClickHouse and build Grafana panels from discovered real columns. They must return browserUrl/browserShortUrl exactly as returned by the helper.
-      If the user explicitly names a generated connector, use that connector. If the user asks to change a generated connector, use update_generated_connector, then run the updated connector if a data answer is expected.
-      When using generated connectors, the final chat answer must include only the schema connector name, the data connector name, the saved paths returned by the tools, and the resulting ClickHouse data summary. Do not paste connector source code unless the user explicitly asks for it.
-      For Prometheus availability and operational dashboards, use synthetic_service_up for monitored service/database availability. Raw metric up is only scrape health for the synthetic exporter target.
-      Dashboard connectors must return a browser-ready Grafana URL and a short explanation from the rows they queried.
-      Never rewrite Grafana links, never invent d-solo URLs, and never use made-up dashboard UIDs. The user's browser must use http://localhost:3001. Do not use grafana:3000, grafana-server:3000, or localhost:3000.
+      Use these tools for analytics questions: create_and_run_generated_connector, update_generated_connector, run_generated_connector. Do not answer from memory.
+      Act immediately with tool calls. Do not write a plan, visible reasoning, fake tool JSON, SQL for the user, or raw MCP output.
+      Analytics means ClickHouse database analytics only. Generated connectors are ephemeral and deleted after run; never reuse old connector names.
+
+      Required flow for each new database/dashboard question:
+      1. Schema phase: call create_and_run_generated_connector exactly once for clickhouse_schema_<topic>. It should return helpers.analytics_schema_for_question("<user request>", include_views=True). For generic "what tables exist" questions, return helpers.analytics_schema(include_views=True).
+      2. Data phase: call create_and_run_generated_connector exactly once for clickhouse_data_<topic>. It must use only real tables/columns from schema, validate them, run SQL, and return rows.
+      3. Dashboard phase: only when the user asks for a graph/dashboard, call create_and_run_generated_connector exactly once for clickhouse_dashboard_<topic>. It must query ClickHouse and return helpers.grafana_dashboard_response(...).
+      If a phase fails, update/run the same connector at most once. Do not create extra connectors for the same phase.
+
+      Connector contract: plain Python, no imports or external packages. Define CONNECTOR as {"name": "<same connector_name>", "description": "...", "input_schema": {"type": "object", "properties": {}}}. Define handler(args, run_query, helpers). run_query(sql) returns list[dict].
+      Helpers allowed exactly: analytics_schema_for_question(question, include_views=True), analytics_schema(include_views=True), analytics_list_tables(include_views=True), analytics_table_exists(table), analytics_columns(table), analytics_column_exists(table, column), bounded_limit(value, default=100, max_value=1000), quote_ident(name), quote_string(value), sql_literal(value), safe_sql_identifier(name), grafana_clickhouse_target(sql, ref_id='A', format='time_series'), grafana_dashboard_response(dashboard, rows=None, metadata=None).
+      helpers.analytics_schema_for_question(question, include_views=True) returns compact all_tables plus detailed candidate_tables.
+      helpers.analytics_schema(include_views=True) returns {"database": "analytics", "tables": [{"name": "...", "rows": "...", "columns": [...], "column_types": {...}}]}.
+      helpers.analytics_columns(table) returns list[dict]. Validate every referenced table/column before run_query. Do not invent tables, columns, rows, metrics, URLs, or helper names.
+      Grafana URLs must come from grafana_dashboard_response and use http://localhost:3001.
+      Final answer: short Russian summary, connector names used, data result, and Grafana browserUrl/browserShortUrl when requested.

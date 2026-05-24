@@ -518,6 +518,9 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentic-data-stack-local}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentic-data-stack-local}
       LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
+      LLM_GATEWAY_REASONING_EFFORT: ${LLM_GATEWAY_REASONING_EFFORT:-none}
+      LLM_GATEWAY_REASONING_EFFORT_MODELS: ${LLM_GATEWAY_REASONING_EFFORT_MODELS:-qwen3}
+      LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS: ${LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS:-qwen3}
     ports:
       - "3344:3344"
 
@@ -545,6 +548,11 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
       GENERATED_CONNECTORS_DIR: /user-mcp-connectors
       GENERATED_CONNECTORS_PUBLIC_DIR: /Users/subbotaevgenij/mcp-connectors
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
+      LANGFUSE_BASE_URL: ${LANGFUSE_INTERNAL_URL:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentic-data-stack-local}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentic-data-stack-local}
+      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
     ports:
       - "3333:3333"
     volumes:

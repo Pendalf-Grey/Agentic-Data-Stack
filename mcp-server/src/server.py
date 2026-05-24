@@ -3,8 +3,12 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import threading
 import time
 import traceback
+import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -30,9 +34,101 @@ GENERATED_CONNECTORS_PUBLIC_DIR = os.getenv(
     "GENERATED_CONNECTORS_PUBLIC_DIR",
     str(GENERATED_CONNECTORS_DIR),
 ).rstrip("/")
+LANGFUSE_ENABLED = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "").rstrip("/")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_ENVIRONMENT = os.getenv("LANGFUSE_ENVIRONMENT", "local")
 
 # Python-модули generated-коннекторов кэшируются, но при create/update конкретный модуль перечитывается.
 GENERATED_CONNECTOR_CACHE = {}
+TRACE_CONTEXT = threading.local()
+
+
+def utc_now_iso():
+    """Возвращает ISO timestamp для Langfuse."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def json_bytes(value):
+    """Сериализует Python-объект в JSON bytes."""
+    return json.dumps(value, ensure_ascii=False).encode("utf-8")
+
+
+def truncate_for_trace(value, limit=8000):
+    """Ограничивает payload для Langfuse, чтобы trace не превращался в огромный дамп."""
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        text = str(value)
+    if len(text) <= limit:
+        return value
+    return {"truncated": True, "chars": len(text), "preview": text[:limit]}
+
+
+def redacted_tool_args(tool_name, args):
+    """Убирает большие source_code payloads из trace input."""
+    clean = dict(args or {})
+    if tool_name in {"create_generated_connector", "update_generated_connector"} and "source_code" in clean:
+        source = str(clean.get("source_code") or "")
+        clean["source_code"] = {"chars": len(source), "preview": source[:600]}
+    return clean
+
+
+def langfuse_auth_header():
+    """Готовит Basic Auth для Langfuse ingestion API."""
+    token = base64.b64encode(f"{LANGFUSE_PUBLIC_KEY}:{LANGFUSE_SECRET_KEY}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
+
+
+def send_langfuse_batch(events):
+    """Отправляет batch событий в Langfuse. Ошибка трейсинга не ломает MCP."""
+    if not (LANGFUSE_ENABLED and LANGFUSE_BASE_URL and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+        return
+    payload = {"batch": events, "metadata": {"source": "agentic-data-stack-mcp-server"}}
+    try:
+        request = Request(
+            f"{LANGFUSE_BASE_URL}/api/public/ingestion",
+            data=json_bytes(payload),
+            headers={"Authorization": langfuse_auth_header(), "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            if response.status not in (200, 207):
+                print(f"Langfuse MCP ingestion returned HTTP {response.status}")
+    except Exception as error:
+        print(f"Langfuse MCP ingestion skipped: {error}")
+
+
+def send_langfuse_span(name, started_at, ended_at, input_value=None, output_value=None, metadata=None, level="DEFAULT", status_message=None):
+    """Пишет span в текущий trace, если tool call уже создал trace context."""
+    trace_id = getattr(TRACE_CONTEXT, "trace_id", None)
+    parent_id = getattr(TRACE_CONTEXT, "span_id", None)
+    if not trace_id:
+        return
+    body = {
+        "id": str(uuid.uuid4()),
+        "traceId": trace_id,
+        "parentObservationId": parent_id,
+        "name": name,
+        "startTime": started_at,
+        "endTime": ended_at,
+        "input": truncate_for_trace(input_value),
+        "output": truncate_for_trace(output_value),
+        "metadata": metadata or {},
+        "level": level,
+        "statusMessage": status_message,
+    }
+    send_langfuse_batch(
+        [
+            {
+                "id": str(uuid.uuid4()),
+                "type": "span-create",
+                "timestamp": utc_now_iso(),
+                "body": body,
+            }
+        ]
+    )
 
 
 def json_rpc(request_id, result):
@@ -135,36 +231,57 @@ def analytics_table_argument(args):
 
 def run_query(query):
     """Выполняет только SELECT в ClickHouse и возвращает JSONEachRow как list[dict]."""
+    started_at = utc_now_iso()
     normalized = query.strip().rstrip(";")
-    if not re.match(r"^select\b", normalized, flags=re.IGNORECASE):
-        raise ValueError("Only SELECT queries are allowed.")
-    if re.search(
-        r"\b(insert|update|delete|alter|drop|truncate|create|grant|revoke|optimize)\b",
-        normalized,
-        flags=re.IGNORECASE,
-    ):
-        raise ValueError("Only read-only SELECT queries are allowed.")
-
-    url = f"{CLICKHOUSE_HOST}/?{urlencode({'database': CLICKHOUSE_DATABASE})}"
-    request = Request(
-        url,
-        data=f"{normalized}\nFORMAT JSONEachRow".encode("utf-8"),
-        headers={
-            "X-ClickHouse-User": CLICKHOUSE_USER,
-            "X-ClickHouse-Key": CLICKHOUSE_PASSWORD,
-            "Content-Type": "text/plain; charset=utf-8",
-        },
-        method="POST",
-    )
     try:
-        with urlopen(request, timeout=90) as response:
-            body = response.read().decode("utf-8").strip()
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(detail or str(error)) from error
-    if not body:
-        return []
-    return [json.loads(line) for line in body.splitlines() if line.strip()]
+        if not re.match(r"^select\b", normalized, flags=re.IGNORECASE):
+            raise ValueError("Only SELECT queries are allowed.")
+        if re.search(
+            r"\b(insert|update|delete|alter|drop|truncate|create|grant|revoke|optimize)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        ):
+            raise ValueError("Only read-only SELECT queries are allowed.")
+
+        url = f"{CLICKHOUSE_HOST}/?{urlencode({'database': CLICKHOUSE_DATABASE})}"
+        request = Request(
+            url,
+            data=f"{normalized}\nFORMAT JSONEachRow".encode("utf-8"),
+            headers={
+                "X-ClickHouse-User": CLICKHOUSE_USER,
+                "X-ClickHouse-Key": CLICKHOUSE_PASSWORD,
+                "Content-Type": "text/plain; charset=utf-8",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=90) as response:
+                body = response.read().decode("utf-8").strip()
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(detail or str(error)) from error
+        rows = [] if not body else [json.loads(line) for line in body.splitlines() if line.strip()]
+        send_langfuse_span(
+            "mcp.clickhouse.query",
+            started_at,
+            utc_now_iso(),
+            input_value={"query": normalized},
+            output_value={"row_count": len(rows), "sample": rows[:5]},
+            metadata={"database": CLICKHOUSE_DATABASE},
+        )
+        return rows
+    except Exception as error:
+        send_langfuse_span(
+            "mcp.clickhouse.query",
+            started_at,
+            utc_now_iso(),
+            input_value={"query": normalized},
+            output_value={"error": str(error)},
+            metadata={"database": CLICKHOUSE_DATABASE},
+            level="ERROR",
+            status_message=str(error),
+        )
+        raise
 
 
 def analytics_table_exists(table):
@@ -184,8 +301,26 @@ def analytics_table_exists(table):
     return table_name
 
 
-def analytics_columns(table):
-    """Возвращает колонки таблицы из system.columns."""
+def analytics_list_tables(include_views=True):
+    """Возвращает список таблиц и VIEW из analytics для schema-discovery коннекторов."""
+    engine_filter = "" if include_views else "AND engine NOT LIKE '%View%'"
+    return run_query(
+        f"""
+        SELECT
+          name,
+          engine,
+          ifNull(total_rows, 0) AS rows,
+          formatReadableSize(ifNull(total_bytes, 0)) AS bytes
+        FROM system.tables
+        WHERE database = 'analytics'
+          {engine_filter}
+        ORDER BY name
+        """
+    )
+
+
+def analytics_table_columns(table):
+    """Возвращает имя таблицы и колонки из system.columns для внутренних проверок."""
     table_name = analytics_table_exists(table)
     rows = run_query(
         f"""
@@ -199,10 +334,80 @@ def analytics_columns(table):
     return table_name, rows
 
 
+def analytics_columns(table):
+    """Возвращает список колонок таблицы из system.columns для generated-коннекторов."""
+    _, rows = analytics_table_columns(table)
+    return rows
+
+
+def analytics_schema(include_views=True):
+    """Возвращает таблицы/VIEW analytics вместе с колонками для первого schema-коннектора."""
+    schema = []
+    for table in analytics_list_tables(include_views=include_views):
+        table_name = table.get("name")
+        columns = analytics_columns(table_name)
+        schema.append(
+            {
+                "name": table_name,
+                "engine": table.get("engine"),
+                "rows": table.get("rows"),
+                "columns": [column.get("name") for column in columns],
+                "column_types": {column.get("name"): column.get("type") for column in columns},
+            }
+        )
+    return {"database": "analytics", "tables": schema}
+
+
+def question_schema_terms(question):
+    """Подбирает поисковые термины по вопросу пользователя для компактной schema discovery."""
+    text = str(question or "").lower()
+    terms = set(re.findall(r"[a-zа-яё0-9_]+", text))
+    aliases = {
+        "машин": ["car", "vehicle", "auto", "city", "make", "model"],
+        "машина": ["car", "vehicle", "auto", "city", "make", "model"],
+        "машины": ["car", "vehicle", "auto", "city", "make", "model"],
+        "авто": ["car", "vehicle", "auto", "city", "make", "model"],
+        "автомоб": ["car", "vehicle", "auto", "city", "make", "model"],
+        "город": ["city"],
+        "городе": ["city"],
+        "городам": ["city"],
+        "граф": ["dashboard", "grafana", "time", "city"],
+        "grafana": ["dashboard", "grafana"],
+    }
+    for marker, values in aliases.items():
+        if marker in text:
+            terms.update(values)
+    return terms
+
+
+def analytics_schema_for_question(question, include_views=True):
+    """Возвращает краткую схему и наиболее вероятные таблицы под вопрос пользователя."""
+    schema = analytics_schema(include_views=include_views)
+    terms = question_schema_terms(question)
+    candidates = []
+    all_tables = []
+    for table in schema["tables"]:
+        columns = table.get("columns") or []
+        haystack = " ".join([str(table.get("name", "")), *[str(column) for column in columns]]).lower()
+        score = sum(1 for term in terms if term and term in haystack)
+        all_tables.append({"name": table.get("name"), "rows": table.get("rows")})
+        if score > 0:
+            candidates.append({**table, "score": score})
+    candidates.sort(key=lambda row: (-row.get("score", 0), row.get("name") or ""))
+    if not candidates:
+        candidates = [table for table in schema["tables"] if int(table.get("rows") or 0) > 0]
+    return {
+        "database": "analytics",
+        "question": question,
+        "all_tables": all_tables,
+        "candidate_tables": candidates[:5],
+    }
+
+
 def analytics_column_exists(table, column):
     """Проверяет колонку перед тем, как generated-коннектор использует ее в SQL."""
     column_name = safe_sql_identifier(column)
-    table_name, columns = analytics_columns(table)
+    table_name, columns = analytics_table_columns(table)
     if not any(row.get("name") == column_name for row in columns):
         raise ValueError(f"Unknown column {column_name} in analytics.{table_name}")
     return table_name, column_name, columns
@@ -211,6 +416,9 @@ def analytics_column_exists(table, column):
 class HelperBag:
     """Объект helpers, который передается в generated Python-коннекторы."""
 
+    analytics_list_tables = staticmethod(analytics_list_tables)
+    analytics_schema = staticmethod(analytics_schema)
+    analytics_schema_for_question = staticmethod(analytics_schema_for_question)
     analytics_table_exists = staticmethod(analytics_table_exists)
     analytics_columns = staticmethod(analytics_columns)
     analytics_column_exists = staticmethod(analytics_column_exists)
@@ -269,7 +477,12 @@ def validate_generated_connector_source(connector_name, source_code):
             f"Use: CONNECTOR = {{'name': '{safe_name}', 'description': '...', "
             "'input_schema': {'type': 'object', 'properties': {}}}}."
         )
-    if "analytics." in source and "analytics_column_exists" not in source and "analytics_columns" not in source:
+    if (
+        "run_query" in source
+        and re.search(r"['\"][^'\"]*analytics\.", source)
+        and "analytics_column_exists" not in source
+        and "analytics_columns" not in source
+    ):
         raise ValueError(
             "Generated connectors that query analytics.* must validate referenced columns "
             "with helpers.analytics_column_exists or helpers.analytics_columns before run_query."
@@ -304,12 +517,56 @@ def ensure_generated_connector_dir(connector_name):
     generated_connector_path(connector_name).parent.mkdir(parents=True, exist_ok=True)
 
 
+def write_generated_connector_file(file_path, source):
+    """Атомарно записывает connector.py, чтобы следующий tool call не увидел полузаписанный файл."""
+    tmp_path = file_path.with_suffix(".py.tmp")
+    tmp_path.write_text(source, encoding="utf-8")
+    tmp_path.replace(file_path)
+
+
+def wait_for_generated_connector_file(file_path, timeout_seconds=3):
+    """Ждет появления connector.py на bind mount между create и run."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if file_path.is_file():
+            return
+        time.sleep(0.05)
+    raise FileNotFoundError(file_path)
+
+
+def delete_generated_connector(connector_name):
+    """Удаляет временный generated-коннектор после запуска, чтобы он не влиял на следующие запросы."""
+    safe_name = safe_generated_connector_name(connector_name)
+    GENERATED_CONNECTOR_CACHE.pop(safe_name, None)
+    connector_dir = generated_connector_path(safe_name).parent
+    if connector_dir.exists() and connector_dir.parent == GENERATED_CONNECTORS_DIR:
+        shutil.rmtree(connector_dir)
+
+
+def cleanup_generated_connectors_dir():
+    """Очищает старые generated-коннекторы при старте MCP server."""
+    ensure_generated_connectors_dir()
+    for connector_name in list_generated_connector_files():
+        try:
+            delete_generated_connector(connector_name)
+        except Exception as error:
+            print(f"Failed to delete generated connector {connector_name}: {error}")
+
+
 def validate_generated_connector_module(module, expected_name=""):
     """Проверяет контракт импортированного Python-коннектора."""
     connector = getattr(module, "CONNECTOR", None)
     handler = getattr(module, "handler", None)
     if not isinstance(connector, dict):
         raise ValueError("Generated connector must define CONNECTOR dict.")
+    if "input_schema" not in connector and isinstance(connector.get("inputSchema"), dict):
+        connector["input_schema"] = connector["inputSchema"]
+    if connector.get("input_schema") == {}:
+        connector["input_schema"] = {"type": "object", "properties": {}}
+    if isinstance(connector.get("input_schema"), dict) and "type" not in connector["input_schema"]:
+        connector["input_schema"]["type"] = "object"
+    if isinstance(connector.get("input_schema"), dict) and "properties" not in connector["input_schema"]:
+        connector["input_schema"]["properties"] = {}
     connector_name = safe_generated_connector_name(connector.get("name"))
     if expected_name and connector_name != safe_generated_connector_name(expected_name):
         raise ValueError(f"Generated connector name mismatch: expected {expected_name}, got {connector_name}.")
@@ -328,6 +585,7 @@ def load_generated_connector(connector_name, force=False):
     if not force and safe_name in GENERATED_CONNECTOR_CACHE:
         return GENERATED_CONNECTOR_CACHE[safe_name]
     file_path = generated_connector_path(safe_name)
+    wait_for_generated_connector_file(file_path)
     module_name = f"generated_{safe_name}_{int(time.time() * 1000)}"
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
@@ -360,7 +618,11 @@ def list_generated_connector_files():
 
 
 def load_generated_connector_tools():
-    """Добавляет saved Python-коннекторы в tools/list, чтобы LibreChat мог вызвать их по имени."""
+    """Готовит metadata saved Python-коннекторов, если понадобится отладочный список.
+
+    В обычный tools/list эти коннекторы больше не добавляются.
+    Иначе модель видит старые task-specific tools и может выбрать их вместо создания свежего connector.
+    """
     tools = []
     for connector_name in list_generated_connector_files():
         try:
@@ -378,18 +640,42 @@ def load_generated_connector_tools():
 
 
 def call_generated_connector(connector_name, args):
-    """Запускает generated-коннектор и возвращает его результат модели."""
-    connector = load_generated_connector(connector_name, force=True)
-    result = connector["handler"](args or {}, run_query, HELPERS)
-    return {
-        "connector_name": connector["name"],
-        "saved_path": connector["public_path"],
-        "result": result,
-    }
+    """Запускает generated-коннектор, возвращает результат и удаляет временный файл."""
+    safe_name = safe_generated_connector_name(connector_name)
+    connector = load_generated_connector(safe_name, force=True)
+    try:
+        result = connector["handler"](args or {}, run_query, HELPERS)
+        return {
+            "connector_name": connector["name"],
+            "saved_path": connector["public_path"],
+            "ephemeral": True,
+            "deleted_after_run": True,
+            "result": result,
+        }
+    finally:
+        delete_generated_connector(safe_name)
 
 
-def clickhouse_grafana_target(raw_sql, ref_id="A", fmt=1):
+def call_loaded_generated_connector(connector, args):
+    """Запускает уже загруженный generated-коннектор и удаляет временный файл."""
+    safe_name = safe_generated_connector_name(connector["name"])
+    try:
+        result = connector["handler"](args or {}, run_query, HELPERS)
+        return {
+            "connector_name": connector["name"],
+            "saved_path": connector["public_path"],
+            "ephemeral": True,
+            "deleted_after_run": True,
+            "result": result,
+        }
+    finally:
+        delete_generated_connector(safe_name)
+
+
+def clickhouse_grafana_target(raw_sql, ref_id="A", fmt=1, format=None):
     """Формирует target для Grafana ClickHouse datasource."""
+    if format is not None:
+        fmt = format
     return {
         "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"},
         "format": fmt,
@@ -435,12 +721,36 @@ def create_grafana_short_url_for_path(path):
 
 def create_grafana_dashboard(dashboard):
     """Отправляет dashboard JSON в Grafana и возвращает ответ Grafana API."""
-    return http_json(
-        "POST",
-        f"{GRAFANA_API_URL}/api/dashboards/db",
-        {"dashboard": dashboard, "folderId": 0, "overwrite": True, "message": "Created by Agentic Data Stack MCP"},
-        {"Authorization": grafana_auth_header()},
-    )
+    started_at = utc_now_iso()
+    payload = {"dashboard": dashboard, "folderId": 0, "overwrite": True, "message": "Created by Agentic Data Stack MCP"}
+    try:
+        result = http_json(
+            "POST",
+            f"{GRAFANA_API_URL}/api/dashboards/db",
+            payload,
+            {"Authorization": grafana_auth_header()},
+        )
+        send_langfuse_span(
+            "mcp.grafana.create_dashboard",
+            started_at,
+            utc_now_iso(),
+            input_value={"title": dashboard.get("title"), "uid": dashboard.get("uid"), "panels": len(dashboard.get("panels") or [])},
+            output_value=result,
+            metadata={"grafanaApiUrl": GRAFANA_API_URL},
+        )
+        return result
+    except Exception as error:
+        send_langfuse_span(
+            "mcp.grafana.create_dashboard",
+            started_at,
+            utc_now_iso(),
+            input_value={"title": dashboard.get("title"), "uid": dashboard.get("uid")},
+            output_value={"error": str(error)},
+            metadata={"grafanaApiUrl": GRAFANA_API_URL},
+            level="ERROR",
+            status_message=str(error),
+        )
+        raise
 
 
 def generated_grafana_dashboard_response(dashboard, rows=None, metadata=None):
@@ -475,61 +785,89 @@ def base_tools():
         "It must define handler(args, run_query, helpers). Use run_query(sql) and helpers only."
     )
     return [
-        {"name": "list_generated_connectors", "description": "List generated Python MCP connectors.", "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "describe_generated_connector", "description": "Describe one saved generated Python MCP connector.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}}, "required": ["connector_name"]}},
-        {"name": "create_generated_connector", "description": connector_contract, "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}, "overwrite": {"type": "boolean", "default": False}}, "required": ["connector_name", "source_code"]}},
-        {"name": "update_generated_connector", "description": connector_contract, "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "source_code": {"type": "string"}}, "required": ["connector_name", "source_code"]}},
-        {"name": "run_generated_connector", "description": "Run a saved generated Python MCP connector by name.", "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "arguments": {"type": "object", "default": {}}}, "required": ["connector_name"]}},
+        {
+            "name": "create_and_run_generated_connector",
+            "description": (
+                connector_contract
+                + " Create, validate, run, and delete the connector in one tool call. "
+                "Prefer this for schema, data, and dashboard phases."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "connector_name": {"type": "string", "description": "Generated connector name, starting with clickhouse_."},
+                    "source_code": {"type": "string", "description": "Complete Python source code for the generated connector."},
+                    "arguments": {"type": "object", "default": {}},
+                },
+                "required": ["connector_name", "source_code"],
+            },
+        },
+        {
+            "name": "create_generated_connector",
+            "description": (
+                connector_contract
+                + " Connectors are ephemeral: run_generated_connector deletes the connector immediately after it runs."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "connector_name": {"type": "string", "description": "Generated connector name, starting with clickhouse_."},
+                    "source_code": {"type": "string", "description": "Complete Python source code for the generated connector."},
+                    "overwrite": {"type": "boolean", "default": False},
+                },
+                "required": ["connector_name", "source_code"],
+            },
+        },
+        {
+            "name": "update_generated_connector",
+            "description": (
+                connector_contract
+                + " Use this only to replace a connector created in the current answer flow. "
+                "Connectors are ephemeral and are deleted by run_generated_connector."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "connector_name": {"type": "string", "description": "Generated connector name, starting with clickhouse_."},
+                    "source_code": {"type": "string", "description": "Complete Python source code for the generated connector."},
+                },
+                "required": ["connector_name", "source_code"],
+            },
+        },
+        {
+            "name": "run_generated_connector",
+            "description": "Run a generated Python MCP connector by name. The connector is deleted immediately after this run.",
+            "inputSchema": {"type": "object", "properties": {"connector_name": {"type": "string"}, "arguments": {"type": "object", "default": {}}}, "required": ["connector_name"]},
+        },
     ]
 
 
-def handle_tool_call(request_id, name, args):
-    """Маршрутизирует tools/call: lifecycle tools или запуск saved generated-коннектора."""
+def execute_tool_call(request_id, name, args):
+    """Выполняет tools/call: lifecycle tools или запуск generated-коннектора."""
     args = args or {}
 
-    if name == "list_generated_connectors":
-        rows = []
-        for connector_name in list_generated_connector_files():
-            try:
-                connector = load_generated_connector(connector_name, force=True)
-                rows.append({"name": connector["name"], "description": connector["description"], "saved_path": connector["public_path"]})
-            except Exception as error:
-                rows.append({"name": connector_name, "saved_path": public_generated_connector_path(connector_name), "error": str(error)})
-        return json_rpc(request_id, json_text_result(rows))
-
-    if name == "describe_generated_connector":
-        connector = load_generated_connector(args.get("connector_name"), force=True)
-        return json_rpc(
-            request_id,
-            json_text_result(
-                {
-                    "name": connector["name"],
-                    "description": connector["description"],
-                    "inputSchema": connector["input_schema"],
-                    "saved_path": connector["public_path"],
-                }
-            ),
-        )
-
-    if name in ["create_generated_connector", "update_generated_connector"]:
+    if name in ["create_generated_connector", "update_generated_connector", "create_and_run_generated_connector"]:
         connector_name = safe_generated_connector_name(args.get("connector_name"))
         source = validate_generated_connector_source(connector_name, args.get("source_code"))
         file_path = generated_connector_path(connector_name)
-        overwrite = name == "update_generated_connector" or args.get("overwrite") is True
+        overwrite = True
         ensure_generated_connector_dir(connector_name)
-        if file_path.exists() and not overwrite:
-            raise ValueError(f"Generated connector already exists: {public_generated_connector_path(connector_name)}")
-        file_path.write_text(source, encoding="utf-8")
+        write_generated_connector_file(file_path, source)
         GENERATED_CONNECTOR_CACHE.pop(connector_name, None)
         connector = load_generated_connector(connector_name, force=True)
+        if name == "create_and_run_generated_connector":
+            result = call_loaded_generated_connector(connector, args.get("arguments") or {})
+            result["status"] = "created_and_run"
+            return json_rpc(request_id, json_text_result(result))
         return json_rpc(
             request_id,
             json_text_result(
                 {
                     "connector_name": connector["name"],
                     "saved_path": connector["public_path"],
+                    "ephemeral": True,
                     "status": "created" if name == "create_generated_connector" else "updated",
-                    "instruction": "Now call run_generated_connector, or call the connector tool by its name, to return ClickHouse data to the user.",
+                    "instruction": "Now call run_generated_connector with connector_name. This connector will be deleted immediately after it runs.",
                 }
             ),
         )
@@ -537,10 +875,69 @@ def handle_tool_call(request_id, name, args):
     if name == "run_generated_connector":
         return json_rpc(request_id, json_text_result(call_generated_connector(args.get("connector_name"), args.get("arguments") or {})))
 
-    if isinstance(name, str) and name.startswith("clickhouse_"):
-        return json_rpc(request_id, json_text_result(call_generated_connector(name, args)))
-
     return json_rpc_error(request_id, -32602, f"Unknown tool: {name}")
+
+
+def handle_tool_call(request_id, name, args):
+    """Оборачивает MCP tool call в Langfuse trace и выполняет tool."""
+    started_at = utc_now_iso()
+    trace_id = str(uuid.uuid4())
+    span_id = str(uuid.uuid4())
+    previous_trace_id = getattr(TRACE_CONTEXT, "trace_id", None)
+    previous_span_id = getattr(TRACE_CONTEXT, "span_id", None)
+    TRACE_CONTEXT.trace_id = trace_id
+    TRACE_CONTEXT.span_id = span_id
+    args = args or {}
+    status = "ok"
+    response = None
+    error_text = None
+    try:
+        response = execute_tool_call(request_id, name, args)
+        return response
+    except Exception as error:
+        status = "error"
+        error_text = str(error)
+        raise
+    finally:
+        ended_at = utc_now_iso()
+        connector_name = args.get("connector_name") if isinstance(args, dict) else None
+        events = [
+            {
+                "id": str(uuid.uuid4()),
+                "type": "trace-create",
+                "timestamp": utc_now_iso(),
+                "body": {
+                    "id": trace_id,
+                    "timestamp": started_at,
+                    "name": f"mcp.tool.{name}",
+                    "input": redacted_tool_args(name, args),
+                    "output": truncate_for_trace(response if response is not None else {"error": error_text}),
+                    "environment": LANGFUSE_ENVIRONMENT,
+                    "tags": ["agentic-data-stack", "mcp-server", "clickhouse-analytics"],
+                    "metadata": {"tool": name, "connector_name": connector_name, "status": status},
+                },
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "type": "span-create",
+                "timestamp": utc_now_iso(),
+                "body": {
+                    "id": span_id,
+                    "traceId": trace_id,
+                    "name": f"mcp.tool.{name}",
+                    "startTime": started_at,
+                    "endTime": ended_at,
+                    "input": redacted_tool_args(name, args),
+                    "output": truncate_for_trace(response if response is not None else {"error": error_text}),
+                    "metadata": {"tool": name, "connector_name": connector_name},
+                    "level": "ERROR" if status == "error" else "DEFAULT",
+                    "statusMessage": error_text,
+                },
+            },
+        ]
+        send_langfuse_batch(events)
+        TRACE_CONTEXT.trace_id = previous_trace_id
+        TRACE_CONTEXT.span_id = previous_span_id
 
 
 def handle_rpc(payload):
@@ -558,7 +955,7 @@ def handle_rpc(payload):
             },
         )
     if method == "tools/list":
-        return json_rpc(request_id, {"tools": [*base_tools(), *load_generated_connector_tools()]})
+        return json_rpc(request_id, {"tools": base_tools()})
     if method == "tools/call":
         return handle_tool_call(request_id, params.get("name"), params.get("arguments") or {})
     if method == "notifications/initialized":
@@ -608,7 +1005,7 @@ class McpHttpHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ensure_generated_connectors_dir()
+    cleanup_generated_connectors_dir()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), McpHttpHandler)
     print(f"ClickHouse MCP Python server listening on {PORT}")
     server.serve_forever()

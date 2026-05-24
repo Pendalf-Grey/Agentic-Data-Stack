@@ -4,6 +4,7 @@ import os
 import time
 import traceback
 import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -21,6 +22,22 @@ LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "").rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_ENVIRONMENT = os.getenv("LANGFUSE_ENVIRONMENT", "local")
+REASONING_EFFORT = os.getenv("LLM_GATEWAY_REASONING_EFFORT", "none").strip()
+REASONING_EFFORT_MODELS = [
+    item.strip().lower()
+    for item in os.getenv("LLM_GATEWAY_REASONING_EFFORT_MODELS", "qwen3").split(",")
+    if item.strip()
+]
+FORCE_TOOL_CHOICE_MODELS = [
+    item.strip().lower()
+    for item in os.getenv("LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS", "qwen3").split(",")
+    if item.strip()
+]
+
+
+def utc_now_iso():
+    """Возвращает ISO timestamp с миллисекундами для Langfuse."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def json_bytes(value):
@@ -35,6 +52,93 @@ def parse_json_body(handler):
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
+
+
+def should_set_reasoning_effort(model):
+    """Проверяет, нужно ли отключить долгий reasoning для локальной reasoning-модели."""
+    model_name = str(model or "").lower()
+    return bool(REASONING_EFFORT and any(model_name.startswith(prefix) for prefix in REASONING_EFFORT_MODELS))
+
+
+def model_matches(model, prefixes):
+    """Проверяет модель по списку префиксов из env."""
+    model_name = str(model or "").lower()
+    return any(model_name.startswith(prefix) for prefix in prefixes)
+
+
+def analytics_request_text(messages):
+    """Собирает пользовательский текст, чтобы не форсировать tools для обычного small talk."""
+    if not isinstance(messages, list):
+        return ""
+    return "\n".join(str(message.get("content") or "") for message in messages if message.get("role") == "user").lower()
+
+
+def is_analytics_request(messages):
+    """Определяет запросы, где включенный MCP должен идти по generated-connector flow."""
+    text = analytics_request_text(messages)
+    markers = [
+        "clickhouse",
+        "grafana",
+        "prometheus",
+        "elastic",
+        "бд",
+        "таблиц",
+        "колон",
+        "граф",
+        "дашборд",
+        "визуализ",
+        "город",
+        "машин",
+        "авто",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def tool_messages_text(messages):
+    """Собирает tool outputs LibreChat, чтобы понять текущую фазу connector flow."""
+    if not isinstance(messages, list):
+        return ""
+    return "\n".join(str(message.get("content") or "") for message in messages if message.get("role") == "tool")
+
+
+def wants_dashboard(messages):
+    """Проверяет, просил ли пользователь график или dashboard."""
+    text = analytics_request_text(messages)
+    return any(marker in text for marker in ["граф", "визуализ", "grafana", "dashboard", "дашборд"])
+
+
+def should_force_tool_choice(body):
+    """Форсирует tool call для qwen3, пока generated-connector flow не дошел до нужной фазы."""
+    if not isinstance(body, dict) or not body.get("tools"):
+        return False
+    if not model_matches(body.get("model"), FORCE_TOOL_CHOICE_MODELS):
+        return False
+    messages = body.get("messages") or []
+    if not is_analytics_request(messages):
+        return False
+    tool_text = tool_messages_text(messages)
+    has_schema = "clickhouse_schema_" in tool_text and '"deleted_after_run": true' in tool_text
+    has_data = "clickhouse_data_" in tool_text and '"deleted_after_run": true' in tool_text
+    has_dashboard = "clickhouse_dashboard_" in tool_text and '"deleted_after_run": true' in tool_text
+    if not has_schema:
+        return True
+    if not has_data:
+        return True
+    if wants_dashboard(messages) and not has_dashboard:
+        return True
+    return False
+
+
+def prepare_upstream_body(body):
+    """Добавляет backend-параметры, которые LibreChat сам не передает."""
+    if not isinstance(body, dict):
+        return body
+    prepared = dict(body)
+    if "reasoning_effort" not in prepared and should_set_reasoning_effort(prepared.get("model")):
+        prepared["reasoning_effort"] = REASONING_EFFORT
+    if should_force_tool_choice(prepared):
+        prepared["tool_choice"] = "required"
+    return prepared
 
 
 def send_json(handler, status, value):
@@ -109,7 +213,7 @@ def send_langfuse_trace(body, output, usage, started_at, ended_at, status):
 
     trace_id = str(uuid.uuid4())
     generation_id = str(uuid.uuid4())
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now = utc_now_iso()
     auth = base64.b64encode(f"{LANGFUSE_PUBLIC_KEY}:{LANGFUSE_SECRET_KEY}".encode()).decode()
     model = body.get("model") or "unknown-model"
 
@@ -203,9 +307,9 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             send_json(self, 404, {"error": "Not found"})
             return
-        started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        started_at = utc_now_iso()
         try:
-            body = parse_json_body(self)
+            body = prepare_upstream_body(parse_json_body(self))
             with upstream_request("/chat/completions", method="POST", body=body, stream=bool(body.get("stream"))) as response:
                 if not body.get("stream"):
                     raw = response.read()
@@ -216,7 +320,7 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
                         extract_completion_text(data) or data,
                         usage_from_completion(data),
                         started_at,
-                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        utc_now_iso(),
                         response.status,
                     )
                     return
@@ -245,7 +349,7 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
                     "".join(streamed_output),
                     None,
                     started_at,
-                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    utc_now_iso(),
                     response.status,
                 )
         except Exception as error:
