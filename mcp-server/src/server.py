@@ -42,6 +42,12 @@ LANGFUSE_ENVIRONMENT = os.getenv("LANGFUSE_ENVIRONMENT", "local")
 
 # Python-модули generated-коннекторов кэшируются, но при create/update конкретный модуль перечитывается.
 GENERATED_CONNECTOR_CACHE = {}
+TRANSLIT_CHARS = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z",
+    "и": "i", "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh",
+    "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
 TRACE_CONTEXT = threading.local()
 
 
@@ -396,11 +402,13 @@ def analytics_schema_for_question(question, include_views=True):
     candidates.sort(key=lambda row: (-row.get("score", 0), row.get("name") or ""))
     if not candidates:
         candidates = [table for table in schema["tables"] if int(table.get("rows") or 0) > 0]
+    candidate_tables = candidates[:5]
     return {
         "database": "analytics",
         "question": question,
         "all_tables": all_tables,
-        "candidate_tables": candidates[:5],
+        "candidate_tables": candidate_tables,
+        "tables": candidate_tables,
     }
 
 
@@ -433,9 +441,20 @@ class HelperBag:
 HELPERS = HelperBag()
 
 
+def normalize_generated_connector_name(value):
+    """Приводит имя generated-коннектора к безопасному ASCII slug."""
+    text = str(value or "").strip()
+    text = "".join(TRANSLIT_CHARS.get(char, char) for char in text.lower())
+    text = re.sub(r"[^a-z0-9_]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    if text and text[0].isdigit():
+        text = f"clickhouse_{text}"
+    return text[:80]
+
+
 def safe_generated_connector_name(value):
     """Валидирует имя generated-коннектора и запрещает выход из папки хранения."""
-    text = str(value or "").strip()
+    text = normalize_generated_connector_name(value)
     if not re.match(r"^[a-z][a-z0-9_]{2,80}$", text):
         raise ValueError(f"Unsafe generated connector name: {text}")
     if not text.startswith("clickhouse_"):
@@ -459,6 +478,10 @@ def validate_generated_connector_source(connector_name, source_code):
     """Проверяет Python-код generated-коннектора до записи на диск."""
     safe_name = safe_generated_connector_name(connector_name)
     source = str(source_code or "").strip()
+    if source.count("\n") <= 1 and "\\n" in source:
+        # Некоторые локальные модели возвращают source_code как одну строку с literal "\n".
+        source = source.replace("\\n", "\n").replace("\\t", "    ")
+    source = re.sub(r";\s*(def\s+handler\s*\()", r"\n\n\1", source)
     if not source:
         raise ValueError("Generated connector source_code is required.")
     if len(source) > 30000:
@@ -471,7 +494,8 @@ def validate_generated_connector_source(connector_name, source_code):
             "Use: CONNECTOR = {'name': '<connector_name>', 'description': '...', "
             "'input_schema': {'type': 'object', 'properties': {}}}."
         )
-    if not re.search(rf"['\"]name['\"]\s*:\s*['\"]{re.escape(safe_name)}['\"]", source):
+    name_match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", source)
+    if not name_match or safe_generated_connector_name(name_match.group(1)) != safe_name:
         raise ValueError(
             f"Generated connector source must export name {safe_name} inside CONNECTOR dict. "
             f"Use: CONNECTOR = {{'name': '{safe_name}', 'description': '...', "
@@ -591,9 +615,19 @@ def load_generated_connector(connector_name, force=False):
     if spec is None or spec.loader is None:
         raise ValueError(f"Cannot load generated connector: {public_generated_connector_path(safe_name)}")
     module = importlib.util.module_from_spec(spec)
+    module.__dict__.update(
+        {
+            "quote_ident": quote_ident,
+            "quote_string": quote_string,
+            "sql_literal": sql_literal,
+            "safe_sql_identifier": safe_sql_identifier,
+            "bounded_limit": bounded_limit,
+        }
+    )
     spec.loader.exec_module(module)
-    validate_generated_connector_module(module, safe_name)
+    connector_name = validate_generated_connector_module(module, safe_name)
     connector = dict(module.CONNECTOR)
+    connector["name"] = connector_name
     connector["handler"] = module.handler
     connector["file_path"] = str(file_path)
     connector["public_path"] = public_generated_connector_path(safe_name)
@@ -672,16 +706,57 @@ def call_loaded_generated_connector(connector, args):
         delete_generated_connector(safe_name)
 
 
+def grafana_target_format(value):
+    """Переводит человекочитаемый format в формат Grafana ClickHouse datasource."""
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_")
+        if normalized in {"time_series", "timeseries", "time"}:
+            return 0
+        if normalized in {"table", "logs"}:
+            return 1
+    return value
+
+
 def clickhouse_grafana_target(raw_sql, ref_id="A", fmt=1, format=None):
     """Формирует target для Grafana ClickHouse datasource."""
     if format is not None:
         fmt = format
     return {
         "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"},
-        "format": fmt,
+        "format": grafana_target_format(fmt),
         "rawSql": raw_sql,
         "refId": ref_id,
     }
+
+
+def sql_has_time_field(raw_sql):
+    """Проверяет, похож ли SQL на time series запрос с колонкой time."""
+    sql = str(raw_sql or "").lower()
+    return bool(re.search(r"\bas\s+time\b|\btime\s*,|\btime\s+from\b", sql))
+
+
+def normalize_grafana_dashboard(dashboard):
+    """Исправляет частые ошибки generated dashboard перед отправкой в Grafana."""
+    normalized = dict(dashboard or {})
+    panels = []
+    for panel in normalized.get("panels") or []:
+        fixed_panel = dict(panel)
+        targets = []
+        has_time_field = False
+        for target in fixed_panel.get("targets") or []:
+            fixed_target = dict(target)
+            fixed_target["format"] = grafana_target_format(fixed_target.get("format", 1))
+            if sql_has_time_field(fixed_target.get("rawSql")):
+                has_time_field = True
+            targets.append(fixed_target)
+        fixed_panel["targets"] = targets
+        if fixed_panel.get("type") in {"timeseries", "time_series"} and not has_time_field:
+            fixed_panel["type"] = "barchart"
+            for target in fixed_panel["targets"]:
+                target["format"] = 1
+        panels.append(fixed_panel)
+    normalized["panels"] = panels
+    return normalized
 
 
 def grafana_auth_header():
@@ -722,6 +797,7 @@ def create_grafana_short_url_for_path(path):
 def create_grafana_dashboard(dashboard):
     """Отправляет dashboard JSON в Grafana и возвращает ответ Grafana API."""
     started_at = utc_now_iso()
+    dashboard = normalize_grafana_dashboard(dashboard)
     payload = {"dashboard": dashboard, "folderId": 0, "overwrite": True, "message": "Created by Agentic Data Stack MCP"}
     try:
         result = http_json(
@@ -790,7 +866,7 @@ def base_tools():
             "description": (
                 connector_contract
                 + " Create, validate, run, and delete the connector in one tool call. "
-                "Prefer this for schema, data, and dashboard phases."
+                "Use it first for the schema connector, and second for the Grafana dashboard connector only when the user asks for a graph."
             ),
             "inputSchema": {
                 "type": "object",

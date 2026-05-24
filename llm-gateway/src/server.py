@@ -30,9 +30,10 @@ REASONING_EFFORT_MODELS = [
 ]
 FORCE_TOOL_CHOICE_MODELS = [
     item.strip().lower()
-    for item in os.getenv("LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS", "qwen3").split(",")
+    for item in os.getenv("LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS", "qwen3,qwen2.5:14b").split(",")
     if item.strip()
 ]
+ANALYTICS_TOOL_TEMPERATURE = os.getenv("LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE", "0").strip()
 
 
 def utc_now_iso():
@@ -101,6 +102,13 @@ def tool_messages_text(messages):
     return "\n".join(str(message.get("content") or "") for message in messages if message.get("role") == "tool")
 
 
+def has_completed_connector(tool_text, prefix):
+    """Проверяет, был ли уже успешно выполнен generated-коннектор нужной фазы."""
+    if prefix not in tool_text:
+        return False
+    return "deleted_after_run" in tool_text or "created_and_run" in tool_text
+
+
 def wants_dashboard(messages):
     """Проверяет, просил ли пользователь график или dashboard."""
     text = analytics_request_text(messages)
@@ -108,7 +116,7 @@ def wants_dashboard(messages):
 
 
 def should_force_tool_choice(body):
-    """Форсирует tool call для qwen3, пока generated-connector flow не дошел до нужной фазы."""
+    """Форсирует tool call для выбранных моделей, пока generated-connector flow не дошел до нужной фазы."""
     if not isinstance(body, dict) or not body.get("tools"):
         return False
     if not model_matches(body.get("model"), FORCE_TOOL_CHOICE_MODELS):
@@ -117,12 +125,9 @@ def should_force_tool_choice(body):
     if not is_analytics_request(messages):
         return False
     tool_text = tool_messages_text(messages)
-    has_schema = "clickhouse_schema_" in tool_text and '"deleted_after_run": true' in tool_text
-    has_data = "clickhouse_data_" in tool_text and '"deleted_after_run": true' in tool_text
-    has_dashboard = "clickhouse_dashboard_" in tool_text and '"deleted_after_run": true' in tool_text
+    has_schema = has_completed_connector(tool_text, "clickhouse_schema_")
+    has_dashboard = has_completed_connector(tool_text, "clickhouse_dashboard_")
     if not has_schema:
-        return True
-    if not has_data:
         return True
     if wants_dashboard(messages) and not has_dashboard:
         return True
@@ -138,6 +143,9 @@ def prepare_upstream_body(body):
         prepared["reasoning_effort"] = REASONING_EFFORT
     if should_force_tool_choice(prepared):
         prepared["tool_choice"] = "required"
+        if ANALYTICS_TOOL_TEMPERATURE:
+            prepared["temperature"] = float(ANALYTICS_TOOL_TEMPERATURE)
+            prepared["top_p"] = 0.2
     return prepared
 
 
