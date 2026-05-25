@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
@@ -254,6 +254,9 @@ def normalize_analytics_sql(query):
     replacements = {
         r"\bcars\b": "v_car_inventory_summary",
         r"\bcar_inventory\b": "v_car_inventory_summary",
+        r"\belasticsearch_events\b": "elasticsearch_events_raw",
+        r"\belasticsearch_logs\b": "elasticsearch_events_raw",
+        r"\belasticsearch_documents\b": "elasticsearch_events_raw",
     }
     for pattern, replacement in replacements.items():
         normalized = re.sub(rf"(\bfrom\s+){pattern}\b", rf"\1{replacement}", normalized, flags=re.IGNORECASE)
@@ -293,12 +296,26 @@ def run_query(query):
             },
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=90) as response:
-                body = response.read().decode("utf-8").strip()
-        except HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(detail or str(error)) from error
+        body = ""
+        last_error = None
+        success = False
+        for attempt in range(1, 4):
+            try:
+                with urlopen(request, timeout=90) as response:
+                    body = response.read().decode("utf-8").strip()
+                success = True
+                break
+            except HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace")
+                raise RuntimeError(detail or str(error)) from error
+            except URLError as error:
+                last_error = error
+                if attempt == 3:
+                    raise
+                # Docker DNS иногда отвечает временной ошибкой при пересоздании контейнеров.
+                time.sleep(attempt)
+        if not success and last_error:
+            raise last_error
         rows = [] if not body else [json.loads(line) for line in body.splitlines() if line.strip()]
         send_langfuse_span(
             "mcp.clickhouse.query",
@@ -348,7 +365,7 @@ def analytics_list_tables(include_views=True):
         SELECT
           name,
           engine,
-          ifNull(total_rows, 0) AS rows,
+          if(engine LIKE '%View%', NULL, ifNull(total_rows, 0)) AS rows,
           formatReadableSize(ifNull(total_bytes, 0)) AS bytes
         FROM system.tables
         WHERE database = 'analytics'
@@ -412,6 +429,17 @@ def question_schema_terms(question):
         "городам": ["city"],
         "граф": ["dashboard", "grafana", "time", "city"],
         "grafana": ["dashboard", "grafana"],
+        "elasticsearch": ["elasticsearch", "event", "events", "source", "index", "document"],
+        "эластик": ["elasticsearch", "event", "events", "source", "index", "document"],
+        "событ": ["elasticsearch", "event", "events", "source", "index", "document"],
+        "лог": ["elasticsearch", "event", "events", "source", "index", "document"],
+        "логи": ["elasticsearch", "event", "events", "source", "index", "document"],
+        "источник": ["source_name", "source", "elasticsearch"],
+        "источники": ["source_name", "source", "elasticsearch"],
+        "документ": ["document", "document_json", "document_id", "elasticsearch"],
+        "документы": ["document", "document_json", "document_id", "elasticsearch"],
+        "индекс": ["index_name", "index", "elasticsearch"],
+        "индексы": ["index_name", "index", "elasticsearch"],
     }
     for marker, values in aliases.items():
         if marker in text:
@@ -419,7 +447,7 @@ def question_schema_terms(question):
     return terms
 
 
-def analytics_schema_for_question(question, include_views=True):
+def analytics_schema_for_question(question="", include_views=True):
     """Возвращает краткую схему и наиболее вероятные таблицы под вопрос пользователя."""
     schema = analytics_schema(include_views=include_views)
     terms = question_schema_terms(question)
