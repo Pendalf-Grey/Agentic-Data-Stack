@@ -28,12 +28,6 @@ REASONING_EFFORT_MODELS = [
     for item in os.getenv("LLM_GATEWAY_REASONING_EFFORT_MODELS", "qwen3").split(",")
     if item.strip()
 ]
-FORCE_TOOL_CHOICE_MODELS = [
-    item.strip().lower()
-    for item in os.getenv("LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS", "qwen3,qwen2.5:14b").split(",")
-    if item.strip()
-]
-ANALYTICS_TOOL_TEMPERATURE = os.getenv("LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE", "0").strip()
 
 
 def utc_now_iso():
@@ -61,79 +55,6 @@ def should_set_reasoning_effort(model):
     return bool(REASONING_EFFORT and any(model_name.startswith(prefix) for prefix in REASONING_EFFORT_MODELS))
 
 
-def model_matches(model, prefixes):
-    """Проверяет модель по списку префиксов из env."""
-    model_name = str(model or "").lower()
-    return any(model_name.startswith(prefix) for prefix in prefixes)
-
-
-def analytics_request_text(messages):
-    """Собирает пользовательский текст, чтобы не форсировать tools для обычного small talk."""
-    if not isinstance(messages, list):
-        return ""
-    return "\n".join(str(message.get("content") or "") for message in messages if message.get("role") == "user").lower()
-
-
-def is_analytics_request(messages):
-    """Определяет запросы, где включенный MCP должен идти по generated-connector flow."""
-    text = analytics_request_text(messages)
-    markers = [
-        "clickhouse",
-        "grafana",
-        "prometheus",
-        "elastic",
-        "бд",
-        "таблиц",
-        "колон",
-        "граф",
-        "дашборд",
-        "визуализ",
-        "город",
-        "машин",
-        "авто",
-    ]
-    return any(marker in text for marker in markers)
-
-
-def tool_messages_text(messages):
-    """Собирает tool outputs LibreChat, чтобы понять текущую фазу connector flow."""
-    if not isinstance(messages, list):
-        return ""
-    return "\n".join(str(message.get("content") or "") for message in messages if message.get("role") == "tool")
-
-
-def has_completed_connector(tool_text, prefix):
-    """Проверяет, был ли уже успешно выполнен generated-коннектор нужной фазы."""
-    if prefix not in tool_text:
-        return False
-    return "deleted_after_run" in tool_text or "created_and_run" in tool_text
-
-
-def wants_dashboard(messages):
-    """Проверяет, просил ли пользователь график или dashboard."""
-    text = analytics_request_text(messages)
-    return any(marker in text for marker in ["граф", "визуализ", "grafana", "dashboard", "дашборд"])
-
-
-def should_force_tool_choice(body):
-    """Форсирует tool call для выбранных моделей, пока generated-connector flow не дошел до нужной фазы."""
-    if not isinstance(body, dict) or not body.get("tools"):
-        return False
-    if not model_matches(body.get("model"), FORCE_TOOL_CHOICE_MODELS):
-        return False
-    messages = body.get("messages") or []
-    if not is_analytics_request(messages):
-        return False
-    tool_text = tool_messages_text(messages)
-    has_schema = has_completed_connector(tool_text, "clickhouse_schema_")
-    has_dashboard = has_completed_connector(tool_text, "clickhouse_dashboard_")
-    if not has_schema:
-        return True
-    if wants_dashboard(messages) and not has_dashboard:
-        return True
-    return False
-
-
 def prepare_upstream_body(body):
     """Добавляет backend-параметры, которые LibreChat сам не передает."""
     if not isinstance(body, dict):
@@ -141,11 +62,6 @@ def prepare_upstream_body(body):
     prepared = dict(body)
     if "reasoning_effort" not in prepared and should_set_reasoning_effort(prepared.get("model")):
         prepared["reasoning_effort"] = REASONING_EFFORT
-    if should_force_tool_choice(prepared):
-        prepared["tool_choice"] = "required"
-        if ANALYTICS_TOOL_TEMPERATURE:
-            prepared["temperature"] = float(ANALYTICS_TOOL_TEMPERATURE)
-            prepared["top_p"] = 0.2
     return prepared
 
 

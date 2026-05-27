@@ -47,8 +47,8 @@ fi
 
 export PROMETHEUS_BASE_URL
 
-# Поднимаем ClickHouse, MCP и сам prometheus-connector.
-docker compose up -d --build clickhouse mcp-server
+# Поднимаем ClickHouse и сам prometheus-connector.
+docker compose up -d --build clickhouse
 docker compose up -d --build --force-recreate prometheus-connector
 
 # Ждем health endpoint connector'а, чтобы не отправить /backfill слишком рано.

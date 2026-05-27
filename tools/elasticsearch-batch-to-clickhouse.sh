@@ -28,8 +28,8 @@ ELASTICSEARCH_BATCH_SIZE=${ELASTICSEARCH_BATCH_SIZE:-1000}
 
 cd "$ROOT_DIR"
 
-# Поднимаем ClickHouse, MCP и HTTP-режим elasticsearch-connector.
-docker compose up -d --build clickhouse mcp-server
+# Поднимаем ClickHouse и HTTP-режим elasticsearch-connector.
+docker compose up -d --build clickhouse
 docker compose up -d --build --force-recreate elasticsearch-connector
 
 # Ждем health endpoint connector'а, чтобы /batch не ушел слишком рано.

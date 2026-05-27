@@ -539,53 +539,14 @@ services:
       LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
       LLM_GATEWAY_REASONING_EFFORT: ${LLM_GATEWAY_REASONING_EFFORT:-none}
       LLM_GATEWAY_REASONING_EFFORT_MODELS: ${LLM_GATEWAY_REASONING_EFFORT_MODELS:-qwen3}
-      LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS: ${LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS:-qwen3,qwen2.5:14b}
-      LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE: ${LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE:-0}
     ports:
       - "3344:3344"
-
-  mcp-server:
-    # Контейнер MCP server принимает tool calls от LibreChat, читает ClickHouse
-    # и создает Grafana dashboards через Grafana HTTP API.
-    build:
-      context: ./mcp-server
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      grafana:
-        condition: service_started
-    environment:
-      # PUBLIC_BASE_URL попадает в ссылки, которые MCP возвращает модели и далее пользователю.
-      PUBLIC_BASE_URL: http://localhost:3333
-      # Внешний URL нужен для браузера пользователя, внутренний API URL нужен контейнеру MCP.
-      GRAFANA_BASE_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
-      GRAFANA_API_URL: http://grafana:3000
-      GRAFANA_USER: ${GRAFANA_ADMIN_USER}
-      GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      CLICKHOUSE_HOST: http://clickhouse:8123
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB}
-      GENERATED_CONNECTORS_DIR: /user-mcp-connectors
-      GENERATED_CONNECTORS_PUBLIC_DIR: /Users/subbotaevgenij/mcp-connectors
-      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
-      LANGFUSE_BASE_URL: ${LANGFUSE_INTERNAL_URL:-http://langfuse-web:3000}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentic-data-stack-local}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentic-data-stack-local}
-      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
-    ports:
-      - "3333:3333"
-    volumes:
-      # Сюда модель через MCP сохраняет generated Python-коннекторы.
-      # Файлы лежат вне репозитория, чтобы модель не использовала старые коннекторы как примеры.
-      - /Users/subbotaevgenij/mcp-connectors:/user-mcp-connectors
 
   librechat:
     image: ghcr.io/danny-avila/librechat@sha256:a46254938507971e0d4f7ed3f9d116bd9b118f4810b5b75eb716baf575645068
     depends_on:
       - librechat-db
       - llm-gateway
-      - mcp-server
     environment:
       HOST: 0.0.0.0
       MONGO_URI: mongodb://librechat-db:27017/LibreChat

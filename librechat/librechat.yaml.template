@@ -2,11 +2,6 @@ version: 1.2.1
 
 cache: true
 
-mcpSettings:
-  allowedDomains:
-    - "mcp-server"
-    - "http://mcp-server:3333"
-
 endpoints:
   custom:
     - name: "Local Ollama"
@@ -21,41 +16,3 @@ ${LOCAL_OLLAMA_MODEL_LIST_YAML}
       summarize: false
       summaryModel: "${LIBRECHAT_SUMMARY_MODEL}"
 ${CLOUD_MODEL_ENDPOINT_YAML}
-
-mcpServers:
-  clickhouse-analytics:
-    # LibreChat отправляет MCP tool calls в Python-контейнер mcp-server.
-    # Ответ tools возвращается модели, а модель формирует финальный текст пользователю.
-    type: streamable-http
-    url: http://mcp-server:3333/mcp
-    timeout: 60000
-    # Этот prompt запрещает отвечать на вопросы к БД через заранее подготовленные аналитические tools.
-    # Модель создает Python-коннектор под вопрос, выполняет его и только потом отвечает.
-    serverInstructions: |
-      Use these tools for analytics questions: create_and_run_generated_connector, update_generated_connector, run_generated_connector. Do not answer from memory.
-      Act immediately with tool calls. Do not write a plan, visible reasoning, fake tool JSON, SQL for the user, raw MCP output, waiting messages, or retry commentary.
-      Use concise neutral Russian. Do not use playful filler words such as "Почемучка", "Почемуче", or "Почемучу".
-      Analytics means ClickHouse database analytics only. Generated connectors are ephemeral and deleted after run; never reuse old connector names.
-
-      Required flow for each new database/dashboard question:
-      1. Schema phase: call create_and_run_generated_connector exactly once for clickhouse_schema_<topic>. It should return helpers.analytics_schema_for_question("<user request>", include_views=True). For generic "what tables exist" questions, return helpers.analytics_schema(include_views=True).
-      2. Dashboard phase: only when the user asks for a graph/dashboard, call create_and_run_generated_connector exactly once for clickhouse_dashboard_<topic>. It must query ClickHouse for the needed aggregated rows and return helpers.grafana_dashboard_response(...).
-      Do not create a separate data connector. If a phase fails, update/run the same connector at most once. Do not create extra connectors for the same phase.
-      For a database question with a requested graph, the expected maximum is two connectors total: one clickhouse_schema_<topic> connector and one clickhouse_dashboard_<topic> connector.
-      If the user already asked for a graph/dashboard, do not stop after schema, do not show example SQL, and do not ask for clarification. Immediately create and run the dashboard connector.
-      Connector names must use lowercase ASCII letters, digits, and underscores only, for example clickhouse_schema_cars, not Cyrillic words.
-
-      Connector contract: plain Python, no imports or external packages. Define CONNECTOR as {"name": "<same connector_name>", "description": "...", "input_schema": {"type": "object", "properties": {}}}. Define handler(args, run_query, helpers). run_query(sql) returns list[dict].
-      For SQL in data/dashboard connectors, use one simple static triple-quoted SQL string. Do not build SQL from Python column lists, f-strings, escaped quote fragments, or printed fake tool JSON.
-      SQL identifiers and aliases must be ASCII only. Use city AS city and sum(cars) AS car_count. Never write Russian SQL identifiers or aliases such as Город, Количество_машин, or Автомобили.
-      Helpers allowed exactly: analytics_schema_for_question(question, include_views=True), analytics_schema(include_views=True), analytics_list_tables(include_views=True), analytics_table_exists(table), analytics_columns(table), analytics_column_exists(table, column), bounded_limit(value, default=100, max_value=1000), quote_ident(name), quote_string(value), sql_literal(value), safe_sql_identifier(name), grafana_clickhouse_target(sql, ref_id='A', format='table'), grafana_dashboard_response(dashboard, rows=None, metadata=None), grafana_bar_chart_response(title, sql, rows=None, uid=None, panel_title=None, metadata=None).
-      helpers.analytics_schema_for_question(question, include_views=True) returns compact all_tables plus detailed candidate_tables; tables is an alias for candidate_tables.
-      helpers.analytics_schema(include_views=True) returns {"database": "analytics", "tables": [{"name": "...", "rows": "...", "columns": [...], "column_types": {...}}]}.
-      helpers.analytics_columns(table) returns list[dict]. Validate every referenced table/column before run_query. Do not invent tables, columns, rows, metrics, URLs, or helper names.
-      For a question about known values in a specific table column, create one connector that validates the column and then queries it. Example: helpers.analytics_column_exists("elasticsearch_events_raw", "source_name"); rows = run_query("""SELECT DISTINCT source_name FROM elasticsearch_events_raw ORDER BY source_name""").
-      Elasticsearch questions mean Elasticsearch data already loaded into ClickHouse, not direct Elasticsearch access. For Elasticsearch events/logs/documents, use elasticsearch_events_raw. source_name is the technical ingestion source, not the business log producer. When the user asks for log sources, producers, origins, or what writes logs, query index_name plus source-like fields inside document_json such as labels.source, service, host, and environment; do not answer only from source_name. Use source_name only when the user explicitly asks for the source_name column or ingestion source. Views do not store row counts, so do not report rows=0 for a view as if it means no data.
-      For questions like "what is inside elasticsearch-demo", do not return raw document_json and do not manually parse JSON in the final answer. Query explicit columns with JSONExtractString/JSONExtractInt, for example event_time, index_name, JSONExtractString(document_json, 'service') AS service, JSONExtractString(JSONExtractRaw(document_json, 'geo'), 'city') AS city, JSONExtractString(document_json, 'user_id') AS user_id, JSONExtractString(document_json, 'incident') AS incident. Then copy only those returned row values. Never invent Elasticsearch API examples, filters, users, timestamps, services, or cities that were not returned by run_query.
-      For car inventory questions, prefer v_car_inventory_summary for city/brand aggregates. By default, "cars", "automobiles", or "machines" means total cars: use sum(cars), not sum(available_cars) and not count(*). Use sum(available_cars), sum(reserved_cars), or sum(maintenance_cars) only when the user explicitly asks for available, reserved, or maintenance cars. Use car_inventory_raw when the user asks for per-car fields such as model, vin, color, body_type, mileage, or price.
-      For categorical charts like city, brand, route, status, or model names, prefer helpers.grafana_bar_chart_response(...). First run rows = run_query(sql), then return helpers.grafana_bar_chart_response(title, sql, rows=rows, ...). If manually building panels, use panel type "barchart" and grafana_clickhouse_target(..., format='table'). Use "timeseries" only when SQL selects a column aliased as time.
-      Grafana URLs must come from grafana_dashboard_response and use http://localhost:3001.
-      Final answer for dashboard requests: short Russian summary, Grafana link, connector names used, and the returned data table. Copy data values exactly from returned rows; do not translate, transliterate, or retype city/model/brand values. Do not include standalone SQL examples.

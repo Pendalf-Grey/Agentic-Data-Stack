@@ -113,7 +113,7 @@ CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-analytics_password}
 CLICKHOUSE_DB=${CLICKHOUSE_DB:-analytics}
 CLICKHOUSE_ELASTICSEARCH_TABLE=${CLICKHOUSE_ELASTICSEARCH_TABLE:-elasticsearch_events_raw}
 
-docker compose up -d --build clickhouse mcp-server
+docker compose up -d --build clickhouse
 
 if [ "$ELASTICSEARCH_DEMO_CLEAR" = "true" ]; then
   docker compose exec -T clickhouse clickhouse-client \
