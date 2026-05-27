@@ -2,6 +2,13 @@ version: 1.2.1
 
 cache: true
 
+interface:
+  mcpServers:
+    use: true
+    share: false
+    create: false
+    public: false
+
 endpoints:
   custom:
     - name: "Local Ollama"
@@ -18,3 +25,8 @@ endpoints:
       titleModel: "qwen2.5:7b"
       summarize: false
       summaryModel: "qwen2.5:7b"
+
+mcpServers:
+  clickhouse-playground:
+    type: sse
+    url: http://host.docker.internal:8001/sse

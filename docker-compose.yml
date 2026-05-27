@@ -542,11 +542,26 @@ services:
     ports:
       - "3344:3344"
 
+  mcp-clickhouse:
+    image: mcp/clickhouse
+    container_name: mcp-clickhouse
+    ports:
+      - "8001:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      CLICKHOUSE_HOST: ${CLICKHOUSE_MCP_HOST:-sql-clickhouse.clickhouse.com}
+      CLICKHOUSE_USER: ${CLICKHOUSE_MCP_USER:-demo}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_MCP_PASSWORD:-}
+      CLICKHOUSE_MCP_SERVER_TRANSPORT: sse
+      CLICKHOUSE_MCP_BIND_HOST: 0.0.0.0
+
   librechat:
     image: ghcr.io/danny-avila/librechat@sha256:a46254938507971e0d4f7ed3f9d116bd9b118f4810b5b75eb716baf575645068
     depends_on:
       - librechat-db
       - llm-gateway
+      - mcp-clickhouse
     environment:
       HOST: 0.0.0.0
       MONGO_URI: mongodb://librechat-db:27017/LibreChat
@@ -578,8 +593,10 @@ services:
       NO_INDEX: "true"
     ports:
       - "3080:3080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./librechat/librechat.yaml.template:/app/librechat.yaml.template:ro
+      - ./librechat/librechat.yaml:/app/librechat.yaml.template:ro
       - ./librechat/render-config.sh:/app/render-config.sh:ro
     command: sh /app/render-config.sh
 
