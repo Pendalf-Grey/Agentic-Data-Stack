@@ -3,9 +3,9 @@ version: 1.2.1
 cache: true
 
 mcpSettings:
-  allowedDomains:
-    - "mcp-server"
-    - "http://mcp-server:3333"
+  allowedAddresses:
+    - "mcp-server:3333"
+    - "langfuse-web:3000"
 
 endpoints:
   custom:
@@ -59,3 +59,11 @@ mcpServers:
       For categorical charts like city, brand, route, status, or model names, prefer helpers.grafana_bar_chart_response(...). First run rows = run_query(sql), then return helpers.grafana_bar_chart_response(title, sql, rows=rows, ...). If manually building panels, use panel type "barchart" and grafana_clickhouse_target(..., format='table'). Use "timeseries" only when SQL selects a column aliased as time.
       Grafana URLs must come from grafana_dashboard_response and use http://localhost:3001.
       Final answer for dashboard requests: short Russian summary, Grafana link, connector names used, and the returned data table. Copy data values exactly from returned rows; do not translate, transliterate, or retype city/model/brand values. Do not include standalone SQL examples.
+
+  langfuse:
+    type: streamable-http
+    url: http://langfuse-web:3000/api/public/mcp
+    requiresOAuth: false
+    headers:
+      Authorization: "Basic ${LANGFUSE_MCP_BASIC_TOKEN}"
+    chatMenu: false

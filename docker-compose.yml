@@ -72,23 +72,24 @@ services:
       timeout: 5s
       retries: 10
 
-  langfuse-clickhouse-init:
-    image: clickhouse/clickhouse-server:24.8
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    env_file:
-      - .env
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        clickhouse-client \
-          --host clickhouse \
-          --user "$${CLICKHOUSE_USER}" \
-          --password "$${CLICKHOUSE_PASSWORD}" \
-          --query "CREATE DATABASE IF NOT EXISTS $${LANGFUSE_CLICKHOUSE_DB:-langfuse}"
-    restart: "no"
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    environment:
+      CLICKHOUSE_DB: ${LANGFUSE_CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-langfuse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse_clickhouse_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "127.0.0.1:8124:8123"
+      - "127.0.0.1:9001:9000"
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   debezium:
     image: debezium/connect:2.7.3.Final
@@ -423,20 +424,22 @@ services:
         condition: service_healthy
       langfuse-minio:
         condition: service_healthy
-      langfuse-clickhouse-init:
-        condition: service_completed_successfully
+      langfuse-clickhouse:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3002}
+      NEXTAUTH_URL: ${LANGFUSE_INTERNAL_URL:-http://langfuse-web:3000}
+      AUTH_TRUST_HOST: "true"
+      HOSTNAME: 0.0.0.0
       DATABASE_URL: postgresql://${LANGFUSE_POSTGRES_USER:-langfuse}:${LANGFUSE_POSTGRES_PASSWORD:-langfuse_password}@langfuse-db:5432/${LANGFUSE_POSTGRES_DB:-langfuse}
       SALT: ${LANGFUSE_SALT:-change-me-langfuse-salt}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
-      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-langfuse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse_clickhouse_password}
       CLICKHOUSE_DB: ${LANGFUSE_CLICKHOUSE_DB:-langfuse}
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
@@ -471,21 +474,23 @@ services:
         condition: service_healthy
       langfuse-minio:
         condition: service_healthy
-      langfuse-clickhouse-init:
-        condition: service_completed_successfully
+      langfuse-clickhouse:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3002}
+      NEXTAUTH_URL: ${LANGFUSE_INTERNAL_URL:-http://langfuse-web:3000}
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-langfuse-nextauth-secret}
+      AUTH_TRUST_HOST: "true"
+      HOSTNAME: 0.0.0.0
       DATABASE_URL: postgresql://${LANGFUSE_POSTGRES_USER:-langfuse}:${LANGFUSE_POSTGRES_PASSWORD:-langfuse_password}@langfuse-db:5432/${LANGFUSE_POSTGRES_DB:-langfuse}
       SALT: ${LANGFUSE_SALT:-change-me-langfuse-salt}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
       TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
-      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-langfuse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse_clickhouse_password}
       CLICKHOUSE_DB: ${LANGFUSE_CLICKHOUSE_DB:-langfuse}
       CLICKHOUSE_CLUSTER_ENABLED: "false"
       LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
@@ -586,6 +591,7 @@ services:
       - librechat-db
       - llm-gateway
       - mcp-server
+      - langfuse-web
     environment:
       HOST: 0.0.0.0
       MONGO_URI: mongodb://librechat-db:27017/LibreChat
@@ -614,6 +620,7 @@ services:
       CLOUD_MODEL_SUMMARY_MODEL: ${CLOUD_MODEL_SUMMARY_MODEL:-}
       LIBRECHAT_TITLE_MODEL: ${LIBRECHAT_TITLE_MODEL}
       LIBRECHAT_SUMMARY_MODEL: ${LIBRECHAT_SUMMARY_MODEL}
+      LANGFUSE_MCP_BASIC_TOKEN: ${LANGFUSE_MCP_BASIC_TOKEN}
       NO_INDEX: "true"
     ports:
       - "3080:3080"
@@ -632,4 +639,6 @@ volumes:
   langfuse_postgres_data:
   langfuse_redis_data:
   langfuse_minio_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
   elasticsearch_data:

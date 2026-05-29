@@ -74,6 +74,7 @@ export LIBRECHAT_TITLE_MODEL="$title_model"
 export LIBRECHAT_SUMMARY_MODEL="$summary_model"
 export LOCAL_OLLAMA_MODEL_LIST_YAML="$local_model_yaml"
 export CLOUD_MODEL_ENDPOINT_YAML="$cloud_endpoint_yaml"
+export LANGFUSE_MCP_BASIC_TOKEN="${LANGFUSE_MCP_BASIC_TOKEN:-}"
 
 # Маленький Python-блок делает безопасную текстовую подстановку placeholders в YAML-template.
 # На выходе создается /app/librechat.yaml, который затем читает LibreChat backend.
@@ -89,6 +90,7 @@ for key in [
     'LIBRECHAT_SUMMARY_MODEL',
     'LOCAL_OLLAMA_MODEL_LIST_YAML',
     'CLOUD_MODEL_ENDPOINT_YAML',
+    'LANGFUSE_MCP_BASIC_TOKEN',
 ]:
     template = template.replace('${' + key + '}', os.environ.get(key, ''))
 Path('/app/librechat.yaml').write_text(template)
