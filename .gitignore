@@ -9,3 +9,6 @@ npm-debug.log*
 __pycache__/
 *.py[cod]
 elasticsearch-synthetic-lab/data/
+librechat/rag_bulk/.airflow_rag_manifest.json
+librechat/rag_bulk/incoming/*
+!librechat/rag_bulk/incoming/.gitkeep

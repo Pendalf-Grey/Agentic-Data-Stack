@@ -9,7 +9,7 @@ mcpSettings:
 
 endpoints:
   custom:
-    - name: "Local Ollama"
+    - name: "LLM Gateway"
       apiKey: "${LLM_GATEWAY_API_KEY}"
       baseURL: "${LLM_GATEWAY_BASE_URL}"
       models:

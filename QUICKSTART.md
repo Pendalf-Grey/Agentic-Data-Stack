@@ -144,6 +144,7 @@ sh tools/clickhouse-tables.sh
 - Prometheus backfill: `http://localhost:3355/backfill`
 - MCP health: `http://localhost:3333/health`
 - LLM gateway health: `http://localhost:3344/health`
+- LibreChat RAG API health: `http://localhost:8000/health`
 
 ## 6. LibreChat
 
@@ -158,7 +159,7 @@ sh tools/clickhouse-tables.sh
 
 ![LibreChat registration](docs/images/img_1.png)
 
-После входа выберите `Local OpenAI-compatible` endpoint и включите MCP tools `clickhouse-analytics`.
+После входа выберите `LLM Gateway` endpoint и включите MCP tools `clickhouse-analytics`.
 
 ![LibreChat model selector](docs/images/img_3.png)
 
@@ -182,10 +183,26 @@ LibreChat должен отвечать по данным ClickHouse через 
 Посчитай распределение по двум колонкам.
 ```
 
-Если добавили новую Ollama-модель в `.env`, пересоздайте только LibreChat:
+Для пакетной загрузки документов в RAG кладите файлы в:
+
+```text
+librechat/rag_bulk/incoming
+```
+
+Airflow DAG `scheduled_librechat_rag_bulk_ingest` сканирует эту директорию, индексирует поддерживаемые файлы в LibreChat RAG API с PostgreSQL/pgvector и синхронизирует `LibreChat.files` в MongoDB. Благодаря этому bulk-файлы видны в боковой панели файлов LibreChat.
+
+Проверьте в UI: откройте `http://localhost:3080`, нажмите иконку файлов слева, выберите документ из таблицы, затем задайте вопрос с моделью `kimi-k2.6`:
+
+```text
+Что делает DAG scheduled_librechat_rag_bulk_ingest?
+```
+
+Поддерживаемые форматы: `csv`, `doc`, `docx`, `html`, `json`, `md`, `pdf`, `ppt`, `pptx`, `rst`, `text`, `txt`, `xls`, `xlsx`, `xml`.
+
+Если изменили модель, LibreChat config или RAG-настройки в `.env`, пересоздайте сервисы:
 
 ```bash
-docker compose up -d --force-recreate librechat
+docker compose up -d --force-recreate llm-gateway rag_api librechat airflow-scheduler airflow-webserver
 ```
 
 ## 7. Langfuse

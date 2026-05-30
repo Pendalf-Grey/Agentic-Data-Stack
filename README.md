@@ -681,7 +681,7 @@ http://localhost:3080/login
 
 ![img_2.png](docs/images/img_2.png)
 
-В LibreChat в левом верхнем углу выберите `My Agents` -> `Local OpenAI-compatible`, затем выберите модель.
+В LibreChat в левом верхнем углу выберите `My Agents` -> `LLM Gateway`, затем выберите модель.
 
 
 ![img_3.png](docs/images/img_3.png)
@@ -722,6 +722,46 @@ http://localhost:3080/login
 ```
 
 ![LibreChat response example](docs/images/img_9.png)
+
+### LibreChat RAG Bulk
+
+Для пакетной загрузки документов в RAG не нужно загружать файлы по одному через чат. Положите документы в директорию:
+
+```text
+librechat/rag_bulk/incoming
+```
+
+Airflow DAG `scheduled_librechat_rag_bulk_ingest` регулярно сканирует эту директорию и выполняет две операции:
+
+1. вызывает штатный LibreChat RAG API (`/local/embed`), который читает файлы из общего volume, режет их на chunks, строит embeddings и сохраняет их в PostgreSQL/pgvector;
+2. синхронизирует записи в MongoDB коллекцию `LibreChat.files`, чтобы проиндексированные bulk-файлы отображались в боковой панели файлов LibreChat и их можно было прикрепить к чату из UI.
+
+Расписание задается переменной:
+
+```env
+AIRFLOW_LIBRECHAT_RAG_BULK_CRON=*/10 * * * *
+LIBRECHAT_MONGO_URI=mongodb://librechat-db:27017/LibreChat
+# Пустое значение означает: показывать bulk RAG файлы всем пользователям LibreChat.
+LIBRECHAT_RAG_BULK_USER_EMAIL=
+```
+
+Текущая директория является источником правды: если поддерживаемый файл удалить из `incoming`, следующий запуск DAG удалит его из RAG API и из панели файлов LibreChat. Неподдерживаемые расширения не индексируются; они попадут в `unsupported` в результате Airflow task.
+
+Поддерживаемые форматы: `csv`, `doc`, `docx`, `html`, `json`, `md`, `pdf`, `ppt`, `pptx`, `rst`, `text`, `txt`, `xls`, `xlsx`, `xml`.
+
+После запуска DAG откройте LibreChat, нажмите иконку файлов в левой панели и убедитесь, что документ виден в таблице. Затем выберите модель `kimi-k2.6`, кликните документ в таблице файлов, чтобы прикрепить его к сообщению, и задайте вопрос по содержимому:
+
+```text
+Какая директория используется для пакетной загрузки документов в RAG?
+```
+
+```text
+Какую роль выполняет LLM Gateway?
+```
+
+```text
+Что делает DAG scheduled_librechat_rag_bulk_ingest?
+```
 
 ## Langfuse
 
@@ -794,38 +834,33 @@ LANGFUSE_ENABLED=true
 LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
 ```
 
-Для Ollama на macOS обычно используется:
+Текущая целевая облачная модель - Kimi K2.6 через OpenAI-compatible Moonshot API:
 
 ```env
-UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
-UPSTREAM_OPENAI_API_KEY=local-dev-key
+UPSTREAM_MODEL_BASE_URL=https://api.moonshot.ai/v1
+UPSTREAM_MODEL_API_KEY=replace-with-kimi-api-key
+MODEL=kimi-k2.6
+LIBRECHAT_MODELS=kimi-k2.6
 ```
 
-Список моделей для UI:
+RAG API использует отдельную embedding-настройку. Chat-модель остается одной (`kimi-k2.6`), а embeddings строятся через локальную Ollama-модель:
 
 ```env
-LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
-OPENAI_MODEL=qwen2.5:7b
-OPENAI_MODEL_SMART=qwen3:14b
+RAG_API_URL=http://rag_api:8000
+EMBEDDINGS_PROVIDER=ollama
+EMBEDDINGS_MODEL=nomic-embed-text
+OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
-`qwen3:14b` уже добавлен в пример конфигурации LibreChat.
-
-Добавление любой новой Ollama-модели выглядит так:
+После изменения `.env` пересоздайте сервисы:
 
 ```bash
-ollama pull qwen3:14b
-```
-
-Затем добавьте точный tag модели в `LIBRECHAT_MODELS` в `.env` и пересоздайте LibreChat:
-
-```bash
-docker compose up -d --force-recreate librechat
+docker compose up -d --force-recreate llm-gateway rag_api librechat airflow-scheduler airflow-webserver
 ```
 
 Менять Docker image для этого не нужно: `librechat/render-config.sh` на старте собирает `/app/librechat.yaml` из `.env` и `librechat/librechat.yaml.template`.
 
-Моделей может быть сколько угодно. `OPENAI_MODEL` удобно держать быстрым для обычного чата, а `OPENAI_MODEL_SMART` указывать на более сильную модель вроде `qwen3:14b`.
+В текущей конфигурации UI должен показывать одну модель: `kimi-k2.6`.
 
 ## Endpoints
 
@@ -847,14 +882,14 @@ docker compose up -d --force-recreate librechat
 - `http://localhost:3344/health` — healthcheck `llm-gateway`.
 - `http://localhost:3344/v1/models` — debug endpoint списка моделей через `llm-gateway`.
 - `http://llm-gateway:3344/v1` — внутренний Docker endpoint для LibreChat.
-- `http://host.docker.internal:11434/v1` — OpenAI-compatible endpoint Ollama на macOS.
+- `http://localhost:8000/health` — healthcheck LibreChat RAG API.
 - `http://localhost:8083` — Debezium Kafka Connect REST API.
 - `http://localhost:8083/connectors` — список зарегистрированных Debezium connectors.
 - `http://localhost:8123/play` — ClickHouse Web UI.
 - `http://localhost:8123` — ClickHouse HTTP API.
 - `localhost:9000` — ClickHouse native TCP port.
 - `localhost:9092` — Kafka Kafka API.
-- `- `localhost:5432` — demo PostgreSQL, только при `COMPOSE_PROFILES=postgres-source`.
+- `localhost:5432` — demo PostgreSQL, только при `COMPOSE_PROFILES=postgres-source`.
 
 Grafana внутри Docker работает на `grafana:3000`.
 

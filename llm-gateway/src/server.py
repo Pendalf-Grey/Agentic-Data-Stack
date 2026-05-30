@@ -34,6 +34,12 @@ FORCE_TOOL_CHOICE_MODELS = [
     if item.strip()
 ]
 ANALYTICS_TOOL_TEMPERATURE = os.getenv("LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE", "0").strip()
+KIMI_DISABLE_THINKING = os.getenv("LLM_GATEWAY_KIMI_DISABLE_THINKING", "true").strip().lower() == "true"
+KIMI_MODEL_PREFIXES = [
+    item.strip().lower()
+    for item in os.getenv("LLM_GATEWAY_KIMI_MODEL_PREFIXES", "kimi-k2.6,kimi-k2.5").split(",")
+    if item.strip()
+]
 
 
 def utc_now_iso():
@@ -139,6 +145,11 @@ def prepare_upstream_body(body):
     if not isinstance(body, dict):
         return body
     prepared = dict(body)
+    if model_matches(prepared.get("model"), KIMI_MODEL_PREFIXES):
+        for key in ["temperature", "top_p", "n", "presence_penalty", "frequency_penalty"]:
+            prepared.pop(key, None)
+        if KIMI_DISABLE_THINKING and "thinking" not in prepared:
+            prepared["thinking"] = {"type": "disabled"}
     if "reasoning_effort" not in prepared and should_set_reasoning_effort(prepared.get("model")):
         prepared["reasoning_effort"] = REASONING_EFFORT
     if should_force_tool_choice(prepared):
@@ -184,6 +195,18 @@ def usage_from_completion(data):
     }
 
 
+def strip_reasoning_payload(data):
+    """Удаляет reasoning_content из OpenAI-compatible ответа, чтобы LibreChat не показывал мысли модели."""
+    if not isinstance(data, dict):
+        return data
+    for choice in data.get("choices") or []:
+        message = choice.get("message") or {}
+        delta = choice.get("delta") or {}
+        message.pop("reasoning_content", None)
+        delta.pop("reasoning_content", None)
+    return data
+
+
 def extract_completion_text(data):
     """Достает текст assistant-ответа из non-streaming model backend ответа."""
     if not isinstance(data, dict):
@@ -212,6 +235,21 @@ def parse_streaming_content(chunk):
         except json.JSONDecodeError:
             pass
     return "".join(output)
+
+
+def scrub_streaming_reasoning(line):
+    """Фильтрует reasoning_content из SSE chunk перед отправкой в LibreChat."""
+    if not line.startswith("data: "):
+        return line.encode("utf-8")
+    payload = line[6:].strip()
+    if not payload or payload == "[DONE]":
+        return line.encode("utf-8")
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return line.encode("utf-8")
+    strip_reasoning_payload(data)
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
 def send_langfuse_trace(body, output, usage, started_at, ended_at, status):
@@ -322,6 +360,7 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
                 if not body.get("stream"):
                     raw = response.read()
                     data = json.loads(raw.decode("utf-8") or "{}")
+                    strip_reasoning_payload(data)
                     send_json(self, response.status, data)
                     send_langfuse_trace(
                         body,
@@ -348,7 +387,7 @@ class AgentProxyHandler(BaseHTTPRequestHandler):
                         break
                     text = line.decode("utf-8", errors="replace")
                     streamed_output.append(parse_streaming_content(text))
-                    self.wfile.write(line)
+                    self.wfile.write(scrub_streaming_reasoning(text))
                     self.wfile.flush()
                     if text.strip() == "data: [DONE]":
                         break

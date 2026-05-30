@@ -279,6 +279,13 @@ services:
       AIRFLOW_ELASTICSEARCH_BATCH_CRON: ${AIRFLOW_ELASTICSEARCH_BATCH_CRON:-15 * * * *}
       ELASTICSEARCH_INDEX_PATTERN: ${ELASTICSEARCH_INDEX_PATTERN:-logs-*}
       ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-1000}
+      LIBRECHAT_RAG_API_URL: ${LIBRECHAT_RAG_API_URL:-http://rag_api:8000}
+      AIRFLOW_LIBRECHAT_RAG_BULK_CRON: ${AIRFLOW_LIBRECHAT_RAG_BULK_CRON:-*/10 * * * *}
+      LIBRECHAT_RAG_BULK_DIR: ${LIBRECHAT_RAG_BULK_DIR:-/opt/airflow/rag_bulk/incoming}
+      LIBRECHAT_RAG_BULK_ENTITY_ID: ${LIBRECHAT_RAG_BULK_ENTITY_ID:-public}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://librechat-db:27017/LibreChat}
+      LIBRECHAT_RAG_BULK_USER_EMAIL: ${LIBRECHAT_RAG_BULK_USER_EMAIL:-}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-pymongo==4.7.3}
     command: version
 
   airflow-webserver:
@@ -303,11 +310,19 @@ services:
       AIRFLOW_ELASTICSEARCH_BATCH_CRON: ${AIRFLOW_ELASTICSEARCH_BATCH_CRON:-15 * * * *}
       ELASTICSEARCH_INDEX_PATTERN: ${ELASTICSEARCH_INDEX_PATTERN:-logs-*}
       ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-1000}
+      LIBRECHAT_RAG_API_URL: ${LIBRECHAT_RAG_API_URL:-http://rag_api:8000}
+      AIRFLOW_LIBRECHAT_RAG_BULK_CRON: ${AIRFLOW_LIBRECHAT_RAG_BULK_CRON:-*/10 * * * *}
+      LIBRECHAT_RAG_BULK_DIR: ${LIBRECHAT_RAG_BULK_DIR:-/opt/airflow/rag_bulk/incoming}
+      LIBRECHAT_RAG_BULK_ENTITY_ID: ${LIBRECHAT_RAG_BULK_ENTITY_ID:-public}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://librechat-db:27017/LibreChat}
+      LIBRECHAT_RAG_BULK_USER_EMAIL: ${LIBRECHAT_RAG_BULK_USER_EMAIL:-}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-pymongo==4.7.3}
     ports:
       - "8081:8080"
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./debezium/connectors:/opt/airflow/connectors:ro
+      - ./librechat/rag_bulk:/opt/airflow/rag_bulk
     command: webserver
 
   airflow-scheduler:
@@ -332,9 +347,17 @@ services:
       AIRFLOW_ELASTICSEARCH_BATCH_CRON: ${AIRFLOW_ELASTICSEARCH_BATCH_CRON:-15 * * * *}
       ELASTICSEARCH_INDEX_PATTERN: ${ELASTICSEARCH_INDEX_PATTERN:-logs-*}
       ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-1000}
+      LIBRECHAT_RAG_API_URL: ${LIBRECHAT_RAG_API_URL:-http://rag_api:8000}
+      AIRFLOW_LIBRECHAT_RAG_BULK_CRON: ${AIRFLOW_LIBRECHAT_RAG_BULK_CRON:-*/10 * * * *}
+      LIBRECHAT_RAG_BULK_DIR: ${LIBRECHAT_RAG_BULK_DIR:-/opt/airflow/rag_bulk/incoming}
+      LIBRECHAT_RAG_BULK_ENTITY_ID: ${LIBRECHAT_RAG_BULK_ENTITY_ID:-public}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://librechat-db:27017/LibreChat}
+      LIBRECHAT_RAG_BULK_USER_EMAIL: ${LIBRECHAT_RAG_BULK_USER_EMAIL:-}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-pymongo==4.7.3}
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./debezium/connectors:/opt/airflow/connectors:ro
+      - ./librechat/rag_bulk:/opt/airflow/rag_bulk
     command: scheduler
 
   grafana:
@@ -353,7 +376,7 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     ports:
-      - "3001:3000"
+      - "${GRAFANA_PORT:-3001}:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -525,6 +548,50 @@ services:
     volumes:
       - librechat_mongo_data:/data/db
 
+  librechat-vectordb:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${RAG_POSTGRES_DB:-rag_api}
+      POSTGRES_USER: ${RAG_POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:-rag_password}
+    volumes:
+      - librechat_pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RAG_POSTGRES_USER:-rag} -d ${RAG_POSTGRES_DB:-rag_api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rag_api:
+    image: registry.librechat.ai/danny-avila/librechat-rag-api-dev-lite:latest
+    depends_on:
+      librechat-vectordb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DB_HOST: librechat-vectordb
+      DB_PORT: 5432
+      POSTGRES_DB: ${RAG_POSTGRES_DB:-rag_api}
+      POSTGRES_USER: ${RAG_POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:-rag_password}
+      VECTOR_DB_TYPE: pgvector
+      RAG_HOST: 0.0.0.0
+      RAG_PORT: 8000
+      RAG_UPLOAD_DIR: /rag_bulk/incoming
+      RAG_OPENAI_API_KEY: ${RAG_OPENAI_API_KEY:-${UPSTREAM_MODEL_API_KEY}}
+      RAG_OPENAI_BASEURL: ${RAG_OPENAI_BASEURL:-${UPSTREAM_MODEL_BASE_URL}}
+      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-ollama}
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-nomic-embed-text}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      CHUNK_SIZE: ${RAG_CHUNK_SIZE:-1500}
+      CHUNK_OVERLAP: ${RAG_CHUNK_OVERLAP:-100}
+      EMBEDDING_BATCH_SIZE: ${RAG_EMBEDDING_BATCH_SIZE:-250}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./librechat/rag_bulk:/rag_bulk
+
   llm-gateway:
     build:
       context: ./llm-gateway
@@ -586,6 +653,7 @@ services:
       - librechat-db
       - llm-gateway
       - mcp-server
+      - rag_api
     environment:
       HOST: 0.0.0.0
       MONGO_URI: mongodb://librechat-db:27017/LibreChat
@@ -614,6 +682,7 @@ services:
       CLOUD_MODEL_SUMMARY_MODEL: ${CLOUD_MODEL_SUMMARY_MODEL:-}
       LIBRECHAT_TITLE_MODEL: ${LIBRECHAT_TITLE_MODEL}
       LIBRECHAT_SUMMARY_MODEL: ${LIBRECHAT_SUMMARY_MODEL}
+      RAG_API_URL: ${RAG_API_URL:-http://rag_api:8000}
       NO_INDEX: "true"
     ports:
       - "3080:3080"
@@ -629,6 +698,7 @@ volumes:
   airflow_db_data:
   grafana_data:
   librechat_mongo_data:
+  librechat_pgvector_data:
   langfuse_postgres_data:
   langfuse_redis_data:
   langfuse_minio_data:
