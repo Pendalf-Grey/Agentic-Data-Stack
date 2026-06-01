@@ -3,9 +3,9 @@ version: 1.2.1
 cache: true
 
 mcpSettings:
-  allowedAddresses:
-    - "mcp-server:3333"
-    - "langfuse-web:3000"
+  allowedDomains:
+    - "http://mcp-server:3333"
+    - "http://langfuse-web:3000"
 
 endpoints:
   custom:
