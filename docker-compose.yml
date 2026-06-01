@@ -532,67 +532,41 @@ services:
     volumes:
       - librechat_mongo_data:/data/db
 
-  llm-gateway:
-    build:
-      context: ./llm-gateway
-    environment:
-      PORT: 3344
-      UPSTREAM_MODEL_API_KEY: ${UPSTREAM_MODEL_API_KEY:-local-dev-key}
-      UPSTREAM_MODEL_BASE_URL: ${UPSTREAM_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
-      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
-      LANGFUSE_BASE_URL: ${LANGFUSE_INTERNAL_URL:-http://langfuse-web:3000}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentic-data-stack-local}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentic-data-stack-local}
-      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
-      LLM_GATEWAY_REASONING_EFFORT: ${LLM_GATEWAY_REASONING_EFFORT:-none}
-      LLM_GATEWAY_REASONING_EFFORT_MODELS: ${LLM_GATEWAY_REASONING_EFFORT_MODELS:-qwen3}
-      LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS: ${LLM_GATEWAY_FORCE_TOOL_CHOICE_MODELS:-qwen3,qwen2.5:14b}
-      LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE: ${LLM_GATEWAY_ANALYTICS_TOOL_TEMPERATURE:-0}
-    ports:
-      - "3344:3344"
-
-  mcp-server:
-    # Контейнер MCP server принимает tool calls от LibreChat, читает ClickHouse
-    # и создает Grafana dashboards через Grafana HTTP API.
-    build:
-      context: ./mcp-server
+  mcp-clickhouse:
+    image: mcp/clickhouse
     depends_on:
       clickhouse:
         condition: service_healthy
-      grafana:
-        condition: service_started
     environment:
-      # PUBLIC_BASE_URL попадает в ссылки, которые MCP возвращает модели и далее пользователю.
-      PUBLIC_BASE_URL: http://localhost:3333
-      # Внешний URL нужен для браузера пользователя, внутренний API URL нужен контейнеру MCP.
-      GRAFANA_BASE_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
-      GRAFANA_API_URL: http://grafana:3000
-      GRAFANA_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      CLICKHOUSE_HOST: http://clickhouse:8123
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_SECURE: "false"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_password}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-analytics}
-      GENERATED_CONNECTORS_DIR: /user-mcp-connectors
-      GENERATED_CONNECTORS_PUBLIC_DIR: /Users/subbotaevgenij/mcp-connectors
-      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
-      LANGFUSE_BASE_URL: ${LANGFUSE_INTERNAL_URL:-http://langfuse-web:3000}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-agentic-data-stack-local}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-agentic-data-stack-local}
-      LANGFUSE_ENVIRONMENT: ${LANGFUSE_ENVIRONMENT:-local}
+      CLICKHOUSE_MCP_SERVER_TRANSPORT: sse
+      CLICKHOUSE_MCP_BIND_HOST: 0.0.0.0
     ports:
-      - "3333:3333"
-    volumes:
-      # Сюда модель через MCP сохраняет generated Python-коннекторы.
-      # Файлы лежат вне репозитория, чтобы модель не использовала старые коннекторы как примеры.
-      - /Users/subbotaevgenij/mcp-connectors:/user-mcp-connectors
+      - "8001:8000"
+
+  mcp-grafana:
+    image: grafana/mcp-grafana
+    depends_on:
+      - grafana
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_USERNAME: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GRAFANA_ORG_ID: 1
+    ports:
+      - "8002:8000"
 
   librechat:
     image: ghcr.io/danny-avila/librechat@sha256:a46254938507971e0d4f7ed3f9d116bd9b118f4810b5b75eb716baf575645068
     depends_on:
       - librechat-db
-      - llm-gateway
-      - mcp-server
+      - mcp-clickhouse
+      - mcp-grafana
       - langfuse-web
     environment:
       HOST: 0.0.0.0
@@ -605,8 +579,13 @@ services:
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
       ALLOW_UNVERIFIED_EMAIL_LOGIN: ${ALLOW_UNVERIFIED_EMAIL_LOGIN:-true}
       ALLOW_PASSWORD_RESET: ${ALLOW_PASSWORD_RESET:-false}
-      LLM_GATEWAY_API_KEY: ${LLM_GATEWAY_API_KEY:-local-dev-key}
-      LLM_GATEWAY_BASE_URL: ${LLM_GATEWAY_BASE_URL:-http://llm-gateway:3344/v1}
+      KIMI_API_KEY: ${KIMI_API_KEY:-${MOONSHOT_API_KEY:-}}
+      KIMI_BASE_URL: ${KIMI_BASE_URL:-https://api.moonshot.ai/v1}
+      KIMI_ONLY: ${KIMI_ONLY:-true}
+      KIMI_MODEL: ${KIMI_MODEL:-kimi-k2.6}
+      KIMI_MODELS: ${KIMI_MODELS:-kimi-k2.6}
+      KIMI_TITLE_MODEL: ${KIMI_TITLE_MODEL:-kimi-k2.6}
+      KIMI_SUMMARY_MODEL: ${KIMI_SUMMARY_MODEL:-kimi-k2.6}
       MODEL: ${MODEL:-qwen2.5:7b}
       MODEL_FAST: ${MODEL_FAST:-qwen2.5:7b}
       MODEL_SMART: ${MODEL_SMART:-qwen3:14b}

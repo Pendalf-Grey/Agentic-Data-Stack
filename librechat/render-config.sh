@@ -66,14 +66,33 @@ ${cloud_model_yaml}
 "
 fi
 
-# Эти значения попадут в librechat.yaml и заставят LibreChat ходить не напрямую в model backend,
-# а через наш llm-gateway.
-export LLM_GATEWAY_API_KEY="${LLM_GATEWAY_API_KEY:-local-dev-key}"
-export LLM_GATEWAY_BASE_URL="${LLM_GATEWAY_BASE_URL:-http://llm-gateway:3344/v1}"
+kimi_model="${KIMI_MODEL:-kimi-k2.6}"
+kimi_models="${KIMI_MODELS:-$kimi_model}"
+kimi_model_yaml="$(yaml_model_list "$kimi_models")"
+if [ -z "$kimi_model_yaml" ]; then
+  kimi_model_yaml='          - "kimi-k2.6"
+'
+fi
+
+model_endpoints_yaml="    - name: \"Moonshot\"
+      apiKey: \"\${KIMI_API_KEY}\"
+      baseURL: \"\${KIMI_BASE_URL}\"
+      models:
+        default:
+${kimi_model_yaml}
+        fetch: false
+      titleConvo: true
+      titleModel: \"${KIMI_TITLE_MODEL:-$kimi_model}\"
+      summarize: false
+      summaryModel: \"${KIMI_SUMMARY_MODEL:-$kimi_model}\"
+"
+
+# LibreChat ходит к Kimi/Moonshot напрямую. MCP tools подключаются самим LibreChat.
 export LIBRECHAT_TITLE_MODEL="$title_model"
 export LIBRECHAT_SUMMARY_MODEL="$summary_model"
 export LOCAL_OLLAMA_MODEL_LIST_YAML="$local_model_yaml"
 export CLOUD_MODEL_ENDPOINT_YAML="$cloud_endpoint_yaml"
+export MODEL_ENDPOINTS_YAML="$model_endpoints_yaml"
 export LANGFUSE_MCP_BASIC_TOKEN="${LANGFUSE_MCP_BASIC_TOKEN:-}"
 
 # Маленький Python-блок делает безопасную текстовую подстановку placeholders в YAML-template.
@@ -84,12 +103,11 @@ import os
 
 template = Path('/app/librechat.yaml.template').read_text()
 for key in [
-    'LLM_GATEWAY_API_KEY',
-    'LLM_GATEWAY_BASE_URL',
     'LIBRECHAT_TITLE_MODEL',
     'LIBRECHAT_SUMMARY_MODEL',
     'LOCAL_OLLAMA_MODEL_LIST_YAML',
     'CLOUD_MODEL_ENDPOINT_YAML',
+    'MODEL_ENDPOINTS_YAML',
     'LANGFUSE_MCP_BASIC_TOKEN',
 ]:
     template = template.replace('${' + key + '}', os.environ.get(key, ''))
