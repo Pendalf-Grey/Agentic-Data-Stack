@@ -280,6 +280,16 @@ services:
       AIRFLOW_ELASTICSEARCH_BATCH_CRON: ${AIRFLOW_ELASTICSEARCH_BATCH_CRON:-15 * * * *}
       ELASTICSEARCH_INDEX_PATTERN: ${ELASTICSEARCH_INDEX_PATTERN:-logs-*}
       ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-1000}
+      AIRFLOW_LIBRECHAT_RAG_BULK_CRON: ${AIRFLOW_LIBRECHAT_RAG_BULK_CRON:-* * * * *}
+      AIRFLOW_LIBRECHAT_RAG_BULK_PAUSED: ${AIRFLOW_LIBRECHAT_RAG_BULK_PAUSED:-false}
+      LIBRECHAT_RAG_API_URL: ${LIBRECHAT_RAG_API_URL:-http://rag_api:8000}
+      LIBRECHAT_RAG_BULK_DIR: ${LIBRECHAT_RAG_BULK_DIR:-/opt/airflow/rag_bulk/incoming}
+      LIBRECHAT_RAG_BULK_ENTITY_ID: ${LIBRECHAT_RAG_BULK_ENTITY_ID:-auto}
+      LIBRECHAT_RAG_BULK_USER_EMAIL: ${LIBRECHAT_RAG_BULK_USER_EMAIL:-}
+      JWT_SECRET: ${JWT_SECRET:-change-me-generate-secure-jwt-secret}
+      LIBRECHAT_JWT_SECRET: ${JWT_SECRET:-${LIBRECHAT_JWT_SECRET:-change-me-generate-secure-jwt-secret}}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://librechat-db:27017/LibreChat}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-pymongo==4.10.1}
     command: version
 
   airflow-webserver:
@@ -304,11 +314,22 @@ services:
       AIRFLOW_ELASTICSEARCH_BATCH_CRON: ${AIRFLOW_ELASTICSEARCH_BATCH_CRON:-15 * * * *}
       ELASTICSEARCH_INDEX_PATTERN: ${ELASTICSEARCH_INDEX_PATTERN:-logs-*}
       ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-1000}
+      AIRFLOW_LIBRECHAT_RAG_BULK_CRON: ${AIRFLOW_LIBRECHAT_RAG_BULK_CRON:-* * * * *}
+      AIRFLOW_LIBRECHAT_RAG_BULK_PAUSED: ${AIRFLOW_LIBRECHAT_RAG_BULK_PAUSED:-false}
+      LIBRECHAT_RAG_API_URL: ${LIBRECHAT_RAG_API_URL:-http://rag_api:8000}
+      LIBRECHAT_RAG_BULK_DIR: ${LIBRECHAT_RAG_BULK_DIR:-/opt/airflow/rag_bulk/incoming}
+      LIBRECHAT_RAG_BULK_ENTITY_ID: ${LIBRECHAT_RAG_BULK_ENTITY_ID:-auto}
+      LIBRECHAT_RAG_BULK_USER_EMAIL: ${LIBRECHAT_RAG_BULK_USER_EMAIL:-}
+      JWT_SECRET: ${JWT_SECRET:-change-me-generate-secure-jwt-secret}
+      LIBRECHAT_JWT_SECRET: ${JWT_SECRET:-${LIBRECHAT_JWT_SECRET:-change-me-generate-secure-jwt-secret}}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://librechat-db:27017/LibreChat}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-pymongo==4.10.1}
     ports:
       - "8081:8080"
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./debezium/connectors:/opt/airflow/connectors:ro
+      - ./librechat/rag_bulk:/opt/airflow/rag_bulk
     command: webserver
 
   airflow-scheduler:
@@ -333,9 +354,20 @@ services:
       AIRFLOW_ELASTICSEARCH_BATCH_CRON: ${AIRFLOW_ELASTICSEARCH_BATCH_CRON:-15 * * * *}
       ELASTICSEARCH_INDEX_PATTERN: ${ELASTICSEARCH_INDEX_PATTERN:-logs-*}
       ELASTICSEARCH_BATCH_SIZE: ${ELASTICSEARCH_BATCH_SIZE:-1000}
+      AIRFLOW_LIBRECHAT_RAG_BULK_CRON: ${AIRFLOW_LIBRECHAT_RAG_BULK_CRON:-* * * * *}
+      AIRFLOW_LIBRECHAT_RAG_BULK_PAUSED: ${AIRFLOW_LIBRECHAT_RAG_BULK_PAUSED:-false}
+      LIBRECHAT_RAG_API_URL: ${LIBRECHAT_RAG_API_URL:-http://rag_api:8000}
+      LIBRECHAT_RAG_BULK_DIR: ${LIBRECHAT_RAG_BULK_DIR:-/opt/airflow/rag_bulk/incoming}
+      LIBRECHAT_RAG_BULK_ENTITY_ID: ${LIBRECHAT_RAG_BULK_ENTITY_ID:-auto}
+      LIBRECHAT_RAG_BULK_USER_EMAIL: ${LIBRECHAT_RAG_BULK_USER_EMAIL:-}
+      JWT_SECRET: ${JWT_SECRET:-change-me-generate-secure-jwt-secret}
+      LIBRECHAT_JWT_SECRET: ${JWT_SECRET:-${LIBRECHAT_JWT_SECRET:-change-me-generate-secure-jwt-secret}}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://librechat-db:27017/LibreChat}
+      _PIP_ADDITIONAL_REQUIREMENTS: ${AIRFLOW_PIP_ADDITIONAL_REQUIREMENTS:-pymongo==4.10.1}
     volumes:
       - ./airflow/dags:/opt/airflow/dags:ro
       - ./debezium/connectors:/opt/airflow/connectors:ro
+      - ./librechat/rag_bulk:/opt/airflow/rag_bulk
     command: scheduler
 
   grafana:
@@ -532,6 +564,50 @@ services:
     volumes:
       - librechat_mongo_data:/data/db
 
+  vectordb:
+    image: pgvector/pgvector:0.8.0-pg15-trixie
+    environment:
+      POSTGRES_DB: ${RAG_POSTGRES_DB:-mydatabase}
+      POSTGRES_USER: ${RAG_POSTGRES_USER:-myuser}
+      POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:-mypassword}
+    volumes:
+      - librechat_pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RAG_POSTGRES_USER:-myuser} -d ${RAG_POSTGRES_DB:-mydatabase}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rag_api:
+    image: registry.librechat.ai/danny-avila/librechat-rag-api-dev-lite:latest
+    depends_on:
+      vectordb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DB_HOST: vectordb
+      DB_PORT: 5432
+      POSTGRES_DB: ${RAG_POSTGRES_DB:-mydatabase}
+      POSTGRES_USER: ${RAG_POSTGRES_USER:-myuser}
+      POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:-mypassword}
+      VECTOR_DB_TYPE: pgvector
+      RAG_PORT: ${RAG_PORT:-8000}
+      RAG_UPLOAD_DIR: /rag_bulk/incoming
+      RAG_OPENAI_API_KEY: ${RAG_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}
+      RAG_OPENAI_BASEURL: ${RAG_OPENAI_BASEURL:-}
+      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-ollama}
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-nomic-embed-text}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      CHUNK_SIZE: ${RAG_CHUNK_SIZE:-1500}
+      CHUNK_OVERLAP: ${RAG_CHUNK_OVERLAP:-100}
+      EMBEDDING_BATCH_SIZE: ${RAG_EMBEDDING_BATCH_SIZE:-250}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./librechat/rag_bulk:/rag_bulk
+    restart: unless-stopped
+
   mcp-clickhouse:
     image: mcp/clickhouse
     depends_on:
@@ -565,6 +641,7 @@ services:
     image: ghcr.io/danny-avila/librechat@sha256:a46254938507971e0d4f7ed3f9d116bd9b118f4810b5b75eb716baf575645068
     depends_on:
       - librechat-db
+      - rag_api
       - mcp-clickhouse
       - mcp-grafana
       - langfuse-web
@@ -573,8 +650,8 @@ services:
       MONGO_URI: mongodb://librechat-db:27017/LibreChat
       DOMAIN_CLIENT: http://localhost:3080
       DOMAIN_SERVER: http://localhost:3080
-      JWT_SECRET: ${LIBRECHAT_JWT_SECRET:-change-me-generate-secure-jwt-secret}
-      JWT_REFRESH_SECRET: ${LIBRECHAT_JWT_REFRESH_SECRET:-change-me-generate-secure-jwt-refresh-secret}
+      JWT_SECRET: ${JWT_SECRET:-${LIBRECHAT_JWT_SECRET:-change-me-generate-secure-jwt-secret}}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-${LIBRECHAT_JWT_REFRESH_SECRET:-change-me-generate-secure-jwt-refresh-secret}}
       ALLOW_EMAIL_LOGIN: ${ALLOW_EMAIL_LOGIN:-true}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
       ALLOW_UNVERIFIED_EMAIL_LOGIN: ${ALLOW_UNVERIFIED_EMAIL_LOGIN:-true}
@@ -586,6 +663,8 @@ services:
       KIMI_MODELS: ${KIMI_MODELS:-kimi-k2.6}
       KIMI_TITLE_MODEL: ${KIMI_TITLE_MODEL:-kimi-k2.6}
       KIMI_SUMMARY_MODEL: ${KIMI_SUMMARY_MODEL:-kimi-k2.6}
+      RAG_PORT: ${RAG_PORT:-8000}
+      RAG_API_URL: ${RAG_API_URL:-http://rag_api:8000}
       MODEL: ${MODEL:-qwen2.5:7b}
       MODEL_FAST: ${MODEL_FAST:-qwen2.5:7b}
       MODEL_SMART: ${MODEL_SMART:-qwen3:14b}
@@ -608,6 +687,7 @@ services:
     volumes:
       - ./librechat/librechat.yaml.template:/app/librechat.yaml.template:ro
       - ./librechat/render-config.sh:/app/render-config.sh:ro
+      - ./uploads:/app/uploads
     command: sh /app/render-config.sh
 
 volumes:
@@ -617,6 +697,7 @@ volumes:
   airflow_db_data:
   grafana_data:
   librechat_mongo_data:
+  librechat_pgvector_data:
   langfuse_postgres_data:
   langfuse_redis_data:
   langfuse_minio_data:

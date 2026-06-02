@@ -9,3 +9,12 @@ npm-debug.log*
 __pycache__/
 *.py[cod]
 elasticsearch-synthetic-lab/data/
+data-node/
+logs/
+meili_data_v1.35.1/
+librechat.yaml
+librechat/rag_bulk/.airflow_rag_manifest.json
+librechat/rag_bulk/incoming/*
+!librechat/rag_bulk/incoming/.gitkeep
+uploads/*
+!uploads/.gitkeep
