@@ -84,7 +84,7 @@ ___
 ___
 **LibreChat** — web UI для общения с моделью.
 
-В этом проекте LibreChat подключен к локальной или облачной OpenAI-compatible модели через `llm-gateway`. Также LibreChat видит MCP tools и может просить их анализировать ClickHouse.
+В этом проекте LibreChat подключен к Kimi/Moonshot напрямую и видит MCP tools ClickHouse, Grafana и Langfuse.
 
 В других проектах LibreChat часто используют как единый чат-интерфейс к нескольким LLM providers.
 ___
@@ -92,7 +92,7 @@ ___
 
 **Observability** означает наблюдаемость: мы видим не только итоговый ответ модели, но и trace запроса, latency, model name, input, output, usage tokens и ошибки.
 
-В этом проекте Langfuse получает traces от `llm-gateway`. LibreChat отправляет запрос в `llm-gateway`, `llm-gateway` вызывает локальную или облачную модель и параллельно отправляет trace в Langfuse.
+В этом проекте Langfuse подключен к LibreChat через Langfuse MCP. Это дает модели Langfuse tools; для автоматической трассировки всех LLM/tool вызовов нужна отдельная instrumentation на стороне клиента.
 
 В других проектах Langfuse часто используют для debugging LLM-приложений, оценки качества ответов, анализа стоимости, prompt management и поиска “почему модель ответила именно так”.
 ___
@@ -210,7 +210,7 @@ prometheus-connector
 sh tools/prometheus-stream-to-clickhouse.sh
 ```
 
-Команда поднимает `clickhouse`, `prometheus-connector`, `mcp-server` и запускает synthetic lab Prometheus с уже подготовленным `remote_write`.
+Команда поднимает `clickhouse`, официальный `mcp-clickhouse`, `prometheus-connector` и запускает synthetic lab Prometheus с уже подготовленным `remote_write`.
 
 Схема потока:
 
@@ -778,46 +778,26 @@ openssl rand -hex 32
 
 ```bash
 curl http://localhost:3002/api/public/health
-docker compose logs llm-gateway
 docker compose logs langfuse-web
 docker compose logs langfuse-worker
 ```
 
-## Локальная Или Облачная Модель
+## Kimi / Moonshot Model
 
-LibreChat ходит в модель через `llm-gateway`.
+LibreChat ходит в `kimi-k2.6` напрямую через custom endpoint `Moonshot`.
 
-`llm-gateway` также отправляет traces в Langfuse, если включено:
-
-```env
-LANGFUSE_ENABLED=true
-LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
-```
-
-Для Ollama на macOS обычно используется:
+Минимальные настройки в `.env`:
 
 ```env
-UPSTREAM_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
-UPSTREAM_OPENAI_API_KEY=local-dev-key
+KIMI_API_KEY=replace-with-kimi-api-key
+KIMI_BASE_URL=https://api.moonshot.ai/v1
+KIMI_MODEL=kimi-k2.6
+KIMI_MODELS=kimi-k2.6
 ```
 
-Список моделей для UI:
+Endpoint должен называться `Moonshot`, потому что для Kimi reasoning + tool calling LibreChat корректнее работает через этот provider name.
 
-```env
-LIBRECHAT_MODELS=qwen2.5:7b,qwen2.5:14b,qwen3:14b,llama3.2-vision:latest
-OPENAI_MODEL=qwen2.5:7b
-OPENAI_MODEL_SMART=qwen3:14b
-```
-
-`qwen3:14b` уже добавлен в пример конфигурации LibreChat.
-
-Добавление любой новой Ollama-модели выглядит так:
-
-```bash
-ollama pull qwen3:14b
-```
-
-Затем добавьте точный tag модели в `LIBRECHAT_MODELS` в `.env` и пересоздайте LibreChat:
+После изменения `.env` пересоздайте LibreChat:
 
 ```bash
 docker compose up -d --force-recreate librechat
@@ -825,7 +805,7 @@ docker compose up -d --force-recreate librechat
 
 Менять Docker image для этого не нужно: `librechat/render-config.sh` на старте собирает `/app/librechat.yaml` из `.env` и `librechat/librechat.yaml.template`.
 
-Моделей может быть сколько угодно. `OPENAI_MODEL` удобно держать быстрым для обычного чата, а `OPENAI_MODEL_SMART` указывать на более сильную модель вроде `qwen3:14b`.
+Файл `librechat/librechat.yaml` оставлен как статический reference-конфиг. Активный файл внутри контейнера генерируется из template.
 
 ## Endpoints
 
@@ -842,12 +822,9 @@ docker compose up -d --force-recreate librechat
 - `http://localhost:3355/health` — healthcheck `prometheus-connector`.
 - `http://localhost:3355/api/v1/write` — Prometheus remote_write receiver.
 - `http://localhost:3355/backfill` — historical backfill из Prometheus HTTP API.
-- `http://localhost:3333/health` — healthcheck MCP server.
-- `http://localhost:3333/mcp` — MCP endpoint. Внутри Docker LibreChat использует `http://mcp-server:3333/mcp`.
-- `http://localhost:3344/health` — healthcheck `llm-gateway`.
-- `http://localhost:3344/v1/models` — debug endpoint списка моделей через `llm-gateway`.
-- `http://llm-gateway:3344/v1` — внутренний Docker endpoint для LibreChat.
-- `http://host.docker.internal:11434/v1` — OpenAI-compatible endpoint Ollama на macOS.
+- `http://localhost:8001/sse` — официальный ClickHouse MCP endpoint. Внутри Docker LibreChat использует `http://mcp-clickhouse:8000/sse`.
+- `http://localhost:8002/sse` — официальный Grafana MCP endpoint. Внутри Docker LibreChat использует `http://mcp-grafana:8000/sse`.
+- `http://langfuse-web:3000/api/public/mcp` — внутренний Docker endpoint Langfuse MCP для LibreChat.
 - `http://localhost:8083` — Debezium Kafka Connect REST API.
 - `http://localhost:8083/connectors` — список зарегистрированных Debezium connectors.
 - `http://localhost:8123/play` — ClickHouse Web UI.

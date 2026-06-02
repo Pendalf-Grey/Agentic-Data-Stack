@@ -226,11 +226,7 @@ Agentic Data Stack LLM
 
 ![Langfuse trace](docs/images/img_11.png)
 
-`llm-gateway` отправляет traces в Langfuse автоматически, если в `.env` включено:
-
-```env
-LANGFUSE_ENABLED=true
-```
+Langfuse подключен к LibreChat через Langfuse MCP. Это дает модели Langfuse tools; для автоматической трассировки всех LLM/tool вызовов нужна отдельная instrumentation на стороне клиента.
 
 ## 8. Prometheus Connector
 

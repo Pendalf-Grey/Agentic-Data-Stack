@@ -11,7 +11,8 @@ PROMETHEUS_REMOTE_WRITE_URL=${PROMETHEUS_REMOTE_WRITE_URL:-"http://host.docker.i
 cd "$ROOT_DIR"
 
 # Поднимаем минимальные сервисы, нужные для приема remote_write и дальнейшего анализа.
-docker compose up -d --build clickhouse prometheus-connector mcp-server
+docker compose up -d clickhouse mcp-clickhouse
+docker compose up -d --build prometheus-connector
 
 # Если задан prometheus.yml, проверяем, что в нем есть remote_write.
 # Скрипт не переписывает чужой Prometheus config автоматически, чтобы не сломать внешний мониторинг.
