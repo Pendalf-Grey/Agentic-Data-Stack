@@ -2,10 +2,22 @@ version: 1.2.1
 
 cache: true
 
+interface:
+  fileSearch: true
+
+fileConfig:
+  endpoints:
+    default:
+      fileLimit: 5
+      fileSizeLimit: 50
+      totalSizeLimit: 100
+  serverFileSizeLimit: 100
+
 mcpSettings:
   allowedDomains:
     - "http://mcp-clickhouse:8000"
     - "http://mcp-grafana:8000"
+    - "http://mcp-adcore:8000"
     - "http://langfuse-web:3000"
 
 endpoints:
@@ -33,6 +45,17 @@ mcpServers:
       Use this Grafana MCP server only when the user asks to create, find, inspect, or update Grafana dashboards or visualizations.
       For analytics data, use ClickHouse MCP first to produce the exact SELECT query and result rows, then use Grafana MCP to create or update a dashboard/panel based on that query.
       Prefer concise dashboard and panel titles. Use the existing ClickHouse datasource when creating panels.
+
+  adcore:
+    type: sse
+    url: http://mcp-adcore:8000/sse
+    timeout: 120000
+    serverInstructions: |
+      Use this Adcore MCP server when the user asks to inspect or operate the external adcore AI DevOps/MLOps platform.
+      The Adcore MCP server is an adapter over the external adcore HTTP API; it does not replace adcore and does not provide a separate model gateway.
+      First check adcore_health, adcore_status, or adcore_openapi when you need to understand availability or supported API shape.
+      Use adcore_send_task to delegate a DevOps/MLOps task to adcore. Do not invent execution results; answer only from tool responses.
+      Treat destructive infrastructure, deployment, credential, or repository actions as requiring explicit user confirmation unless the adcore response clearly says it only planned or inspected.
 
   langfuse:
     type: streamable-http
