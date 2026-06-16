@@ -73,6 +73,21 @@ if [ -z "$kimi_model_yaml" ]; then
   kimi_model_yaml='          - "kimi-k2.6"
 '
 fi
+kimi_reasoning_params_enabled="${KIMI_REASONING_PARAMS_ENABLED:-auto}"
+kimi_reasoning_params_yaml=""
+case "$kimi_reasoning_params_enabled:${KIMI_BASE_URL:-https://api.moonshot.ai/v1}" in
+  true:*|auto:*openrouter.ai*)
+    kimi_reasoning_effort="${KIMI_REASONING_EFFORT:-none}"
+    kimi_include_reasoning="${KIMI_INCLUDE_REASONING:-false}"
+    kimi_reasoning_exclude="${KIMI_REASONING_EXCLUDE:-true}"
+    kimi_reasoning_params_yaml="        include_reasoning: ${kimi_include_reasoning}
+        reasoning_effort: \"${kimi_reasoning_effort}\"
+        reasoning:
+          effort: \"${kimi_reasoning_effort}\"
+          exclude: ${kimi_reasoning_exclude}
+"
+    ;;
+esac
 
 model_endpoints_yaml="    - name: \"Moonshot\"
       apiKey: \"\${KIMI_API_KEY}\"
@@ -84,6 +99,7 @@ ${kimi_model_yaml}
       addParams:
         thinking:
           type: \"${KIMI_THINKING_TYPE:-disabled}\"
+${kimi_reasoning_params_yaml}
       titleConvo: true
       titleModel: \"${KIMI_TITLE_MODEL:-$kimi_model}\"
       summarize: false
