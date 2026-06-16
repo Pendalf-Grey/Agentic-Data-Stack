@@ -98,6 +98,8 @@ export CLOUD_MODEL_ENDPOINT_YAML="$cloud_endpoint_yaml"
 export MODEL_ENDPOINTS_YAML="$model_endpoints_yaml"
 export LANGFUSE_MCP_BASIC_TOKEN="${LANGFUSE_MCP_BASIC_TOKEN:-}"
 export GRAFANA_BASE_URL="${GRAFANA_BASE_URL:-http://localhost:3001}"
+export KIMI_API_KEY="${KIMI_API_KEY:-${MOONSHOT_API_KEY:-}}"
+export KIMI_BASE_URL="${KIMI_BASE_URL:-https://api.moonshot.ai/v1}"
 export KIMI_MODEL="${KIMI_MODEL:-kimi-k2.6}"
 export ADS_ANALYTICS_DATABASE="${ADS_ANALYTICS_DATABASE:-${CLICKHOUSE_DB:-analytics}}"
 ads_llm_result_database="${ADS_LLM_LOG_RESULT_DATABASE:-${LLM_LOG_RESULT_DATABASE:-${CLICKHOUSE_DB:-analytics}}}"
@@ -124,6 +126,8 @@ for key in [
     'LOCAL_OLLAMA_MODEL_LIST_YAML',
     'CLOUD_MODEL_ENDPOINT_YAML',
     'MODEL_ENDPOINTS_YAML',
+    'KIMI_API_KEY',
+    'KIMI_BASE_URL',
     'LANGFUSE_MCP_BASIC_TOKEN',
     'GRAFANA_BASE_URL',
     'KIMI_MODEL',
