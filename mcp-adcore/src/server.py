@@ -9,7 +9,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 
-BASE_URL = os.getenv("ADCORE_BASE_URL", "http://host.docker.internal:8080").rstrip("/")
+BASE_URL = os.getenv("ADCORE_BASE_URL", "").rstrip("/")
 API_TOKEN = os.getenv("ADCORE_API_TOKEN", "")
 USERNAME = os.getenv("ADCORE_USERNAME", "")
 PASSWORD = os.getenv("ADCORE_PASSWORD", "")
@@ -76,6 +76,13 @@ class AdcoreClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if not BASE_URL:
+            return {
+                "ok": False,
+                "status_code": None,
+                "error": "ConfigError",
+                "message": "ADCORE_BASE_URL is not set. Use the Tailscale URL of the external Adcore gateway.",
+            }
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, verify=VERIFY_TLS) as client:
                 response = await client.request(
@@ -175,9 +182,11 @@ async def adcore_send_task(
 ) -> dict[str, Any]:
     """Send a task to the external adcore agent through POST /v1/chat."""
     body: dict[str, Any] = {
-        "message": message,
-        "stream": False,
-        "access_levels": access_levels if access_levels is not None else DEFAULT_ACCESS_LEVELS,
+        "text": message,
+        "options": {
+            "stream": False,
+            "access_levels": access_levels if access_levels is not None else DEFAULT_ACCESS_LEVELS,
+        },
     }
     if session_id:
         body["session_id"] = session_id

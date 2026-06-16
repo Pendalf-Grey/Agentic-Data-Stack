@@ -6,13 +6,13 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 LAB_DIR="$ROOT_DIR/elasticsearch-synthetic-lab"
-BULK_FILE=${ELASTICSEARCH_DEMO_BULK_FILE:-"$LAB_DIR/fixtures/synthetic-logs.bulk.ndjson"}
-META_FILE=${ELASTICSEARCH_DEMO_META_FILE:-"$LAB_DIR/fixtures/synthetic-logs.meta.json"}
+BULK_FILE=${ELASTICSEARCH_DEMO_BULK_FILE:-"$LAB_DIR/data/synthetic-logs.bulk.ndjson"}
+META_FILE=${ELASTICSEARCH_DEMO_META_FILE:-"$LAB_DIR/data/synthetic-logs.meta.json"}
 ES_PUBLIC_URL=${ELASTICSEARCH_PUBLIC_URL:-http://localhost:9200}
 ES_CONTAINER_URL=${ELASTICSEARCH_BASE_URL:-http://elasticsearch:9200}
 ELASTICSEARCH_DEMO_INDEX_PREFIX=${ELASTICSEARCH_DEMO_INDEX_PREFIX:-nginx-logs}
 ELASTICSEARCH_DEMO_CLEAR=${ELASTICSEARCH_DEMO_CLEAR:-true}
-ELASTICSEARCH_DEMO_REGENERATE=${ELASTICSEARCH_DEMO_REGENERATE:-false}
+ELASTICSEARCH_DEMO_REGENERATE=${ELASTICSEARCH_DEMO_REGENERATE:-true}
 ELASTICSEARCH_BATCH_SIZE=${ELASTICSEARCH_BATCH_SIZE:-1000}
 
 cd "$ROOT_DIR"
@@ -47,6 +47,9 @@ if [ ! -f "$BULK_FILE" ] || [ ! -f "$META_FILE" ]; then
 fi
 
 if [ "$ELASTICSEARCH_DEMO_CLEAR" = "true" ]; then
+  for existing_index in $(curl -fsS "$ES_PUBLIC_URL/_cat/indices/$ELASTICSEARCH_DEMO_INDEX_PREFIX-*?h=index&s=index" 2>/dev/null || true); do
+    curl -fsS -X DELETE "$ES_PUBLIC_URL/$existing_index" >/dev/null 2>&1 || true
+  done
   for index_name in $(python3 - "$META_FILE" <<'PY'
 import json
 import sys
@@ -60,13 +63,21 @@ PY
   done
 fi
 
-curl -fsS \
-  -H 'Content-Type: application/x-ndjson' \
-  --data-binary "@$BULK_FILE" \
-  "$ES_PUBLIC_URL/_bulk?refresh=true" \
-  -o "$LAB_DIR/data/elasticsearch/bulk-response.json"
+bulk_part_dir="$LAB_DIR/data/elasticsearch/bulk-parts"
+rm -rf "$bulk_part_dir"
+mkdir -p "$bulk_part_dir"
+split -l "$((ELASTICSEARCH_BATCH_SIZE * 2))" -d -a 6 "$BULK_FILE" "$bulk_part_dir/part-"
 
-python3 - "$LAB_DIR/data/elasticsearch/bulk-response.json" <<'PY'
+bulk_items=0
+bulk_response="$LAB_DIR/data/elasticsearch/bulk-response.json"
+for bulk_part in "$bulk_part_dir"/part-*; do
+  curl -fsS \
+    -H 'Content-Type: application/x-ndjson' \
+    --data-binary "@$bulk_part" \
+    "$ES_PUBLIC_URL/_bulk?refresh=false" \
+    -o "$LAB_DIR/data/elasticsearch/bulk-response-part.json"
+
+  part_items=$(python3 - "$LAB_DIR/data/elasticsearch/bulk-response-part.json" <<'PY'
 import json
 import sys
 
@@ -81,8 +92,13 @@ if payload.get("errors"):
         if len(errors) >= 3:
             break
     raise SystemExit(json.dumps({"bulkErrors": errors}, ensure_ascii=False, indent=2))
-print(json.dumps({"bulkErrors": False, "items": len(payload.get("items", []))}, ensure_ascii=False, indent=2))
+print(len(payload.get("items", [])))
 PY
+)
+  bulk_items=$((bulk_items + part_items))
+done
+curl -fsS -X POST "$ES_PUBLIC_URL/$ELASTICSEARCH_DEMO_INDEX_PREFIX-*/_refresh" >/dev/null
+printf '{"bulkErrors":false,"items":%s}\n' "$bulk_items" | tee "$bulk_response"
 
 ELASTICSEARCH_BATCH_START=$(python3 - "$META_FILE" <<'PY'
 import json

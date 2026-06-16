@@ -252,6 +252,7 @@ def iter_unsupported_files() -> list[Path]:
     schedule=RAG_BULK_CRON,
     start_date=datetime(2024, 1, 1),
     catchup=False,
+    max_active_runs=1,
     is_paused_upon_creation=RAG_BULK_PAUSED,
     tags=["agentic-data-stack", "librechat", "rag", "pgvector", "bulk"],
 )

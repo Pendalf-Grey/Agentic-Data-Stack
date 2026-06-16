@@ -381,7 +381,7 @@ services:
       GF_SERVER_ROOT_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_INSTALL_PLUGINS: ${GRAFANA_INSTALL_PLUGINS:-}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_password}
@@ -630,7 +630,7 @@ services:
     depends_on:
       - grafana
     environment:
-      GRAFANA_URL: http://grafana:3000
+      GRAFANA_URL: ${GRAFANA_MCP_URL:-http://host.docker.internal:3001}
       GRAFANA_USERNAME: ${GRAFANA_ADMIN_USER:-admin}
       GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GRAFANA_ORG_ID: 1
@@ -640,10 +640,8 @@ services:
   mcp-adcore:
     build:
       context: ./mcp-adcore
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
-      ADCORE_BASE_URL: ${ADCORE_BASE_URL:-http://host.docker.internal:8080}
+      ADCORE_BASE_URL: ${ADCORE_BASE_URL:?Set ADCORE_BASE_URL to your external Adcore gateway URL, for example http://203.0.113.10:8443}
       ADCORE_API_TOKEN: ${ADCORE_API_TOKEN:-}
       ADCORE_USERNAME: ${ADCORE_USERNAME:-}
       ADCORE_PASSWORD: ${ADCORE_PASSWORD:-}
@@ -700,6 +698,12 @@ services:
       CLOUD_MODEL_SUMMARY_MODEL: ${CLOUD_MODEL_SUMMARY_MODEL:-}
       LIBRECHAT_TITLE_MODEL: ${LIBRECHAT_TITLE_MODEL:-qwen2.5:7b}
       LIBRECHAT_SUMMARY_MODEL: ${LIBRECHAT_SUMMARY_MODEL:-qwen2.5:7b}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
+      ADS_ANALYTICS_DATABASE: ${ADS_ANALYTICS_DATABASE:-}
+      GRAFANA_BASE_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
       LANGFUSE_MCP_BASIC_TOKEN: ${LANGFUSE_MCP_BASIC_TOKEN}
       NO_INDEX: "true"
     ports:

@@ -81,6 +81,9 @@ model_endpoints_yaml="    - name: \"Moonshot\"
         default:
 ${kimi_model_yaml}
         fetch: false
+      addParams:
+        thinking:
+          type: \"${KIMI_THINKING_TYPE:-disabled}\"
       titleConvo: true
       titleModel: \"${KIMI_TITLE_MODEL:-$kimi_model}\"
       summarize: false
@@ -94,6 +97,16 @@ export LOCAL_OLLAMA_MODEL_LIST_YAML="$local_model_yaml"
 export CLOUD_MODEL_ENDPOINT_YAML="$cloud_endpoint_yaml"
 export MODEL_ENDPOINTS_YAML="$model_endpoints_yaml"
 export LANGFUSE_MCP_BASIC_TOKEN="${LANGFUSE_MCP_BASIC_TOKEN:-}"
+export GRAFANA_BASE_URL="${GRAFANA_BASE_URL:-http://localhost:3001}"
+export ADS_ANALYTICS_DATABASE="${ADS_ANALYTICS_DATABASE:-${CLICKHOUSE_DB:-analytics}}"
+ads_llm_result_database="${ADS_LLM_LOG_RESULT_DATABASE:-${LLM_LOG_RESULT_DATABASE:-${CLICKHOUSE_DB:-analytics}}}"
+ads_llm_investigations_table="${ADS_LLM_LOG_INVESTIGATIONS_TABLE:-${LLM_LOG_INVESTIGATIONS_TABLE:-llm_log_investigations}}"
+ads_llm_chunk_reports_table="${ADS_LLM_LOG_CHUNK_REPORTS_TABLE:-${LLM_LOG_CHUNK_REPORTS_TABLE:-llm_log_chunk_reports}}"
+ads_llm_refined_sql_table="${ADS_LLM_LOG_REFINED_SQL_TABLE:-${LLM_LOG_REFINED_SQL_TABLE:-llm_log_refined_sql}}"
+export ADS_LLM_LOG_INVESTIGATIONS_FQN="${ads_llm_result_database}.${ads_llm_investigations_table}"
+export ADS_LLM_LOG_CHUNK_REPORTS_FQN="${ads_llm_result_database}.${ads_llm_chunk_reports_table}"
+export ADS_LLM_LOG_REFINED_SQL_FQN="${ads_llm_result_database}.${ads_llm_refined_sql_table}"
+export ADS_LLM_LOG_REFINEMENT_DAG_ID="${ADS_LLM_LOG_REFINEMENT_DAG_ID:-${AIRFLOW_LLM_SQL_REFINEMENT_DAG_ID:-llm_guided_log_sql_refinement}}"
 
 # Маленький Python-блок делает безопасную текстовую подстановку placeholders в YAML-template.
 # На выходе создается /app/librechat.yaml, который затем читает LibreChat backend.
@@ -109,6 +122,12 @@ for key in [
     'CLOUD_MODEL_ENDPOINT_YAML',
     'MODEL_ENDPOINTS_YAML',
     'LANGFUSE_MCP_BASIC_TOKEN',
+    'GRAFANA_BASE_URL',
+    'ADS_ANALYTICS_DATABASE',
+    'ADS_LLM_LOG_INVESTIGATIONS_FQN',
+    'ADS_LLM_LOG_CHUNK_REPORTS_FQN',
+    'ADS_LLM_LOG_REFINED_SQL_FQN',
+    'ADS_LLM_LOG_REFINEMENT_DAG_ID',
 ]:
     template = template.replace('${' + key + '}', os.environ.get(key, ''))
 Path('/app/librechat.yaml').write_text(template)
