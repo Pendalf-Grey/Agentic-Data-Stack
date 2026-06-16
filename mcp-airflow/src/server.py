@@ -20,6 +20,8 @@ POLL_INTERVAL_SECONDS = float(os.getenv("AIRFLOW_MCP_POLL_INTERVAL_SECONDS", "5"
 DEFAULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS", "900"))
 MAX_RESPONSE_CHARS = int(os.getenv("AIRFLOW_MCP_MAX_RESPONSE_CHARS", "20000"))
 
+# Основные дефолты не зашиты в код жестко: LibreChat/Kimi могут вызвать MCP
+# без параметров, а конкретный источник логов и размер batch берутся из .env.
 DEFAULT_REFINEMENT_DAG_ID = os.getenv(
     "ADS_LLM_LOG_REFINEMENT_DAG_ID",
     os.getenv("AIRFLOW_LLM_SQL_REFINEMENT_DAG_ID", "llm_guided_log_sql_refinement"),
@@ -30,7 +32,17 @@ DEFAULT_INDEX_LIKE = os.getenv("ADS_LLM_LOG_INDEX_LIKE", os.getenv("LLM_LOG_INDE
 DEFAULT_START = os.getenv("LLM_LOG_START", "2024-06-16T00:00:00Z")
 DEFAULT_END = os.getenv("LLM_LOG_END", "2026-06-16T00:00:00Z")
 DEFAULT_RAW_CHUNK_MODE = os.getenv("ADS_LLM_LOG_RAW_CHUNK_MODE", os.getenv("LLM_LOG_RAW_CHUNK_MODE", "full_period"))
-DEFAULT_CHUNK_ROW_LIMIT = int(os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "5000")))
+# batch_rows - сколько raw log rows Airflow отдаст Kimi за один chunk-анализ.
+# Старые имена переменных оставлены как fallback, чтобы не ломать существующие .env.
+DEFAULT_CHUNK_ROW_LIMIT = int(
+    os.getenv(
+        "ADS_LLM_LOG_BATCH_ROWS",
+        os.getenv(
+            "LLM_LOG_BATCH_ROWS",
+            os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "20")),
+        ),
+    )
+)
 DEFAULT_MAX_CHUNKS = int(os.getenv("ADS_LLM_LOG_MAX_CHUNKS", os.getenv("LLM_LOG_MAX_CHUNKS", "0")))
 
 RESULT_DATABASE = os.getenv("ADS_LLM_LOG_RESULT_DATABASE", os.getenv("LLM_LOG_RESULT_DATABASE", os.getenv("CLICKHOUSE_DB", "analytics")))
@@ -91,6 +103,8 @@ def parse_response(response: httpx.Response) -> Any:
 
 
 def clamp(value: Any) -> Any:
+    # Ответ MCP попадает обратно в LibreChat-контекст, поэтому длинные payload'ы
+    # режем на границе инструмента, а полные результаты оставляем в ClickHouse.
     rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     if len(rendered) <= MAX_RESPONSE_CHARS:
         return value
@@ -102,10 +116,13 @@ def now_run_suffix() -> str:
 
 
 def sql_string(value: str) -> str:
+    # Минимальное экранирование для диагностического SELECT lookup по investigation_id.
     return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def artifacts(investigation_id: str) -> dict[str, str]:
+    # MCP не тащит chunk reports в ответ целиком: он возвращает адреса таблиц и
+    # готовый lookup-запрос, который Kimi затем выполняет через ClickHouse MCP.
     return {
         "investigation_id": investigation_id,
         "investigations_table": f"{RESULT_DATABASE}.{INVESTIGATIONS_TABLE}",
@@ -154,6 +171,7 @@ async def airflow_run_log_refinement(
     source_name: str | None = None,
     index_like: str | None = None,
     raw_chunk_mode: str | None = None,
+    batch_rows: int | None = None,
     chunk_row_limit: int | None = None,
     max_chunks: int | None = None,
     investigation_id: str | None = None,
@@ -164,6 +182,8 @@ async def airflow_run_log_refinement(
     """Trigger the ADS LLM-guided raw-log SQL refinement DAG and optionally wait for completion."""
     resolved_investigation_id = investigation_id or f"ui-{uuid.uuid4()}"
     dag_run_id = f"mcp__{resolved_investigation_id}__{now_run_suffix()}"
+    # В Airflow уходит только задача и параметры чтения raw logs. Сами chunk reports
+    # и refined SQL DAG сохранит в ClickHouse, а не вернет большим MCP payload'ом.
     conf: dict[str, Any] = {
         "question": question,
         "start": iso_or_default(start, DEFAULT_START),
@@ -172,7 +192,14 @@ async def airflow_run_log_refinement(
         "source_name": source_name or DEFAULT_SOURCE_NAME,
         "index_like": index_like or DEFAULT_INDEX_LIKE,
         "raw_chunk_mode": raw_chunk_mode or DEFAULT_RAW_CHUNK_MODE,
-        "chunk_row_limit": chunk_row_limit if chunk_row_limit is not None else DEFAULT_CHUNK_ROW_LIMIT,
+        "batch_rows": batch_rows,
+        "chunk_row_limit": (
+            batch_rows
+            if batch_rows is not None
+            else chunk_row_limit
+            if chunk_row_limit is not None
+            else DEFAULT_CHUNK_ROW_LIMIT
+        ),
         "max_chunks": max_chunks if max_chunks is not None else DEFAULT_MAX_CHUNKS,
         "investigation_id": resolved_investigation_id,
     }
@@ -199,6 +226,8 @@ async def airflow_run_log_refinement(
 
     deadline = time.time() + (wait_timeout_seconds if wait_timeout_seconds is not None else DEFAULT_WAIT_TIMEOUT_SECONDS)
     last_run: dict[str, Any] | None = None
+    # Держим MCP-вызов открытым до завершения DAG, чтобы Kimi в UI сразу получила
+    # state=success и могла перейти к чтению refined_sql через ClickHouse MCP.
     while time.time() < deadline:
         last_run = await get_dag_run(dag_id, dag_run_id)
         state = ((last_run.get("data") or {}).get("state") or "").lower() if last_run.get("ok") else ""

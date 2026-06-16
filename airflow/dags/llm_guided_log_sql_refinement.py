@@ -36,7 +36,15 @@ KIMI_THINKING_TYPE = os.getenv("KIMI_THINKING_TYPE", "disabled")
 KIMI_TEMPERATURE = float(os.getenv("KIMI_TEMPERATURE", "0.6"))
 
 DEFAULT_SOURCE_TABLE = os.getenv("ADS_LLM_LOG_SOURCE_TABLE", os.getenv("LLM_LOG_SOURCE_TABLE", "analytics.elasticsearch_events_raw"))
-DEFAULT_ROW_LIMIT = int(os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "5000")))
+DEFAULT_ROW_LIMIT = int(
+    os.getenv(
+        "ADS_LLM_LOG_BATCH_ROWS",
+        os.getenv(
+            "LLM_LOG_BATCH_ROWS",
+            os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "20")),
+        ),
+    )
+)
 DEFAULT_MAX_CHUNKS = int(os.getenv("ADS_LLM_LOG_MAX_CHUNKS", os.getenv("LLM_LOG_MAX_CHUNKS", "0")))
 MIN_CHUNK_SECONDS = int(os.getenv("ADS_LLM_LOG_MIN_CHUNK_SECONDS", os.getenv("LLM_LOG_MIN_CHUNK_SECONDS", "30")))
 MAX_RAW_CHARS_PER_CHUNK = int(
@@ -462,7 +470,7 @@ def chunk_specs(start, end, max_chunks, fields, conf=None):
     source_table = (conf or {}).get("source_table") or DEFAULT_SOURCE_TABLE
     source_name = (conf or {}).get("source_name") or DEFAULT_SOURCE_NAME
     index_like = (conf or {}).get("index_like") or DEFAULT_INDEX_LIKE
-    row_limit = int((conf or {}).get("chunk_row_limit") or DEFAULT_ROW_LIMIT)
+    row_limit = int((conf or {}).get("batch_rows") or (conf or {}).get("chunk_row_limit") or DEFAULT_ROW_LIMIT)
     raw_chunk_mode = str((conf or {}).get("raw_chunk_mode") or RAW_CHUNK_MODE).strip().lower()
     if raw_chunk_mode in {"full", "full_period", "all"}:
         return full_period_chunk_specs(source_table, start, end, source_name, index_like, row_limit, max_chunks)
@@ -720,6 +728,7 @@ def llm_guided_log_sql_refinement():
         investigation_id = conf.get("investigation_id") or str(uuid.uuid4())
         fields = configured_field_expressions(conf)
         raw_chunk_mode = str(conf.get("raw_chunk_mode") or RAW_CHUNK_MODE).strip().lower()
+        started_at = time.time()
 
         ensure_tables()
         insert_rows(
@@ -820,6 +829,7 @@ def llm_guided_log_sql_refinement():
             final_json["_profile_seconds"] = period_profile.get("_profile_seconds", 0)
             final_json["_raw_chunk_mode"] = raw_chunk_mode
             final_json["_raw_chunks"] = chunk_id
+            final_json["_batch_rows"] = row_limit
             refined_sql = select_only(final_json.get("refined_sql") or "")
             validation_result = ""
             for repair_attempt in range(SQL_REPAIR_ATTEMPTS + 1):
@@ -852,6 +862,7 @@ def llm_guided_log_sql_refinement():
                         "repair_attempts": repair_attempt + 1,
                         f"_repair_{repair_attempt + 1}_kimi_seconds": repaired["seconds"],
                     }
+            final_json["_dag_total_seconds"] = round(time.time() - started_at, 3)
             insert_rows(
                 REFINED_SQL_TABLE,
                 [
@@ -879,7 +890,13 @@ def llm_guided_log_sql_refinement():
                     }
                 ],
             )
-            return {"investigation_id": investigation_id, "chunks": chunk_id, "refined_sql": refined_sql}
+            return {
+                "investigation_id": investigation_id,
+                "chunks": chunk_id,
+                "batch_rows": row_limit,
+                "total_seconds": round(time.time() - started_at, 3),
+                "refined_sql": refined_sql,
+            }
         except Exception as exc:
             insert_rows(
                 INVESTIGATIONS_TABLE,
