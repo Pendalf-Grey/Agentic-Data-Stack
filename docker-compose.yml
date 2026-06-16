@@ -246,6 +246,7 @@ services:
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
     profiles:
       - elasticsearch
     environment:
@@ -766,6 +767,11 @@ services:
       AIRFLOW_MCP_POLL_INTERVAL_SECONDS: ${AIRFLOW_MCP_POLL_INTERVAL_SECONDS:-5}
       AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS: ${AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS:-900}
       AIRFLOW_MCP_MAX_RESPONSE_CHARS: ${AIRFLOW_MCP_MAX_RESPONSE_CHARS:-20000}
+      AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST: ${AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST:-50}
+      CLICKHOUSE_HOST: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_password}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-analytics}
       ADS_LLM_LOG_REFINEMENT_DAG_ID: ${ADS_LLM_LOG_REFINEMENT_DAG_ID:-llm_guided_log_sql_refinement}
       ADS_LLM_LOG_SOURCE_TABLE: ${ADS_LLM_LOG_SOURCE_TABLE:-analytics.elasticsearch_events_raw}
       ADS_LLM_LOG_SOURCE_NAME: ${ADS_LLM_LOG_SOURCE_NAME:-elasticsearch-demo}

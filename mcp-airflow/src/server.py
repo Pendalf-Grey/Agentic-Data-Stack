@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,14 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("AIRFLOW_MCP_REQUEST_TIMEOUT_SECONDS",
 POLL_INTERVAL_SECONDS = float(os.getenv("AIRFLOW_MCP_POLL_INTERVAL_SECONDS", "5"))
 DEFAULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS", "900"))
 MAX_RESPONSE_CHARS = int(os.getenv("AIRFLOW_MCP_MAX_RESPONSE_CHARS", "20000"))
+MAX_LOG_BATCHES_PER_REQUEST = int(os.getenv("AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST", "50"))
+
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://clickhouse:8123").rstrip("/")
+if "://" not in CLICKHOUSE_HOST:
+    CLICKHOUSE_HOST = f"http://{CLICKHOUSE_HOST}:8123"
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "analytics")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "analytics_password")
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", os.getenv("CLICKHOUSE_DB", "analytics"))
 
 # Основные дефолты не зашиты в код жестко: LibreChat/Kimi могут вызвать MCP
 # без параметров, а конкретный источник логов и размер batch берутся из .env.
@@ -52,6 +61,7 @@ REFINED_SQL_TABLE = os.getenv("ADS_LLM_LOG_REFINED_SQL_TABLE", os.getenv("LLM_LO
 
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
+SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$")
 
 
 app = FastMCP("airflow", host=MCP_HOST, port=MCP_PORT)
@@ -118,6 +128,52 @@ def now_run_suffix() -> str:
 def sql_string(value: str) -> str:
     # Минимальное экранирование для диагностического SELECT lookup по investigation_id.
     return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def safe_table_name(value: str) -> str:
+    if not SAFE_TABLE_RE.match(value):
+        raise ValueError(f"Unsafe ClickHouse table name: {value!r}")
+    return value
+
+
+def clickhouse_datetime(value: str) -> str:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+async def estimate_log_batches(conf: dict[str, Any]) -> dict[str, Any]:
+    # Быстрый preflight до запуска DAG: считаем строки в ClickHouse и заранее
+    # останавливаем запросы, которые породят тысячи Kimi batch-вызовов.
+    source_table = safe_table_name(str(conf["source_table"]))
+    batch_rows = max(1, int(conf["chunk_row_limit"]))
+    sql = f"""
+SELECT count() AS rows
+FROM {source_table}
+WHERE event_time >= toDateTime64({sql_string(clickhouse_datetime(conf["start"]))}, 3, 'UTC')
+  AND event_time < toDateTime64({sql_string(clickhouse_datetime(conf["end"]))}, 3, 'UTC')
+  AND source_name = {sql_string(conf["source_name"])}
+  AND index_name LIKE {sql_string(conf["index_like"])}
+FORMAT JSONEachRow
+"""
+    async with httpx.AsyncClient(
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        headers={"X-ClickHouse-User": CLICKHOUSE_USER, "X-ClickHouse-Key": CLICKHOUSE_PASSWORD},
+    ) as http:
+        response = await http.post(f"{CLICKHOUSE_HOST}/", params={"database": CLICKHOUSE_DATABASE, "query": sql})
+    response.raise_for_status()
+    first_line = response.text.splitlines()[0] if response.text.strip() else "{}"
+    rows = int((json.loads(first_line).get("rows") or 0))
+    return {
+        "rows": rows,
+        "batch_rows": batch_rows,
+        "estimated_kimi_chunk_calls": (rows + batch_rows - 1) // batch_rows,
+        "max_kimi_chunk_calls": MAX_LOG_BATCHES_PER_REQUEST,
+    }
 
 
 def artifacts(investigation_id: str) -> dict[str, str]:
@@ -203,6 +259,53 @@ async def airflow_run_log_refinement(
         "max_chunks": max_chunks if max_chunks is not None else DEFAULT_MAX_CHUNKS,
         "investigation_id": resolved_investigation_id,
     }
+    try:
+        estimate = await estimate_log_batches(conf)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "triggered": False,
+            "state": "preflight_failed",
+            "message": (
+                "Could not estimate raw-log batch count before starting Airflow. "
+                "Do not poll the DAG; fix ClickHouse/source settings first."
+            ),
+            "error": type(exc).__name__,
+            "detail": str(exc),
+            "conf": conf,
+        }
+    if estimate["rows"] == 0 and source_name and source_name != DEFAULT_SOURCE_NAME:
+        fallback_conf = {**conf, "source_name": DEFAULT_SOURCE_NAME}
+        try:
+            fallback_estimate = await estimate_log_batches(fallback_conf)
+        except Exception:
+            fallback_estimate = None
+        if fallback_estimate and fallback_estimate["rows"] > 0:
+            estimate = {
+                **fallback_estimate,
+                "source_name_normalized_from": source_name,
+                "source_name_normalized_to": DEFAULT_SOURCE_NAME,
+            }
+            conf = fallback_conf
+    if (
+        MAX_LOG_BATCHES_PER_REQUEST > 0
+        and estimate["estimated_kimi_chunk_calls"] > MAX_LOG_BATCHES_PER_REQUEST
+    ):
+        return {
+            "ok": False,
+            "triggered": False,
+            "state": "budget_exceeded",
+            "message": (
+                "Requested raw-log interval is too large for interactive LLM refinement. "
+                "Narrow the time range or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST explicitly."
+            ),
+            "preflight": estimate,
+            "conf": conf,
+            "next_steps": [
+                "Do not call airflow_get_dag_run; no DAG was started.",
+                "Ask the user to narrow the time range, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.",
+            ],
+        }
     trigger = await client.request(
         "POST",
         f"/api/v1/dags/{dag_id}/dagRuns",
