@@ -114,6 +114,13 @@ services:
     volumes:
       - ./debezium/connectors:/connectors:ro
       - ./debezium/plugins:/debezium-plugins
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
+    restart: unless-stopped
 
   connectors-init:
     image: python:3.12-alpine
@@ -151,6 +158,13 @@ services:
       PROMETHEUS_DEBUG_JSON_ENABLED: ${PROMETHEUS_DEBUG_JSON_ENABLED:-true}
     ports:
       - "3355:3355"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://localhost:3355/health', timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
 
   elasticsearch-connector:
     # Контейнер для пакетной миграции документов из Elasticsearch в ClickHouse.
@@ -183,6 +197,13 @@ services:
       CLICKHOUSE_OFFSETS_TABLE: ${CLICKHOUSE_OFFSETS_TABLE:-ingestion_offsets}
     ports:
       - "3366:3366"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://localhost:3366/health', timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
 
   elasticsearch-stream-connector:
     # Потоковая загрузка Elasticsearch устроена как micro-batching:
@@ -215,6 +236,12 @@ services:
       ELASTICSEARCH_STREAM_CHECKPOINT_NAME: ${ELASTICSEARCH_STREAM_CHECKPOINT_NAME:-elasticsearch_stream}
       CLICKHOUSE_ELASTICSEARCH_TABLE: ${CLICKHOUSE_ELASTICSEARCH_TABLE:-elasticsearch_events_raw}
       CLICKHOUSE_OFFSETS_TABLE: ${CLICKHOUSE_OFFSETS_TABLE:-ingestion_offsets}
+    healthcheck:
+      test: ["CMD-SHELL", "ps -ef | grep -q '[p]ython src/server.py'"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
     restart: unless-stopped
 
   elasticsearch:
@@ -225,7 +252,8 @@ services:
       discovery.type: single-node
       xpack.security.enabled: "false"
       xpack.security.http.ssl.enabled: "false"
-      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      xpack.ml.enabled: ${ELASTICSEARCH_XPACK_ML_ENABLED:-false}
+      ES_JAVA_OPTS: ${ELASTICSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
     ports:
       - "9200:9200"
     volumes:
@@ -260,6 +288,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: ${AIRFLOW_API_AUTH_BACKENDS:-airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change-me-airflow-webserver-secret}
       _AIRFLOW_DB_MIGRATE: "true"
@@ -302,6 +331,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: ${AIRFLOW_API_AUTH_BACKENDS:-airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change-me-airflow-webserver-secret}
       PROMETHEUS_CONNECTOR_URL: ${PROMETHEUS_CONNECTOR_URL:-http://prometheus-connector:3355}
@@ -331,6 +361,13 @@ services:
       - ./debezium/connectors:/opt/airflow/connectors:ro
       - ./librechat/rag_bulk:/opt/airflow/rag_bulk
     command: webserver
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health >/dev/null"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
+    restart: unless-stopped
 
   airflow-scheduler:
     image: apache/airflow:2.10.2
@@ -342,6 +379,7 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: ${AIRFLOW_API_AUTH_BACKENDS:-airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:-change-me-airflow-webserver-secret}
       PROMETHEUS_CONNECTOR_URL: ${PROMETHEUS_CONNECTOR_URL:-http://prometheus-connector:3355}
@@ -369,6 +407,13 @@ services:
       - ./debezium/connectors:/opt/airflow/connectors:ro
       - ./librechat/rag_bulk:/opt/airflow/rag_bulk
     command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
+    restart: unless-stopped
 
   grafana:
     image: grafana/grafana-oss:11.3.0
@@ -391,6 +436,13 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
+    restart: unless-stopped
 
   langfuse-db:
     image: postgres:17-alpine
@@ -496,6 +548,12 @@ services:
       REDIS_TLS_ENABLED: "false"
     ports:
       - "127.0.0.1:3030:3030"
+    healthcheck:
+      test: ["CMD-SHELL", "ps -ef | grep -q '[n]ode worker/dist/index.js'"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
     restart: unless-stopped
 
   langfuse-web:
@@ -557,12 +615,24 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-admin123456}
     ports:
       - "3002:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/public/health"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
     restart: unless-stopped
 
   librechat-db:
     image: mongo:7
     volumes:
       - librechat_mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
 
   vectordb:
     image: pgvector/pgvector:0.8.0-pg15-trixie
@@ -606,6 +676,12 @@ services:
       - "8000:8000"
     volumes:
       - ./librechat/rag_bulk:/rag_bulk
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://localhost:8000/health', timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
     restart: unless-stopped
 
   mcp-clickhouse:
@@ -624,11 +700,19 @@ services:
       CLICKHOUSE_MCP_BIND_HOST: 0.0.0.0
     ports:
       - "8001:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import Request, urlopen; urlopen(Request('http://localhost:8000/sse', method='HEAD'), timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
 
   mcp-grafana:
     image: grafana/mcp-grafana
     depends_on:
-      - grafana
+      grafana:
+        condition: service_healthy
     environment:
       GRAFANA_URL: ${GRAFANA_MCP_URL:-http://host.docker.internal:3001}
       GRAFANA_USERNAME: ${GRAFANA_ADMIN_USER:-admin}
@@ -636,6 +720,13 @@ services:
       GRAFANA_ORG_ID: 1
     ports:
       - "8002:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/8000'"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
 
   mcp-adcore:
     build:
@@ -653,16 +744,70 @@ services:
       MCP_PORT: 8000
     ports:
       - "8003:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import Request, urlopen; urlopen(Request('http://localhost:8000/sse', method='HEAD'), timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
+
+  mcp-airflow:
+    build:
+      context: ./mcp-airflow
+    depends_on:
+      airflow-webserver:
+        condition: service_healthy
+    environment:
+      AIRFLOW_API_BASE_URL: ${AIRFLOW_API_BASE_URL:-http://airflow-webserver:8080}
+      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-${AIRFLOW_ADMIN_USER:-admin}}
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-${AIRFLOW_ADMIN_PASSWORD:-admin}}
+      AIRFLOW_MCP_REQUEST_TIMEOUT_SECONDS: ${AIRFLOW_MCP_REQUEST_TIMEOUT_SECONDS:-30}
+      AIRFLOW_MCP_POLL_INTERVAL_SECONDS: ${AIRFLOW_MCP_POLL_INTERVAL_SECONDS:-5}
+      AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS: ${AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS:-900}
+      AIRFLOW_MCP_MAX_RESPONSE_CHARS: ${AIRFLOW_MCP_MAX_RESPONSE_CHARS:-20000}
+      ADS_LLM_LOG_REFINEMENT_DAG_ID: ${ADS_LLM_LOG_REFINEMENT_DAG_ID:-llm_guided_log_sql_refinement}
+      ADS_LLM_LOG_SOURCE_TABLE: ${ADS_LLM_LOG_SOURCE_TABLE:-analytics.elasticsearch_events_raw}
+      ADS_LLM_LOG_SOURCE_NAME: ${ADS_LLM_LOG_SOURCE_NAME:-elasticsearch-demo}
+      ADS_LLM_LOG_INDEX_LIKE: ${ADS_LLM_LOG_INDEX_LIKE:-nginx-logs-%}
+      ADS_LLM_LOG_RAW_CHUNK_MODE: ${ADS_LLM_LOG_RAW_CHUNK_MODE:-full_period}
+      ADS_LLM_LOG_CHUNK_MAX_ROWS: ${ADS_LLM_LOG_CHUNK_MAX_ROWS:-5000}
+      ADS_LLM_LOG_MAX_CHUNKS: ${ADS_LLM_LOG_MAX_CHUNKS:-0}
+      ADS_LLM_LOG_RESULT_DATABASE: ${ADS_LLM_LOG_RESULT_DATABASE:-${CLICKHOUSE_DB:-analytics}}
+      ADS_LLM_LOG_INVESTIGATIONS_TABLE: ${ADS_LLM_LOG_INVESTIGATIONS_TABLE:-llm_log_investigations}
+      ADS_LLM_LOG_CHUNK_REPORTS_TABLE: ${ADS_LLM_LOG_CHUNK_REPORTS_TABLE:-llm_log_chunk_reports}
+      ADS_LLM_LOG_REFINED_SQL_TABLE: ${ADS_LLM_LOG_REFINED_SQL_TABLE:-llm_log_refined_sql}
+      LLM_LOG_START: ${LLM_LOG_START:-2024-06-16T00:00:00Z}
+      LLM_LOG_END: ${LLM_LOG_END:-2026-06-16T00:00:00Z}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+    ports:
+      - "8004:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import Request, urlopen; urlopen(Request('http://localhost:8000/sse', method='HEAD'), timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
 
   librechat:
     image: ghcr.io/danny-avila/librechat@sha256:a46254938507971e0d4f7ed3f9d116bd9b118f4810b5b75eb716baf575645068
     depends_on:
-      - librechat-db
-      - rag_api
-      - mcp-clickhouse
-      - mcp-grafana
-      - mcp-adcore
-      - langfuse-web
+      librechat-db:
+        condition: service_healthy
+      rag_api:
+        condition: service_healthy
+      mcp-clickhouse:
+        condition: service_healthy
+      mcp-grafana:
+        condition: service_healthy
+      mcp-adcore:
+        condition: service_healthy
+      mcp-airflow:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
     environment:
       HOST: 0.0.0.0
       MONGO_URI: mongodb://librechat-db:27017/LibreChat
@@ -713,6 +858,13 @@ services:
       - ./librechat/render-config.sh:/app/render-config.sh:ro
       - ./uploads:/app/uploads
     command: sh /app/render-config.sh
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3080"]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
+    restart: unless-stopped
 
 volumes:
   postgres_data:

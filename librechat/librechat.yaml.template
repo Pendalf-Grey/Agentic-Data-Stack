@@ -18,6 +18,7 @@ mcpSettings:
     - "http://mcp-clickhouse:8000"
     - "http://mcp-grafana:8000"
     - "http://mcp-adcore:8000"
+    - "http://mcp-airflow:8000"
     - "http://langfuse-web:3000"
 
 endpoints:
@@ -43,7 +44,7 @@ mcpServers:
       These tables contain chunk-by-chunk Kimi analysis of raw Elasticsearch logs and the refined SQL generated from that analysis.
       Before querying these refinement tables for the first time in a conversation, inspect their columns or use ClickHouse metadata. In the default ADS schema, the user prompt is stored in user_question.
       When reading ${ADS_LLM_LOG_REFINED_SQL_FQN}, select refined_sql and metadata with a normal SELECT without FORMAT clauses, then execute the returned refined_sql as the next ClickHouse MCP query.
-      Do not decide whether a log request is simple or complex. If no completed investigation exists for the requested period/question, say that the Airflow DAG ${ADS_LLM_LOG_REFINEMENT_DAG_ID} should be run first, then use its refined_sql after validation.
+      Do not decide whether a log request is simple or complex. If no completed investigation exists for the requested period/question, call the Airflow MCP tool airflow_run_log_refinement first, then read artifacts.refined_sql_lookup through ClickHouse MCP and execute the returned refined_sql.
       Do not try to load millions of raw log rows directly into a single chat response. Use bounded raw samples interactively; use the Airflow refinement flow for full-period raw-log reading.
       Use concise neutral Russian. Do not show internal reasoning, fake tool JSON, or raw MCP payloads.
       Do not invent tables, columns, rows, metrics, URLs, or values. If the schema/data does not support the question, say that clearly.
@@ -74,6 +75,19 @@ mcpServers:
       First check adcore_health, adcore_status, or adcore_openapi when you need to understand availability or supported API shape.
       Use adcore_send_task to delegate a DevOps/MLOps task to adcore. Do not invent execution results; answer only from tool responses.
       Treat destructive infrastructure, deployment, credential, or repository actions as requiring explicit user confirmation unless the adcore response clearly says it only planned or inspected.
+
+  airflow:
+    type: sse
+    url: http://mcp-airflow:8000/sse
+    timeout: 1200000
+    serverInstructions: |
+      Use this Airflow MCP server only to orchestrate ADS Airflow DAGs, primarily the LLM-guided raw Elasticsearch log SQL refinement flow.
+      For every user analytics question over Elasticsearch/raw logs, call airflow_run_log_refinement with the user's question and the requested time range before final ClickHouse analysis, unless the current conversation already has a successful investigation_id for exactly the same question and time range.
+      Do not hardcode ClickHouse table names, source names, index patterns, DAG IDs, or chunk settings. Use defaults exposed by the Airflow MCP tool unless the user explicitly asks for another source or time range.
+      After airflow_run_log_refinement succeeds, use ClickHouse MCP to read artifacts.refined_sql_lookup, then execute the returned refined_sql through ClickHouse MCP.
+      If the user asks for a chart or dashboard, run the refined SQL first, then use Grafana MCP to build the visualization from that result/query.
+      Do not claim that raw logs were analyzed unless airflow_run_log_refinement returned success and ClickHouse chunk reports exist for the returned investigation_id.
+      If airflow_run_log_refinement times out, return the dag_run_id and investigation_id and tell the user that the refinement is still running.
 
   langfuse:
     type: streamable-http
