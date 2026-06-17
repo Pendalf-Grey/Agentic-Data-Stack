@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -9,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from airflow.decorators import dag, task
+from airflow.exceptions import AirflowFailException
 
 
 REFINEMENT_MODE = os.getenv(
@@ -34,6 +36,10 @@ KIMI_API_KEY = os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY", "")
 KIMI_MODEL = os.getenv("KIMI_MODEL", os.getenv("KIMI_MODELS", "kimi-k2.6").split(",")[0].strip() or "kimi-k2.6")
 KIMI_THINKING_TYPE = os.getenv("KIMI_THINKING_TYPE", "disabled")
 KIMI_TEMPERATURE = float(os.getenv("KIMI_TEMPERATURE", "0.6"))
+KIMI_REASONING_PARAMS_ENABLED = os.getenv("KIMI_REASONING_PARAMS_ENABLED", "auto").strip().lower()
+KIMI_REASONING_EFFORT = os.getenv("KIMI_REASONING_EFFORT", "none")
+KIMI_INCLUDE_REASONING = os.getenv("KIMI_INCLUDE_REASONING", "false").strip().lower() in {"1", "true", "yes", "on"}
+KIMI_REASONING_EXCLUDE = os.getenv("KIMI_REASONING_EXCLUDE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 DEFAULT_SOURCE_TABLE = os.getenv("ADS_LLM_LOG_SOURCE_TABLE", os.getenv("LLM_LOG_SOURCE_TABLE", "analytics.elasticsearch_events_raw"))
 DEFAULT_ROW_LIMIT = int(
@@ -41,12 +47,11 @@ DEFAULT_ROW_LIMIT = int(
         "ADS_LLM_LOG_BATCH_ROWS",
         os.getenv(
             "LLM_LOG_BATCH_ROWS",
-            os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "20")),
+            os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "5")),
         ),
     )
 )
 DEFAULT_MAX_CHUNKS = int(os.getenv("ADS_LLM_LOG_MAX_CHUNKS", os.getenv("LLM_LOG_MAX_CHUNKS", "0")))
-MIN_CHUNK_SECONDS = int(os.getenv("ADS_LLM_LOG_MIN_CHUNK_SECONDS", os.getenv("LLM_LOG_MIN_CHUNK_SECONDS", "30")))
 MAX_RAW_CHARS_PER_CHUNK = int(
     os.getenv("ADS_LLM_LOG_MAX_RAW_CHARS_PER_CHUNK", os.getenv("LLM_LOG_MAX_RAW_CHARS_PER_CHUNK", "600000"))
 )
@@ -74,6 +79,25 @@ INVESTIGATIONS_TABLE = f"{RESULT_DATABASE}.{os.getenv('ADS_LLM_LOG_INVESTIGATION
 CHUNK_REPORTS_TABLE = f"{RESULT_DATABASE}.{os.getenv('ADS_LLM_LOG_CHUNK_REPORTS_TABLE', os.getenv('LLM_LOG_CHUNK_REPORTS_TABLE', 'llm_log_chunk_reports'))}"
 REFINED_SQL_TABLE = f"{RESULT_DATABASE}.{os.getenv('ADS_LLM_LOG_REFINED_SQL_TABLE', os.getenv('LLM_LOG_REFINED_SQL_TABLE', 'llm_log_refined_sql'))}"
 SQL_REPAIR_ATTEMPTS = int(os.getenv("LLM_LOG_SQL_REPAIR_ATTEMPTS", "2"))
+
+
+def env_bool(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+LANGFUSE_AIRFLOW_TRACING_ENABLED = env_bool("LANGFUSE_AIRFLOW_TRACING_ENABLED", env_bool("LANGFUSE_ENABLED", False))
+LANGFUSE_BASE_URL = os.getenv(
+    "LANGFUSE_BASE_URL",
+    os.getenv("LANGFUSE_INTERNAL_URL", "http://langfuse-web:3000"),
+).rstrip("/")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_ENVIRONMENT = os.getenv("LANGFUSE_ENVIRONMENT", "local")
+LANGFUSE_TRACE_INPUT_MAX_CHARS = int(os.getenv("LANGFUSE_TRACE_INPUT_MAX_CHARS", "20000"))
+LANGFUSE_TRACE_OUTPUT_MAX_CHARS = int(os.getenv("LANGFUSE_TRACE_OUTPUT_MAX_CHARS", "40000"))
 
 DEFAULT_FIELD_EXPRESSIONS = {
     "service": "JSONExtractString(document_json, 'service')",
@@ -174,6 +198,94 @@ def insert_rows(table, rows):
         raise RuntimeError(detail or str(error)) from error
 
 
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def clamp_text(value, max_chars):
+    if value is None:
+        return value
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "\n...[TRUNCATED_FOR_LANGFUSE]"
+    return text
+
+
+def langfuse_trace_id(investigation_id):
+    # Langfuse хорошо работает с hex-id. Делаем детерминированный id, чтобы
+    # все Airflow generation по одному расследованию попадали в один trace.
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"ads-log-refinement:{investigation_id}").hex
+
+
+def langfuse_ingest(events):
+    # Наблюдаемость не должна ломать сам анализ: если Langfuse недоступен,
+    # DAG продолжает работу, а проблему видно по логам контейнера Airflow.
+    if not (LANGFUSE_AIRFLOW_TRACING_ENABLED and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+        return
+    body = {
+        "batch": events,
+        "metadata": {
+            "batch_size": len(events),
+            "sdk_name": "agentic-data-stack-airflow",
+            "sdk_version": "local",
+            "sdk_variant": "python-stdlib",
+            "sdk_integration": "airflow-dag",
+            "public_key": LANGFUSE_PUBLIC_KEY,
+        },
+    }
+    token = base64.b64encode(f"{LANGFUSE_PUBLIC_KEY}:{LANGFUSE_SECRET_KEY}".encode("utf-8")).decode("ascii")
+    request = Request(
+        f"{LANGFUSE_BASE_URL}/api/public/ingestion",
+        data=json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {token}",
+            "X-Langfuse-Public-Key": LANGFUSE_PUBLIC_KEY,
+            "X-Langfuse-Sdk-Name": "agentic-data-stack-airflow",
+            "X-Langfuse-Sdk-Version": "local",
+            "X-Langfuse-Sdk-Variant": "python-stdlib",
+            "X-Langfuse-Sdk-Integration": "airflow-dag",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            response.read()
+    except Exception as exc:
+        print(f"[langfuse] ingestion skipped after error: {type(exc).__name__}: {exc}")
+
+
+def langfuse_trace_create(trace_id, investigation_id, user_question, start, end, metadata):
+    if not (LANGFUSE_AIRFLOW_TRACING_ENABLED and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+        return
+    langfuse_ingest(
+        [
+            {
+                "id": str(uuid.uuid4()),
+                "type": "trace-create",
+                "timestamp": utc_now_iso(),
+                "body": {
+                    "id": trace_id,
+                    "name": "Airflow LLM log refinement",
+                    "timestamp": utc_now_iso(),
+                    "environment": LANGFUSE_ENVIRONMENT,
+                    "sessionId": investigation_id,
+                    "userId": "airflow",
+                    "input": clamp_text(
+                        {
+                            "question": user_question,
+                            "time_from": start.isoformat(),
+                            "time_to": end.isoformat(),
+                        },
+                        LANGFUSE_TRACE_INPUT_MAX_CHARS,
+                    ),
+                    "metadata": metadata,
+                },
+            }
+        ]
+    )
+
+
 def ensure_tables():
     clickhouse_query(
         f"""
@@ -234,7 +346,7 @@ ORDER BY investigation_id
     )
 
 
-def call_kimi(messages, temperature=None, timeout=240):
+def call_kimi(messages, temperature=None, timeout=240, trace_id=None, generation_name="AirflowKimi", metadata=None, input_summary=None):
     if not KIMI_API_KEY:
         raise RuntimeError("KIMI_API_KEY is empty; cannot run LLM log refinement.")
     payload = {
@@ -243,22 +355,72 @@ def call_kimi(messages, temperature=None, timeout=240):
         "temperature": KIMI_TEMPERATURE if temperature is None else temperature,
         "thinking": {"type": KIMI_THINKING_TYPE},
     }
+    reasoning_enabled = (
+        KIMI_REASONING_PARAMS_ENABLED == "true"
+        or (KIMI_REASONING_PARAMS_ENABLED == "auto" and "openrouter.ai" in KIMI_BASE_URL)
+    )
+    if reasoning_enabled:
+        payload.update(
+            {
+                "include_reasoning": KIMI_INCLUDE_REASONING,
+                "reasoning_effort": KIMI_REASONING_EFFORT,
+                "reasoning": {
+                    "effort": KIMI_REASONING_EFFORT,
+                    "exclude": KIMI_REASONING_EXCLUDE,
+                },
+            }
+        )
     request = Request(
         f"{KIMI_BASE_URL}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {KIMI_API_KEY}"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {KIMI_API_KEY}",
+            "HTTP-Referer": "http://localhost:3080",
+            "X-Title": "Agentic Data Stack",
+        },
         method="POST",
     )
     started = time.time()
+    started_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         with urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(detail or str(error)) from error
+    ended_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = json.loads(raw)
     content = payload["choices"][0]["message"].get("content") or ""
-    return {"content": content, "seconds": round(time.time() - started, 3), "usage": payload.get("usage") or {}}
+    usage = payload.get("usage") or {}
+    if trace_id:
+        langfuse_ingest(
+            [
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "generation-create",
+                    "timestamp": ended_iso,
+                    "body": {
+                        "id": str(uuid.uuid4()),
+                        "traceId": trace_id,
+                        "name": generation_name,
+                        "model": KIMI_MODEL,
+                        "startTime": started_iso,
+                        "endTime": ended_iso,
+                        "environment": LANGFUSE_ENVIRONMENT,
+                        "input": clamp_text(input_summary or messages, LANGFUSE_TRACE_INPUT_MAX_CHARS),
+                        "output": clamp_text(content, LANGFUSE_TRACE_OUTPUT_MAX_CHARS),
+                        "usage": usage,
+                        "metadata": {
+                            "base_url": KIMI_BASE_URL,
+                            "seconds": round(time.time() - started, 3),
+                            **(metadata or {}),
+                        },
+                    },
+                }
+            ]
+        )
+    return {"content": content, "seconds": round(time.time() - started, 3), "usage": usage}
 
 
 def extract_json_object(text):
@@ -273,7 +435,17 @@ def extract_json_object(text):
     return json.loads(stripped)
 
 
-def fetch_log_rows(source_table, start, end, source_name, index_like, limit, extra_filter="", order_by="event_time, document_id"):
+def fetch_log_rows(
+    source_table,
+    start,
+    end,
+    source_name,
+    index_like,
+    limit,
+    extra_filter="",
+    order_by="event_time, document_id",
+    offset=0,
+):
     sql = f"""
 SELECT
   toString(event_time) AS event_time_text,
@@ -288,6 +460,7 @@ WHERE event_time >= toDateTime64({ch_string(ch_datetime(start))}, 3, 'UTC')
 {extra_filter}
 ORDER BY {order_by}
 LIMIT {int(limit)}
+OFFSET {int(offset)}
 FORMAT JSONEachRow
 """
     raw = clickhouse_query(sql, timeout=300)
@@ -519,36 +692,34 @@ def chunk_specs(start, end, max_chunks, fields, conf=None):
 
 
 def full_period_chunk_specs(source_table, start, end, source_name, index_like, row_limit, max_chunks):
-    specs = []
-    stack = [(start, end)]
-    while stack:
-        current_start, current_end = stack.pop(0)
-        rows = count_log_rows(source_table, current_start, current_end, source_name, index_like)
-        if rows <= 0:
-            continue
-        duration_seconds = max(1, int((current_end - current_start).total_seconds()))
-        if rows > row_limit and duration_seconds > MIN_CHUNK_SECONDS:
-            midpoint = current_start + timedelta(seconds=duration_seconds // 2)
-            stack.insert(0, (midpoint, current_end))
-            stack.insert(0, (current_start, midpoint))
-            continue
-        if max_chunks > 0 and len(specs) >= max_chunks:
-            raise RuntimeError(
-                "LLM log refinement reached max_chunks before covering the whole period. "
-                "Increase ADS_LLM_LOG_MAX_CHUNKS or narrow the requested time range."
-            )
-        specs.append(
-            {
-                "label": f"full_period_{len(specs) + 1}",
-                "start": current_start,
-                "end": current_end,
-                "filter": "",
-                "order_by": "event_time, document_id",
-                "expected_rows": rows,
-            }
-        )
-    return specs
+    # full_period обязан покрывать весь период, но без рекурсивного дробления
+    # времени: иначе preflight в MCP считает одно число batch'ей, а DAG делает
+    # больше Kimi-вызовов. Поэтому для полного периода строим предсказуемые
+    # страницы по стабильному ORDER BY event_time, document_id.
+    total_rows = count_log_rows(source_table, start, end, source_name, index_like)
+    if total_rows <= 0:
+        return []
 
+    total_chunks = (total_rows + row_limit - 1) // row_limit
+    if max_chunks > 0 and total_chunks > max_chunks:
+        raise RuntimeError(
+            "LLM log refinement reached max_chunks before covering the whole period. "
+            "Increase ADS_LLM_LOG_MAX_CHUNKS or narrow the requested time range."
+        )
+
+    return [
+        {
+            "label": f"full_period_{index + 1}",
+            "start": start,
+            "end": end,
+            "filter": "",
+            "order_by": "event_time, document_id",
+            "offset": index * row_limit,
+            "limit": min(row_limit, total_rows - index * row_limit),
+            "expected_rows": min(row_limit, total_rows - index * row_limit),
+        }
+        for index in range(total_chunks)
+    ]
 
 def chunk_prompt(user_question, chunk_id, rows, fields):
     raw_lines = []
@@ -729,6 +900,22 @@ def llm_guided_log_sql_refinement():
         fields = configured_field_expressions(conf)
         raw_chunk_mode = str(conf.get("raw_chunk_mode") or RAW_CHUNK_MODE).strip().lower()
         started_at = time.time()
+        dag_run = context.get("dag_run")
+        trace_id = langfuse_trace_id(investigation_id)
+
+        def ensure_not_cancelled(stage):
+            # mcp-airflow по timeout переводит DagRun в failed. Running task сам
+            # проверяет это состояние между batch'ами, чтобы не продолжать Kimi
+            # вызовы в фоне после того, как LibreChat уже получил timeout.
+            if not dag_run:
+                return
+            try:
+                dag_run.refresh_from_db()
+                state = str(dag_run.state or "").lower()
+            except Exception:
+                return
+            if state == "failed":
+                raise AirflowFailException(f"DagRun was cancelled externally during {stage}; stopping Kimi refinement.")
 
         ensure_tables()
         insert_rows(
@@ -744,10 +931,26 @@ def llm_guided_log_sql_refinement():
                 }
             ],
         )
+        langfuse_trace_create(
+            trace_id,
+            investigation_id,
+            user_question,
+            start,
+            end,
+            {
+                "source_table": source_table,
+                "source_name": source_name,
+                "index_like": index_like,
+                "raw_chunk_mode": raw_chunk_mode,
+                "batch_rows": row_limit,
+                "max_chunks": max_chunks,
+            },
+        )
 
         reports = []
         chunk_id = 0
         try:
+            ensure_not_cancelled("period profiling")
             profile_started = time.time()
             period_profile = (
                 fetch_period_profile(source_table, start, end, source_name, index_like, fields, PROFILE_LIMIT)
@@ -761,15 +964,17 @@ def llm_guided_log_sql_refinement():
             seen_documents = set()
             specs = [] if raw_chunk_mode in ("off", "none", "profile_only") else chunk_specs(start, end, max_chunks, fields, conf)
             for spec in specs:
+                ensure_not_cancelled(f"chunk {chunk_id + 1} fetch")
                 rows = fetch_log_rows(
                     source_table,
                     spec["start"],
                     spec["end"],
                     source_name,
                     index_like,
-                    row_limit,
+                    spec.get("limit", row_limit),
                     extra_filter=spec["filter"],
                     order_by=spec["order_by"],
+                    offset=spec.get("offset", 0),
                 )
                 rows = [row for row in rows if row["document_id"] not in seen_documents]
                 rows, rows_truncated_by_char_budget = trim_rows_for_char_budget(rows, MAX_RAW_CHARS_PER_CHUNK)
@@ -782,12 +987,39 @@ def llm_guided_log_sql_refinement():
                 chunk_to = rows[-1]["event_time_text"]
                 chars_read = sum(len(row["document_json"]) for row in rows)
                 try:
-                    kimi = call_kimi(chunk_prompt(user_question, chunk_id, rows, fields))
+                    ensure_not_cancelled(f"chunk {chunk_id} Kimi call")
+                    kimi = call_kimi(
+                        chunk_prompt(user_question, chunk_id, rows, fields),
+                        trace_id=trace_id,
+                        generation_name="Airflow raw log chunk analysis",
+                        metadata={
+                            "investigation_id": investigation_id,
+                            "chunk_id": chunk_id,
+                            "chunk_selector": spec["label"],
+                            "rows_read": len(rows),
+                            "chars_read": chars_read,
+                            "chunk_from": chunk_from,
+                            "chunk_to": chunk_to,
+                        },
+                        input_summary={
+                            "question": user_question,
+                            "chunk_id": chunk_id,
+                            "chunk_selector": spec["label"],
+                            "rows_read": len(rows),
+                            "chars_read": chars_read,
+                            "chunk_from": chunk_from,
+                            "chunk_to": chunk_to,
+                            "document_ids": [row["document_id"] for row in rows[:20]],
+                        },
+                    )
+                    ensure_not_cancelled(f"chunk {chunk_id} report parse")
                     parsed = extract_json_object(kimi["content"])
                     parsed["_kimi_seconds"] = kimi["seconds"]
                     parsed["_usage"] = kimi["usage"]
                     error = ""
                     summary_json = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+                except AirflowFailException:
+                    raise
                 except Exception as exc:
                     parsed = {"error": str(exc)}
                     error = str(exc)
@@ -822,7 +1054,27 @@ def llm_guided_log_sql_refinement():
                     ],
                 )
 
-            final = call_kimi(final_prompt(user_question, source_table, start.isoformat(), end.isoformat(), reports, fields, period_profile))
+            ensure_not_cancelled("final Kimi call")
+            final = call_kimi(
+                final_prompt(user_question, source_table, start.isoformat(), end.isoformat(), reports, fields, period_profile),
+                trace_id=trace_id,
+                generation_name="Airflow refined SQL synthesis",
+                metadata={
+                    "investigation_id": investigation_id,
+                    "raw_chunks": chunk_id,
+                    "batch_rows": row_limit,
+                    "source_table": source_table,
+                },
+                input_summary={
+                    "question": user_question,
+                    "source_table": source_table,
+                    "time_from": start.isoformat(),
+                    "time_to": end.isoformat(),
+                    "raw_chunks": chunk_id,
+                    "batch_rows": row_limit,
+                },
+            )
+            ensure_not_cancelled("final report parse")
             final_json = extract_json_object(final["content"])
             final_json["_kimi_seconds"] = final["seconds"]
             final_json["_usage"] = final["usage"]
@@ -830,6 +1082,7 @@ def llm_guided_log_sql_refinement():
             final_json["_raw_chunk_mode"] = raw_chunk_mode
             final_json["_raw_chunks"] = chunk_id
             final_json["_batch_rows"] = row_limit
+            final_json["_langfuse_trace_id"] = trace_id
             refined_sql = select_only(final_json.get("refined_sql") or "")
             validation_result = ""
             for repair_attempt in range(SQL_REPAIR_ATTEMPTS + 1):
@@ -839,6 +1092,7 @@ def llm_guided_log_sql_refinement():
                 except Exception as exc:
                     if repair_attempt >= SQL_REPAIR_ATTEMPTS:
                         raise
+                    ensure_not_cancelled(f"SQL repair {repair_attempt + 1} Kimi call")
                     repaired = call_kimi(
                         repair_prompt(
                             user_question,
@@ -850,8 +1104,22 @@ def llm_guided_log_sql_refinement():
                             period_profile,
                             refined_sql,
                             str(exc),
-                        )
+                        ),
+                        trace_id=trace_id,
+                        generation_name="Airflow refined SQL repair",
+                        metadata={
+                            "investigation_id": investigation_id,
+                            "repair_attempt": repair_attempt + 1,
+                            "validation_error": str(exc)[:4000],
+                        },
+                        input_summary={
+                            "question": user_question,
+                            "repair_attempt": repair_attempt + 1,
+                            "invalid_sql": refined_sql,
+                            "validation_error": str(exc)[:4000],
+                        },
                     )
+                    ensure_not_cancelled(f"SQL repair {repair_attempt + 1} parse")
                     repaired_json = extract_json_object(repaired["content"])
                     refined_sql = select_only(repaired_json.get("refined_sql") or "")
                     final_json = {
@@ -898,6 +1166,7 @@ def llm_guided_log_sql_refinement():
                 "refined_sql": refined_sql,
             }
         except Exception as exc:
+            cancelled = isinstance(exc, AirflowFailException)
             insert_rows(
                 INVESTIGATIONS_TABLE,
                 [
@@ -907,7 +1176,7 @@ def llm_guided_log_sql_refinement():
                         "source_table": source_table,
                         "time_from": ch_datetime(start),
                         "time_to": ch_datetime(end),
-                        "status": "failed",
+                        "status": "cancelled" if cancelled else "failed",
                         "error": str(exc),
                     }
                 ],

@@ -87,9 +87,11 @@ services:
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_LONG_START_PERIOD:-60s}
+    restart: unless-stopped
 
   debezium:
     image: debezium/connect:2.7.3.Final
@@ -466,13 +468,13 @@ services:
     command:
       - redis-server
       - --requirepass
-      - ${LANGFUSE_REDIS_AUTH:-langfuse_redis_password}
+      - ${LANGFUSE_REDIS_AUTH:-${LANGFUSE_REDIS_PASSWORD:-langfuse_redis_password}}
       - --maxmemory-policy
       - noeviction
     volumes:
       - langfuse_redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a ${LANGFUSE_REDIS_AUTH:-langfuse_redis_password} ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli -a ${LANGFUSE_REDIS_AUTH:-${LANGFUSE_REDIS_PASSWORD:-langfuse_redis_password}} ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -545,7 +547,7 @@ services:
       LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
       REDIS_HOST: langfuse-redis
       REDIS_PORT: 6379
-      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-langfuse_redis_password}
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-${LANGFUSE_REDIS_PASSWORD:-langfuse_redis_password}}
       REDIS_TLS_ENABLED: "false"
     ports:
       - "127.0.0.1:3030:3030"
@@ -603,7 +605,7 @@ services:
       LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
       REDIS_HOST: langfuse-redis
       REDIS_PORT: 6379
-      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-langfuse_redis_password}
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-${LANGFUSE_REDIS_PASSWORD:-langfuse_redis_password}}
       REDIS_TLS_ENABLED: "false"
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-agentic-data-stack-org}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Agentic Data Stack}
@@ -765,9 +767,13 @@ services:
       AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-${AIRFLOW_ADMIN_PASSWORD:-admin}}
       AIRFLOW_MCP_REQUEST_TIMEOUT_SECONDS: ${AIRFLOW_MCP_REQUEST_TIMEOUT_SECONDS:-30}
       AIRFLOW_MCP_POLL_INTERVAL_SECONDS: ${AIRFLOW_MCP_POLL_INTERVAL_SECONDS:-5}
-      AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS: ${AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS:-900}
+      AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS: ${AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS:-1800}
+      AIRFLOW_MCP_MIN_WAIT_TIMEOUT_SECONDS: ${AIRFLOW_MCP_MIN_WAIT_TIMEOUT_SECONDS:-${AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS:-1800}}
       AIRFLOW_MCP_MAX_RESPONSE_CHARS: ${AIRFLOW_MCP_MAX_RESPONSE_CHARS:-20000}
-      AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST: ${AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST:-50}
+      AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST: ${AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST:-500}
+      AIRFLOW_MCP_TARGET_LOG_BATCHES_PER_REQUEST: ${AIRFLOW_MCP_TARGET_LOG_BATCHES_PER_REQUEST:-12}
+      AIRFLOW_MCP_AUTO_SCALE_BATCH_ROWS: ${AIRFLOW_MCP_AUTO_SCALE_BATCH_ROWS:-true}
+      AIRFLOW_MCP_CANCEL_ON_TIMEOUT: ${AIRFLOW_MCP_CANCEL_ON_TIMEOUT:-true}
       CLICKHOUSE_HOST: http://clickhouse:8123
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_password}
@@ -777,8 +783,8 @@ services:
       ADS_LLM_LOG_SOURCE_NAME: ${ADS_LLM_LOG_SOURCE_NAME:-elasticsearch-demo}
       ADS_LLM_LOG_INDEX_LIKE: ${ADS_LLM_LOG_INDEX_LIKE:-nginx-logs-%}
       ADS_LLM_LOG_RAW_CHUNK_MODE: ${ADS_LLM_LOG_RAW_CHUNK_MODE:-full_period}
-      ADS_LLM_LOG_BATCH_ROWS: ${ADS_LLM_LOG_BATCH_ROWS:-20}
-      ADS_LLM_LOG_CHUNK_MAX_ROWS: ${ADS_LLM_LOG_CHUNK_MAX_ROWS:-${ADS_LLM_LOG_BATCH_ROWS:-20}}
+      ADS_LLM_LOG_BATCH_ROWS: ${ADS_LLM_LOG_BATCH_ROWS:-5}
+      ADS_LLM_LOG_CHUNK_MAX_ROWS: ${ADS_LLM_LOG_CHUNK_MAX_ROWS:-${ADS_LLM_LOG_BATCH_ROWS:-5}}
       ADS_LLM_LOG_MAX_CHUNKS: ${ADS_LLM_LOG_MAX_CHUNKS:-0}
       ADS_LLM_LOG_RESULT_DATABASE: ${ADS_LLM_LOG_RESULT_DATABASE:-${CLICKHOUSE_DB:-analytics}}
       ADS_LLM_LOG_INVESTIGATIONS_TABLE: ${ADS_LLM_LOG_INVESTIGATIONS_TABLE:-llm_log_investigations}

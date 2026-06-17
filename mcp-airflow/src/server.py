@@ -18,9 +18,22 @@ AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", os.getenv("AIRFLOW_ADMIN_USER",
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", os.getenv("AIRFLOW_ADMIN_PASSWORD", "admin"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("AIRFLOW_MCP_REQUEST_TIMEOUT_SECONDS", "30"))
 POLL_INTERVAL_SECONDS = float(os.getenv("AIRFLOW_MCP_POLL_INTERVAL_SECONDS", "5"))
-DEFAULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS", "900"))
+DEFAULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("AIRFLOW_MCP_DEFAULT_WAIT_TIMEOUT_SECONDS", "1800"))
+MIN_WAIT_TIMEOUT_SECONDS = int(os.getenv("AIRFLOW_MCP_MIN_WAIT_TIMEOUT_SECONDS", str(DEFAULT_WAIT_TIMEOUT_SECONDS)))
 MAX_RESPONSE_CHARS = int(os.getenv("AIRFLOW_MCP_MAX_RESPONSE_CHARS", "20000"))
-MAX_LOG_BATCHES_PER_REQUEST = int(os.getenv("AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST", "50"))
+MAX_LOG_BATCHES_PER_REQUEST = int(os.getenv("AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST", "500"))
+TARGET_LOG_BATCHES_PER_REQUEST = int(os.getenv("AIRFLOW_MCP_TARGET_LOG_BATCHES_PER_REQUEST", "12"))
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+CANCEL_ON_TIMEOUT = env_bool("AIRFLOW_MCP_CANCEL_ON_TIMEOUT", True)
+AUTO_SCALE_BATCH_ROWS = env_bool("AIRFLOW_MCP_AUTO_SCALE_BATCH_ROWS", True)
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://clickhouse:8123").rstrip("/")
 if "://" not in CLICKHOUSE_HOST:
@@ -48,7 +61,7 @@ DEFAULT_CHUNK_ROW_LIMIT = int(
         "ADS_LLM_LOG_BATCH_ROWS",
         os.getenv(
             "LLM_LOG_BATCH_ROWS",
-            os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "20")),
+            os.getenv("ADS_LLM_LOG_CHUNK_MAX_ROWS", os.getenv("LLM_LOG_CHUNK_ROW_LIMIT", "5")),
         ),
     )
 )
@@ -148,9 +161,10 @@ def clickhouse_datetime(value: str) -> str:
 
 async def estimate_log_batches(conf: dict[str, Any]) -> dict[str, Any]:
     # Быстрый preflight до запуска DAG: считаем строки в ClickHouse и заранее
-    # останавливаем запросы, которые породят тысячи Kimi batch-вызовов.
+    # регулируем размер batch, чтобы большой период не порождал сотни/тысячи
+    # последовательных Kimi-вызовов и не продолжал работать в фоне часами.
     source_table = safe_table_name(str(conf["source_table"]))
-    batch_rows = max(1, int(conf["chunk_row_limit"]))
+    requested_batch_rows = max(1, int(conf["chunk_row_limit"]))
     sql = f"""
 SELECT count() AS rows
 FROM {source_table}
@@ -168,10 +182,25 @@ FORMAT JSONEachRow
     response.raise_for_status()
     first_line = response.text.splitlines()[0] if response.text.strip() else "{}"
     rows = int((json.loads(first_line).get("rows") or 0))
+    effective_target = TARGET_LOG_BATCHES_PER_REQUEST
+    if MAX_LOG_BATCHES_PER_REQUEST > 0 and effective_target > 0:
+        effective_target = min(effective_target, MAX_LOG_BATCHES_PER_REQUEST)
+
+    batch_rows = requested_batch_rows
+    autoscaled = False
+    if AUTO_SCALE_BATCH_ROWS and rows > 0 and effective_target > 0:
+        min_batch_rows_for_target = max(1, (rows + effective_target - 1) // effective_target)
+        if min_batch_rows_for_target > batch_rows:
+            batch_rows = min_batch_rows_for_target
+            autoscaled = True
+
     return {
         "rows": rows,
+        "requested_batch_rows": requested_batch_rows,
         "batch_rows": batch_rows,
+        "autoscaled_batch_rows": autoscaled,
         "estimated_kimi_chunk_calls": (rows + batch_rows - 1) // batch_rows,
+        "target_kimi_chunk_calls": TARGET_LOG_BATCHES_PER_REQUEST,
         "max_kimi_chunk_calls": MAX_LOG_BATCHES_PER_REQUEST,
     }
 
@@ -198,6 +227,18 @@ def iso_or_default(value: str | None, default: str) -> str:
 
 async def get_dag_run(dag_id: str, dag_run_id: str) -> dict[str, Any]:
     return await client.request("GET", f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}")
+
+
+async def cancel_dag_run(dag_id: str, dag_run_id: str) -> dict[str, Any]:
+    # Airflow REST API не имеет отдельной кнопки "stop"; самый надежный
+    # управляемый сигнал для scheduler/DAG-кода здесь - перевести DagRun в failed.
+    # Сам DAG перед каждым Kimi batch дополнительно проверяет это состояние и
+    # прерывает цикл, чтобы LLM-вызовы не продолжались в фоне после MCP timeout.
+    return await client.request(
+        "PATCH",
+        f"/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}",
+        json_body={"state": "failed"},
+    )
 
 
 @app.tool()
@@ -287,6 +328,8 @@ async def airflow_run_log_refinement(
                 "source_name_normalized_to": DEFAULT_SOURCE_NAME,
             }
             conf = fallback_conf
+    conf["batch_rows"] = estimate["batch_rows"]
+    conf["chunk_row_limit"] = estimate["batch_rows"]
     if (
         MAX_LOG_BATCHES_PER_REQUEST > 0
         and estimate["estimated_kimi_chunk_calls"] > MAX_LOG_BATCHES_PER_REQUEST
@@ -317,6 +360,7 @@ async def airflow_run_log_refinement(
         "dag_id": dag_id,
         "dag_run_id": dag_run_id,
         "conf": conf,
+        "preflight": estimate,
         "artifacts": artifacts(resolved_investigation_id),
         "next_steps": [
             "If state is success, use ClickHouse MCP to read artifacts.refined_sql_lookup.",
@@ -327,7 +371,14 @@ async def airflow_run_log_refinement(
     if not trigger["ok"] or not wait_for_completion:
         return result
 
-    deadline = time.time() + (wait_timeout_seconds if wait_timeout_seconds is not None else DEFAULT_WAIT_TIMEOUT_SECONDS)
+    requested_wait_timeout_seconds = wait_timeout_seconds
+    effective_wait_timeout_seconds = wait_timeout_seconds if wait_timeout_seconds is not None else DEFAULT_WAIT_TIMEOUT_SECONDS
+    if MIN_WAIT_TIMEOUT_SECONDS > 0 and effective_wait_timeout_seconds < MIN_WAIT_TIMEOUT_SECONDS:
+        effective_wait_timeout_seconds = MIN_WAIT_TIMEOUT_SECONDS
+    result["requested_wait_timeout_seconds"] = requested_wait_timeout_seconds
+    result["wait_timeout_seconds"] = effective_wait_timeout_seconds
+    result["min_wait_timeout_seconds"] = MIN_WAIT_TIMEOUT_SECONDS
+    deadline = time.time() + effective_wait_timeout_seconds
     last_run: dict[str, Any] | None = None
     # Держим MCP-вызов открытым до завершения DAG, чтобы Kimi в UI сразу получила
     # state=success и могла перейти к чтению refined_sql через ClickHouse MCP.
@@ -345,9 +396,27 @@ async def airflow_run_log_refinement(
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     result["ok"] = False
-    result["state"] = "timeout"
     result["dag_run"] = last_run
-    result["message"] = "Timed out while waiting for Airflow DAG run completion. Use airflow_get_dag_run with dag_run_id."
+    result["requested_wait_timeout_seconds"] = requested_wait_timeout_seconds
+    result["wait_timeout_seconds"] = effective_wait_timeout_seconds
+    result["min_wait_timeout_seconds"] = MIN_WAIT_TIMEOUT_SECONDS
+    result["cancel_on_timeout"] = CANCEL_ON_TIMEOUT
+    if CANCEL_ON_TIMEOUT:
+        cancel = await cancel_dag_run(dag_id, dag_run_id)
+        cancelled_run = await get_dag_run(dag_id, dag_run_id)
+        result["state"] = "timeout_cancelled" if cancel.get("ok") else "timeout_cancel_failed"
+        result["cancel"] = cancel
+        result["dag_run_after_cancel"] = cancelled_run
+        result["message"] = (
+            "Timed out while waiting for Airflow DAG run completion. "
+            "The DagRun was marked failed so the cooperative DAG checks stop further Kimi batch calls."
+        )
+    else:
+        result["state"] = "timeout"
+        result["message"] = (
+            "Timed out while waiting for Airflow DAG run completion. "
+            "AIRFLOW_MCP_CANCEL_ON_TIMEOUT=false, so the DAG may continue running in the background."
+        )
     return result
 
 

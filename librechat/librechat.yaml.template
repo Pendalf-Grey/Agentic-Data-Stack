@@ -102,12 +102,15 @@ mcpServers:
     serverInstructions: |
       Use this Airflow MCP server only to orchestrate ADS Airflow DAGs, primarily the LLM-guided raw Elasticsearch log SQL refinement flow.
       For every user analytics question over Elasticsearch/raw logs, call airflow_run_log_refinement with the user's question and the requested time range before final ClickHouse analysis, unless the current conversation already has a successful investigation_id for exactly the same question and time range.
+      Do not set wait_timeout_seconds unless the user explicitly asks for a different timeout; the MCP server applies its configured safe default/minimum.
       Do not hardcode ClickHouse table names, source names, index patterns, DAG IDs, or chunk settings. Use defaults exposed by the Airflow MCP tool unless the user explicitly asks for another source or time range.
       After airflow_run_log_refinement succeeds, use ClickHouse MCP to read artifacts.refined_sql_lookup, then execute the returned refined_sql through ClickHouse MCP.
+      If airflow_run_log_refinement returns preflight.autoscaled_batch_rows=true, mention the effective preflight.batch_rows value briefly; MCP increased raw-log batch size to keep the UI request interactive.
       If the user asks for a chart or dashboard, run the refined SQL first, then use Grafana MCP to build the visualization from that result/query.
       Do not claim that raw logs were analyzed unless airflow_run_log_refinement returned success and ClickHouse chunk reports exist for the returned investigation_id.
       If airflow_run_log_refinement returns state=budget_exceeded or state=preflight_failed, do not call airflow_get_dag_run and do not query ClickHouse refinement tables in a loop. Explain the preflight result and ask the user to narrow the period, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.
-      If airflow_run_log_refinement returns state=timeout or state=failed, call airflow_get_dag_run at most once, then stop tool use and return the dag_run_id/investigation_id with the current state.
+      If airflow_run_log_refinement returns state=timeout_cancelled, do not call airflow_get_dag_run and do not query refinement tables in a loop. Tell the user that the wait timeout was reached and the Airflow DagRun was marked failed to stop further background Kimi batch calls.
+      If airflow_run_log_refinement returns state=timeout_cancel_failed, state=timeout, or state=failed, call airflow_get_dag_run at most once, then stop tool use and return the dag_run_id/investigation_id with the current state.
       Never repeatedly poll Airflow or repeatedly query refinement tables in one answer. One DAG trigger, one optional status check, one refined_sql lookup, and one refined SQL execution are the maximum normal flow.
 
   langfuse:
