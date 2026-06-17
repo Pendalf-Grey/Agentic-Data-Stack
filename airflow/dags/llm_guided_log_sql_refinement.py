@@ -60,10 +60,20 @@ DEFAULT_INDEX_LIKE = os.getenv("ADS_LLM_LOG_INDEX_LIKE", os.getenv("LLM_LOG_INDE
 FINAL_REPORT_MAX_CHARS = int(os.getenv("LLM_LOG_FINAL_REPORT_MAX_CHARS", "180000"))
 PROFILE_ENABLED = os.getenv("LLM_LOG_PROFILE_ENABLED", "true").strip().lower() == "true"
 PROFILE_LIMIT = int(os.getenv("LLM_LOG_PROFILE_LIMIT", "50"))
+ANALYSIS_STRATEGY = os.getenv(
+    "ADS_LLM_LOG_ANALYSIS_STRATEGY",
+    os.getenv("LLM_LOG_ANALYSIS_STRATEGY", "context"),
+).strip().lower()
 RAW_CHUNK_MODE = os.getenv(
     "ADS_LLM_LOG_RAW_CHUNK_MODE",
     os.getenv("LLM_LOG_RAW_CHUNK_MODE", "full_period" if REFINEMENT_MODE == "always" else "sample"),
 ).strip().lower()
+CONTEXT_WINDOW_LIMIT = int(os.getenv("ADS_LLM_CONTEXT_WINDOW_LIMIT", os.getenv("LLM_LOG_CONTEXT_WINDOW_LIMIT", "120")))
+CONTEXT_RARE_EVENT_LIMIT = int(os.getenv("ADS_LLM_CONTEXT_RARE_EVENT_LIMIT", os.getenv("LLM_LOG_CONTEXT_RARE_EVENT_LIMIT", "80")))
+CONTEXT_TOP_TRACE_LIMIT = int(os.getenv("ADS_LLM_CONTEXT_TOP_TRACE_LIMIT", os.getenv("LLM_LOG_CONTEXT_TOP_TRACE_LIMIT", "60")))
+CONTEXT_RAW_SAMPLE_LIMIT = int(os.getenv("ADS_LLM_CONTEXT_RAW_SAMPLE_LIMIT", os.getenv("LLM_LOG_CONTEXT_RAW_SAMPLE_LIMIT", "80")))
+CONTEXT_RAW_SAMPLE_CHARS = int(os.getenv("ADS_LLM_CONTEXT_RAW_SAMPLE_CHARS", os.getenv("LLM_LOG_CONTEXT_RAW_SAMPLE_CHARS", "2500")))
+CONTEXT_SLOW_LATENCY_MS = int(os.getenv("ADS_LLM_CONTEXT_SLOW_LATENCY_MS", os.getenv("LLM_LOG_CONTEXT_SLOW_LATENCY_MS", "1000")))
 SQL_SHAPE_HINT = os.getenv(
     "LLM_LOG_SQL_SHAPE_HINT",
     "Prefer a concise analytical SELECT. Use CTEs only when they materially improve correctness.",
@@ -103,9 +113,15 @@ DEFAULT_FIELD_EXPRESSIONS = {
     "service": "JSONExtractString(document_json, 'service')",
     "incident": "JSONExtractString(document_json, 'incident')",
     "level": "JSONExtractString(document_json, 'level')",
-    "http_status": "JSONExtractInt(document_json, 'http', 'status_code')",
-    "latency_ms": "JSONExtractInt(document_json, 'http', 'latency_ms')",
-    "upstream_latency_ms": "JSONExtractInt(document_json, 'http', 'upstream_latency_ms')",
+    "host": "JSONExtractString(document_json, 'host')",
+    "message": "JSONExtractString(document_json, 'message')",
+    "error_code": "JSONExtractString(document_json, 'error_code')",
+    "release": "JSONExtractString(document_json, 'release')",
+    "http_method": "if(JSONExtractString(document_json, 'http', 'method') != '', JSONExtractString(document_json, 'http', 'method'), JSONExtractString(document_json, 'nginx', 'method'))",
+    "http_path": "if(JSONExtractString(document_json, 'http', 'path') != '', JSONExtractString(document_json, 'http', 'path'), JSONExtractString(document_json, 'nginx', 'path'))",
+    "http_status": "if(JSONExtractInt(document_json, 'http', 'status_code') != 0, JSONExtractInt(document_json, 'http', 'status_code'), JSONExtractInt(document_json, 'nginx', 'status'))",
+    "latency_ms": "if(JSONExtractInt(document_json, 'http', 'latency_ms') != 0, JSONExtractInt(document_json, 'http', 'latency_ms'), toInt64(round(JSONExtractFloat(document_json, 'nginx', 'request_time') * 1000)))",
+    "upstream_latency_ms": "if(JSONExtractInt(document_json, 'http', 'upstream_latency_ms') != 0, JSONExtractInt(document_json, 'http', 'upstream_latency_ms'), toInt64(round(JSONExtractFloat(document_json, 'nginx', 'upstream_response_time') * 1000)))",
     "trace_id": "JSONExtractString(document_json, 'trace_id')",
 }
 
@@ -126,11 +142,55 @@ def field_instructions(fields):
 
 def no_incident_sql(expr):
     values = ", ".join(ch_string(value) for value in NO_INCIDENT_VALUES)
-    return f"{expr} NOT IN ({values})"
+    return f"ifNull(toString({expr}), '') NOT IN ({values})"
 
 
 def semantic_instructions():
     return f"{FIELD_SEMANTICS} no_incident_values={NO_INCIDENT_VALUES}."
+
+
+def analysis_strategy_name(conf=None):
+    # Основной переключатель архитектуры:
+    # context - ClickHouse строит полный аналитический контекст периода;
+    # raw_chunks - Kimi последовательно читает batch'и сырых строк.
+    return str((conf or {}).get("analysis_strategy") or ANALYSIS_STRATEGY or "context").strip().lower()
+
+
+def is_context_strategy(value):
+    # Поддерживаем несколько человекочитаемых имен одного режима,
+    # чтобы менять стратегию из .env или MCP-вызова без правки DAG.
+    return value in {"context", "analytical_context", "profile_guided", "context_first"}
+
+
+def context_window_interval(start, end, conf=None):
+    # Автоокно выбирается по длине периода: для двух лет день, для недель часы,
+    # для коротких расследований 15 минут. Можно переопределить через .env/conf.
+    configured = str(
+        (conf or {}).get("context_window_interval")
+        or os.getenv("ADS_LLM_CONTEXT_WINDOW_INTERVAL")
+        or os.getenv("LLM_LOG_CONTEXT_WINDOW_INTERVAL")
+        or "auto"
+    ).strip()
+    if configured and configured.lower() != "auto":
+        return configured.upper()
+    days = max(1, int((end - start).total_seconds() // 86400) + 1)
+    if days > 90:
+        return "1 DAY"
+    if days > 7:
+        return "1 HOUR"
+    return "15 MINUTE"
+
+
+def interesting_log_condition(slow_latency_ms):
+    # Candidate events для raw-доказательств: ошибки, warn/error уровни,
+    # объявленные инциденты и заметно медленные запросы. Все пороги настраиваются.
+    return (
+        "(status_code >= 400 "
+        "OR lower(ifNull(level, '')) IN ('warn', 'error', 'critical', 'fatal') "
+        f"OR {no_incident_sql('incident')} "
+        f"OR latency_ms >= {int(slow_latency_ms)} "
+        f"OR upstream_latency_ms >= {int(slow_latency_ms)})"
+    )
 
 
 def ch_string(value):
@@ -546,11 +606,11 @@ SELECT
   count() AS rows,
   min(event_time) AS first_event_time,
   max(event_time) AS last_event_time,
-  uniqExact(service) AS services,
-  uniqExact(trace_id) AS unique_traces,
+  uniq(service) AS services,
+  uniq(trace_id) AS unique_traces,
   countIf(status_code >= 500) AS http_5xx,
   countIf(status_code >= 400 AND status_code < 500) AS http_4xx,
-  countIf(level IN ('warn', 'error', 'critical')) AS warn_or_error_logs,
+  countIf(lower(ifNull(level, '')) IN ('warn', 'error', 'critical', 'fatal')) AS warn_or_error_logs,
   round(avg(latency_ms), 3) AS avg_latency_ms,
   quantile(0.95)(latency_ms) AS p95_latency_ms,
   quantile(0.99)(latency_ms) AS p99_latency_ms,
@@ -567,11 +627,11 @@ SELECT
   count() AS rows,
   countIf(status_code >= 500) AS http_5xx,
   countIf(status_code >= 400 AND status_code < 500) AS http_4xx,
-  countIf(level IN ('warn', 'error', 'critical')) AS warn_or_error_logs,
+  countIf(lower(ifNull(level, '')) IN ('warn', 'error', 'critical', 'fatal')) AS warn_or_error_logs,
   round(avg(latency_ms), 3) AS avg_latency_ms,
   quantile(0.99)(latency_ms) AS p99_latency_ms,
   round(avg(upstream_latency_ms), 3) AS avg_upstream_latency_ms,
-  uniqExact(trace_id) AS unique_traces
+  uniq(trace_id) AS unique_traces
 FROM extracted
 GROUP BY service
 ORDER BY http_5xx DESC, p99_latency_ms DESC, rows DESC
@@ -610,7 +670,7 @@ SELECT
   round(avg(upstream_latency_ms), 3) AS avg_upstream_latency_ms
 FROM extracted
 GROUP BY hour, service
-HAVING http_5xx > 0 OR p99_latency_ms > 1000
+HAVING http_5xx > 0 OR p99_latency_ms >= {CONTEXT_SLOW_LATENCY_MS}
 ORDER BY http_5xx DESC, p99_latency_ms DESC
 LIMIT {int(limit)}
 """,
@@ -623,6 +683,273 @@ LIMIT {int(limit)}
         "hot_windows": hot_windows,
         "field_expressions": fields,
     }
+
+
+def fetch_analytical_context(source_table, start, end, source_name, index_like, fields, limit, conf=None):
+    # Context-first режим: ClickHouse читает все matching rows за период и
+    # строит карту расследования. Kimi получает эту карту и несколько raw-
+    # фрагментов как доказательства, а не весь поток логов построчно.
+    where = period_filter(start, end, source_name, index_like)
+    service_expr = fields.get("service", DEFAULT_FIELD_EXPRESSIONS["service"])
+    incident_expr = fields.get("incident", DEFAULT_FIELD_EXPRESSIONS["incident"])
+    level_expr = fields.get("level", DEFAULT_FIELD_EXPRESSIONS["level"])
+    status_expr = fields.get("http_status", DEFAULT_FIELD_EXPRESSIONS["http_status"])
+    latency_expr = fields.get("latency_ms", DEFAULT_FIELD_EXPRESSIONS["latency_ms"])
+    upstream_expr = fields.get("upstream_latency_ms", DEFAULT_FIELD_EXPRESSIONS["upstream_latency_ms"])
+    trace_expr = fields.get("trace_id", DEFAULT_FIELD_EXPRESSIONS["trace_id"])
+    host_expr = fields.get("host", DEFAULT_FIELD_EXPRESSIONS["host"])
+    message_expr = fields.get("message", DEFAULT_FIELD_EXPRESSIONS["message"])
+    error_code_expr = fields.get("error_code", DEFAULT_FIELD_EXPRESSIONS["error_code"])
+    release_expr = fields.get("release", DEFAULT_FIELD_EXPRESSIONS["release"])
+    method_expr = fields.get("http_method", DEFAULT_FIELD_EXPRESSIONS["http_method"])
+    path_expr = fields.get("http_path", DEFAULT_FIELD_EXPRESSIONS["http_path"])
+    window_interval = context_window_interval(start, end, conf)
+    window_limit = int((conf or {}).get("context_window_limit") or CONTEXT_WINDOW_LIMIT)
+    rare_limit = int((conf or {}).get("context_rare_event_limit") or CONTEXT_RARE_EVENT_LIMIT)
+    trace_limit = int((conf or {}).get("context_top_trace_limit") or CONTEXT_TOP_TRACE_LIMIT)
+    sample_limit = int((conf or {}).get("context_raw_sample_limit") or CONTEXT_RAW_SAMPLE_LIMIT)
+    sample_chars = int((conf or {}).get("context_raw_sample_chars") or CONTEXT_RAW_SAMPLE_CHARS)
+    slow_latency_ms = int((conf or {}).get("context_slow_latency_ms") or CONTEXT_SLOW_LATENCY_MS)
+    candidate_condition = interesting_log_condition(slow_latency_ms)
+    extracted = f"""
+WITH extracted AS
+(
+  SELECT
+    event_time,
+    index_name,
+    document_id,
+    document_json,
+    nullIf({service_expr}, '') AS service,
+    nullIf({host_expr}, '') AS host,
+    nullIf({incident_expr}, '') AS incident,
+    nullIf({level_expr}, '') AS level,
+    nullIf({message_expr}, '') AS message,
+    nullIf({error_code_expr}, '') AS error_code,
+    nullIf({release_expr}, '') AS release,
+    nullIf({method_expr}, '') AS http_method,
+    nullIf({path_expr}, '') AS http_path,
+    {status_expr} AS status_code,
+    {latency_expr} AS latency_ms,
+    {upstream_expr} AS upstream_latency_ms,
+    nullIf({trace_expr}, '') AS trace_id
+  FROM {source_table}
+  WHERE {where}
+)
+"""
+
+    base_profile = fetch_period_profile(source_table, start, end, source_name, index_like, fields, limit)
+    by_status = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  multiIf(status_code >= 500, '5xx', status_code >= 400, '4xx', status_code >= 300, '3xx', status_code >= 200, '2xx', 'other') AS status_family,
+  status_code,
+  count() AS rows,
+  uniq(service) AS services,
+  uniq(trace_id) AS unique_traces,
+  quantile(0.99)(latency_ms) AS p99_latency_ms
+FROM extracted
+GROUP BY status_family, status_code
+ORDER BY status_family DESC, rows DESC
+LIMIT {int(limit)}
+""",
+        timeout=300,
+    )
+    by_level = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  lower(ifNull(level, '')) AS level,
+  count() AS rows,
+  countIf(status_code >= 500) AS http_5xx,
+  uniq(service) AS services,
+  uniq(trace_id) AS unique_traces,
+  quantile(0.99)(latency_ms) AS p99_latency_ms
+FROM extracted
+GROUP BY level
+ORDER BY rows DESC
+LIMIT {int(limit)}
+""",
+        timeout=300,
+    )
+    time_windows = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  toStartOfInterval(event_time, INTERVAL {window_interval}) AS window_start,
+  count() AS rows,
+  countIf(status_code >= 500) AS http_5xx,
+  countIf(status_code >= 400 AND status_code < 500) AS http_4xx,
+  countIf(lower(ifNull(level, '')) IN ('warn', 'error', 'critical', 'fatal')) AS warn_or_error_logs,
+  uniq(service) AS services,
+  uniq(trace_id) AS unique_traces,
+  quantile(0.95)(latency_ms) AS p95_latency_ms,
+  quantile(0.99)(latency_ms) AS p99_latency_ms
+FROM extracted
+GROUP BY window_start
+ORDER BY window_start
+LIMIT {int(window_limit)}
+""",
+        timeout=300,
+    )
+    rare_events = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  service,
+  lower(ifNull(level, '')) AS level,
+  status_code,
+  error_code,
+  incident,
+  message,
+  release,
+  min(event_time) AS first_event_time,
+  max(event_time) AS last_event_time,
+  count() AS rows,
+  uniq(trace_id) AS unique_traces,
+  quantile(0.99)(latency_ms) AS p99_latency_ms
+FROM extracted
+WHERE {candidate_condition}
+GROUP BY service, level, status_code, error_code, incident, message, release
+ORDER BY rows ASC, status_code DESC, p99_latency_ms DESC
+LIMIT {int(rare_limit)}
+""",
+        timeout=300,
+    )
+    top_traces = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  trace_id,
+  min(event_time) AS first_event_time,
+  max(event_time) AS last_event_time,
+  count() AS rows,
+  countIf(status_code >= 500) AS http_5xx,
+  countIf(status_code >= 400 AND status_code < 500) AS http_4xx,
+  groupArrayDistinct(service) AS services,
+  groupArrayDistinct(error_code) AS error_codes,
+  groupArrayDistinct(incident) AS incidents,
+  max(latency_ms) AS max_latency_ms,
+  quantile(0.99)(latency_ms) AS p99_latency_ms
+FROM extracted
+WHERE trace_id IS NOT NULL
+  AND {candidate_condition}
+GROUP BY trace_id
+ORDER BY http_5xx DESC, http_4xx DESC, max_latency_ms DESC, rows DESC
+LIMIT {int(trace_limit)}
+""",
+        timeout=300,
+    )
+    release_summary = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  service,
+  release,
+  min(event_time) AS first_event_time,
+  max(event_time) AS last_event_time,
+  count() AS rows,
+  countIf(status_code >= 500) AS http_5xx,
+  countIf(status_code >= 400 AND status_code < 500) AS http_4xx,
+  quantile(0.99)(latency_ms) AS p99_latency_ms
+FROM extracted
+GROUP BY service, release
+HAVING http_5xx > 0 OR http_4xx > 0 OR p99_latency_ms >= {int(slow_latency_ms)}
+ORDER BY http_5xx DESC, http_4xx DESC, p99_latency_ms DESC
+LIMIT {int(limit)}
+""",
+        timeout=300,
+    )
+    raw_error_samples = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  toString(event_time) AS event_time,
+  index_name,
+  document_id,
+  service,
+  host,
+  level,
+  status_code,
+  latency_ms,
+  upstream_latency_ms,
+  trace_id,
+  incident,
+  error_code,
+  release,
+  message,
+  http_method,
+  http_path,
+  substring(document_json, 1, {int(sample_chars)}) AS document_preview
+FROM extracted
+WHERE {candidate_condition}
+ORDER BY status_code DESC, latency_ms DESC, event_time
+LIMIT {int(sample_limit)}
+""",
+        timeout=300,
+    )
+    raw_latency_samples = fetch_json_each_row(
+        f"""
+{extracted}
+SELECT
+  toString(event_time) AS event_time,
+  index_name,
+  document_id,
+  service,
+  host,
+  level,
+  status_code,
+  latency_ms,
+  upstream_latency_ms,
+  trace_id,
+  incident,
+  error_code,
+  release,
+  message,
+  http_method,
+  http_path,
+  substring(document_json, 1, {int(sample_chars)}) AS document_preview
+FROM extracted
+WHERE {candidate_condition}
+ORDER BY latency_ms DESC, upstream_latency_ms DESC, event_time
+LIMIT {int(sample_limit)}
+""",
+        timeout=300,
+    )
+    # Важно: raw_fragments ниже не являются всей выборкой. Все счетчики,
+    # квантили, окна и top traces выше посчитаны ClickHouse по полному периоду.
+    # Raw-фрагменты нужны Kimi для понимания реальных сообщений и структуры JSON.
+    context = {
+        **base_profile,
+        "analysis_strategy": "context",
+        "context_contract": {
+            "full_period_scanned_by": "ClickHouse",
+            "llm_receives": "aggregated analytical context plus selected raw fragments",
+            "raw_fragments_are_samples": True,
+            "counts_and_quantiles_use_all_matching_rows": True,
+        },
+        "limits": {
+            "profile_limit": limit,
+            "window_limit": window_limit,
+            "rare_event_limit": rare_limit,
+            "top_trace_limit": trace_limit,
+            "raw_sample_limit": sample_limit,
+            "raw_sample_chars": sample_chars,
+            "slow_latency_ms": slow_latency_ms,
+        },
+        "window_interval": window_interval,
+        "by_status": by_status,
+        "by_level": by_level,
+        "time_windows": time_windows,
+        "rare_events": rare_events,
+        "top_traces": top_traces,
+        "release_summary": release_summary,
+        "raw_fragments": {
+            "error_samples": raw_error_samples,
+            "high_latency_samples": raw_latency_samples,
+        },
+    }
+    return context
 
 
 def chunk_specs(start, end, max_chunks, fields, conf=None):
@@ -769,12 +1096,19 @@ def final_prompt(user_question, source_table, start, end, reports, fields, perio
         {
             "role": "system",
             "content": (
-                "You generate one precise ClickHouse SELECT query after reading chunk reports from raw logs. "
+                "You generate one precise ClickHouse SELECT query after reading ADS log-analysis context. "
                 "Return strict JSON only. Do not use INSERT/UPDATE/DELETE/ALTER/DROP. "
                 "The query must read from the provided source table and parse fields from document_json when needed. "
                 f"Use only configured field expressions: {field_instructions(fields)}. "
+                "If the context says full_period_scanned_by=ClickHouse, then counts, frequencies, windows, "
+                "quantiles, rare events, and top traces were computed over the whole matching period. "
+                "Selected raw fragments are evidence samples, not the whole population; do not treat sample size as total row count. "
+                "ClickHouse aggregate rules: countIf takes exactly one boolean condition; avgIf takes value and condition; "
+                "quantileIf takes value and condition. Do not pass extra arguments into countIf. "
                 "If a SELECT groups rows, every selected non-aggregate expression must be in GROUP BY. "
                 "Do not reference pre-aggregation aliases inside a grouped SELECT unless they are aggregated first. "
+                "Do not group by aggregate aliases or boolean aliases derived from aggregate conditions. "
+                "Avoid NaN in user-facing aggregates: if a conditional average can be empty, use nullable-safe expressions or group filters that match the aggregate condition. "
                 f"SQL shape preference: {SQL_SHAPE_HINT} "
                 f"Field semantics: {semantic_instructions()}"
             ),
@@ -785,9 +1119,9 @@ def final_prompt(user_question, source_table, start, end, reports, fields, perio
                 f"User question:\n{user_question}\n\n"
                 f"Source table: {source_table}\n"
                 f"Time range: {start} to {end}\n\n"
-                "ClickHouse period profile JSON. Treat this as the compact statistical map of the whole period:\n"
+                "ClickHouse analytical context JSON. Treat this as the compact statistical map of the whole period:\n"
                 f"{json.dumps(period_profile, ensure_ascii=False, separators=(',', ':'))}\n\n"
-                "Chunk reports JSON:\n"
+                "Context/raw chunk reports JSON:\n"
                 f"{reports_json}\n\n"
                 "Return JSON with keys: refined_sql, rationale, confidence, expected_result_shape, grafana_hint."
             ),
@@ -805,7 +1139,9 @@ def repair_prompt(user_question, source_table, start, end, reports, fields, peri
             "content": (
                 "Repair an invalid ClickHouse SELECT query. Return strict JSON only with keys: "
                 "refined_sql, rationale, confidence. Do not use INSERT/UPDATE/DELETE/ALTER/DROP. "
-                "The repaired SQL must pass ClickHouse syntax and aggregate validation."
+                "The repaired SQL must pass ClickHouse syntax and aggregate validation. "
+                "ClickHouse aggregate rules: countIf(condition), avgIf(value, condition), quantileIf(level)(value, condition). "
+                "Do not group by aggregate aliases; do not return NaN-producing conditional aggregates."
             ),
         },
         {
@@ -816,7 +1152,7 @@ def repair_prompt(user_question, source_table, start, end, reports, fields, peri
                 f"Time range: {start} to {end}\n"
                 f"Configured field expressions: {field_instructions(fields)}\n\n"
                 f"Field semantics: {semantic_instructions()}\n\n"
-                "ClickHouse period profile JSON:\n"
+                "ClickHouse analytical context JSON:\n"
                 f"{json.dumps(period_profile, ensure_ascii=False, separators=(',', ':'))}\n\n"
                 f"Invalid SQL:\n{invalid_sql}\n\n"
                 f"ClickHouse validation error:\n{validation_error}\n\n"
@@ -877,7 +1213,7 @@ def confidence_float(value):
 
 @dag(
     dag_id="llm_guided_log_sql_refinement",
-    description="Read raw Elasticsearch logs from ClickHouse in chunks, ask Kimi for chunk reports, and store refined SQL.",
+    description="Build ClickHouse log-analysis context, ask Kimi for refined SQL, and store the result.",
     schedule=DAG_SCHEDULE,
     start_date=datetime(2024, 1, 1),
     catchup=False,
@@ -898,6 +1234,7 @@ def llm_guided_log_sql_refinement():
         max_chunks = int(conf.get("max_chunks") if conf.get("max_chunks") is not None else DEFAULT_MAX_CHUNKS)
         investigation_id = conf.get("investigation_id") or str(uuid.uuid4())
         fields = configured_field_expressions(conf)
+        strategy = analysis_strategy_name(conf)
         raw_chunk_mode = str(conf.get("raw_chunk_mode") or RAW_CHUNK_MODE).strip().lower()
         started_at = time.time()
         dag_run = context.get("dag_run")
@@ -941,6 +1278,7 @@ def llm_guided_log_sql_refinement():
                 "source_table": source_table,
                 "source_name": source_name,
                 "index_like": index_like,
+                "analysis_strategy": strategy,
                 "raw_chunk_mode": raw_chunk_mode,
                 "batch_rows": row_limit,
                 "max_chunks": max_chunks,
@@ -950,19 +1288,69 @@ def llm_guided_log_sql_refinement():
         reports = []
         chunk_id = 0
         try:
-            ensure_not_cancelled("period profiling")
+            ensure_not_cancelled("ClickHouse context build")
             profile_started = time.time()
-            period_profile = (
-                fetch_period_profile(source_table, start, end, source_name, index_like, fields, PROFILE_LIMIT)
-                if PROFILE_ENABLED
-                else {}
-            )
-            if period_profile:
+            if is_context_strategy(strategy):
+                period_profile = fetch_analytical_context(
+                    source_table,
+                    start,
+                    end,
+                    source_name,
+                    index_like,
+                    fields,
+                    PROFILE_LIMIT,
+                    conf,
+                )
                 period_profile["_profile_seconds"] = round(time.time() - profile_started, 3)
-                reports.append({"chunk_id": 0, "chunk_selector": "clickhouse_period_profile", "report": period_profile})
+                context_json = json.dumps(period_profile, ensure_ascii=False, separators=(",", ":"))
+                overview = period_profile.get("overview") or {}
+                reports.append(
+                    {
+                        "chunk_id": 0,
+                        "chunk_selector": "clickhouse_analytical_context",
+                        "report": {
+                            "analysis_strategy": strategy,
+                            "context_contract": period_profile.get("context_contract"),
+                            "overview": overview,
+                            "sections": sorted(period_profile.keys()),
+                            "limits": period_profile.get("limits"),
+                            "profile_seconds": period_profile.get("_profile_seconds"),
+                        },
+                    }
+                )
+                insert_rows(
+                    CHUNK_REPORTS_TABLE,
+                    [
+                        {
+                            "investigation_id": investigation_id,
+                            "chunk_id": 0,
+                            "chunk_from": ch_datetime(start),
+                            "chunk_to": ch_datetime(end),
+                            "rows_read": int(overview.get("rows") or 0),
+                            "chars_read": len(context_json),
+                            "kimi_summary_json": context_json,
+                            "candidate_filters_json": json.dumps(period_profile.get("rare_events", []), ensure_ascii=False),
+                            "evidence_json": json.dumps(period_profile.get("raw_fragments", {}), ensure_ascii=False),
+                            "error": "",
+                        }
+                    ],
+                )
+            else:
+                period_profile = (
+                    fetch_period_profile(source_table, start, end, source_name, index_like, fields, PROFILE_LIMIT)
+                    if PROFILE_ENABLED
+                    else {}
+                )
+                if period_profile:
+                    period_profile["_profile_seconds"] = round(time.time() - profile_started, 3)
+                    reports.append({"chunk_id": 0, "chunk_selector": "clickhouse_period_profile", "report": period_profile})
 
             seen_documents = set()
-            specs = [] if raw_chunk_mode in ("off", "none", "profile_only") else chunk_specs(start, end, max_chunks, fields, conf)
+            specs = (
+                []
+                if is_context_strategy(strategy) or raw_chunk_mode in ("off", "none", "profile_only")
+                else chunk_specs(start, end, max_chunks, fields, conf)
+            )
             for spec in specs:
                 ensure_not_cancelled(f"chunk {chunk_id + 1} fetch")
                 rows = fetch_log_rows(
@@ -1061,6 +1449,7 @@ def llm_guided_log_sql_refinement():
                 generation_name="Airflow refined SQL synthesis",
                 metadata={
                     "investigation_id": investigation_id,
+                    "analysis_strategy": strategy,
                     "raw_chunks": chunk_id,
                     "batch_rows": row_limit,
                     "source_table": source_table,
@@ -1070,6 +1459,7 @@ def llm_guided_log_sql_refinement():
                     "source_table": source_table,
                     "time_from": start.isoformat(),
                     "time_to": end.isoformat(),
+                    "analysis_strategy": strategy,
                     "raw_chunks": chunk_id,
                     "batch_rows": row_limit,
                 },
@@ -1079,6 +1469,7 @@ def llm_guided_log_sql_refinement():
             final_json["_kimi_seconds"] = final["seconds"]
             final_json["_usage"] = final["usage"]
             final_json["_profile_seconds"] = period_profile.get("_profile_seconds", 0)
+            final_json["_analysis_strategy"] = strategy
             final_json["_raw_chunk_mode"] = raw_chunk_mode
             final_json["_raw_chunks"] = chunk_id
             final_json["_batch_rows"] = row_limit
@@ -1160,6 +1551,7 @@ def llm_guided_log_sql_refinement():
             )
             return {
                 "investigation_id": investigation_id,
+                "analysis_strategy": strategy,
                 "chunks": chunk_id,
                 "batch_rows": row_limit,
                 "total_seconds": round(time.time() - started_at, 3),

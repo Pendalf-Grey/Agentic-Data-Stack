@@ -53,6 +53,9 @@ DEFAULT_SOURCE_NAME = os.getenv("ADS_LLM_LOG_SOURCE_NAME", os.getenv("LLM_LOG_SO
 DEFAULT_INDEX_LIKE = os.getenv("ADS_LLM_LOG_INDEX_LIKE", os.getenv("LLM_LOG_INDEX_LIKE", "nginx-logs-%"))
 DEFAULT_START = os.getenv("LLM_LOG_START", "2024-06-16T00:00:00Z")
 DEFAULT_END = os.getenv("LLM_LOG_END", "2026-06-16T00:00:00Z")
+# Стратегия по умолчанию: тяжелое чтение всего периода делает ClickHouse,
+# а Kimi получает компактный аналитический контекст и raw-доказательства.
+DEFAULT_ANALYSIS_STRATEGY = os.getenv("ADS_LLM_LOG_ANALYSIS_STRATEGY", os.getenv("LLM_LOG_ANALYSIS_STRATEGY", "context"))
 DEFAULT_RAW_CHUNK_MODE = os.getenv("ADS_LLM_LOG_RAW_CHUNK_MODE", os.getenv("LLM_LOG_RAW_CHUNK_MODE", "full_period"))
 # batch_rows - сколько raw log rows Airflow отдаст Kimi за один chunk-анализ.
 # Старые имена переменных оставлены как fallback, чтобы не ломать существующие .env.
@@ -159,6 +162,15 @@ def clickhouse_datetime(value: str) -> str:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
+def analysis_strategy_name(value: str | None) -> str:
+    return str(value or DEFAULT_ANALYSIS_STRATEGY or "context").strip().lower()
+
+
+def is_context_strategy(value: str) -> bool:
+    # Синонимы оставлены для удобства экспериментов из UI/.env без правок кода.
+    return value in {"context", "analytical_context", "profile_guided", "context_first"}
+
+
 async def estimate_log_batches(conf: dict[str, Any]) -> dict[str, Any]:
     # Быстрый preflight до запуска DAG: считаем строки в ClickHouse и заранее
     # регулируем размер batch, чтобы большой период не порождал сотни/тысячи
@@ -182,6 +194,22 @@ FORMAT JSONEachRow
     response.raise_for_status()
     first_line = response.text.splitlines()[0] if response.text.strip() else "{}"
     rows = int((json.loads(first_line).get("rows") or 0))
+    strategy = analysis_strategy_name(conf.get("analysis_strategy"))
+    if is_context_strategy(strategy):
+        # В context-first режиме число Kimi-вызовов не зависит от количества
+        # raw-строк: ClickHouse сам строит профили, окна, редкости и raw samples.
+        return {
+            "rows": rows,
+            "requested_batch_rows": requested_batch_rows,
+            "batch_rows": requested_batch_rows,
+            "autoscaled_batch_rows": False,
+            "estimated_kimi_chunk_calls": 1 if rows > 0 else 0,
+            "estimated_raw_chunk_calls": 0,
+            "target_kimi_chunk_calls": TARGET_LOG_BATCHES_PER_REQUEST,
+            "max_kimi_chunk_calls": MAX_LOG_BATCHES_PER_REQUEST,
+            "analysis_strategy": strategy,
+            "context_first": True,
+        }
     effective_target = TARGET_LOG_BATCHES_PER_REQUEST
     if MAX_LOG_BATCHES_PER_REQUEST > 0 and effective_target > 0:
         effective_target = min(effective_target, MAX_LOG_BATCHES_PER_REQUEST)
@@ -200,8 +228,11 @@ FORMAT JSONEachRow
         "batch_rows": batch_rows,
         "autoscaled_batch_rows": autoscaled,
         "estimated_kimi_chunk_calls": (rows + batch_rows - 1) // batch_rows,
+        "estimated_raw_chunk_calls": (rows + batch_rows - 1) // batch_rows,
         "target_kimi_chunk_calls": TARGET_LOG_BATCHES_PER_REQUEST,
         "max_kimi_chunk_calls": MAX_LOG_BATCHES_PER_REQUEST,
+        "analysis_strategy": strategy,
+        "context_first": False,
     }
 
 
@@ -267,6 +298,7 @@ async def airflow_run_log_refinement(
     source_table: str | None = None,
     source_name: str | None = None,
     index_like: str | None = None,
+    analysis_strategy: str | None = None,
     raw_chunk_mode: str | None = None,
     batch_rows: int | None = None,
     chunk_row_limit: int | None = None,
@@ -276,11 +308,12 @@ async def airflow_run_log_refinement(
     wait_for_completion: bool = True,
     wait_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Trigger the ADS LLM-guided raw-log SQL refinement DAG and optionally wait for completion."""
+    """Trigger the ADS LLM-guided log SQL refinement DAG and optionally wait for completion."""
     resolved_investigation_id = investigation_id or f"ui-{uuid.uuid4()}"
     dag_run_id = f"mcp__{resolved_investigation_id}__{now_run_suffix()}"
-    # В Airflow уходит только задача и параметры чтения raw logs. Сами chunk reports
-    # и refined SQL DAG сохранит в ClickHouse, а не вернет большим MCP payload'ом.
+    # В Airflow уходит только задача и параметры чтения логов. Сам analytical
+    # context/chunk reports/refined SQL DAG сохранит в ClickHouse, а не вернет
+    # большим MCP payload'ом обратно в LibreChat.
     conf: dict[str, Any] = {
         "question": question,
         "start": iso_or_default(start, DEFAULT_START),
@@ -288,6 +321,7 @@ async def airflow_run_log_refinement(
         "source_table": source_table or DEFAULT_SOURCE_TABLE,
         "source_name": source_name or DEFAULT_SOURCE_NAME,
         "index_like": index_like or DEFAULT_INDEX_LIKE,
+        "analysis_strategy": analysis_strategy_name(analysis_strategy),
         "raw_chunk_mode": raw_chunk_mode or DEFAULT_RAW_CHUNK_MODE,
         "batch_rows": batch_rows,
         "chunk_row_limit": (
@@ -308,7 +342,7 @@ async def airflow_run_log_refinement(
             "triggered": False,
             "state": "preflight_failed",
             "message": (
-                "Could not estimate raw-log batch count before starting Airflow. "
+                "Could not estimate raw-log row count before starting Airflow. "
                 "Do not poll the DAG; fix ClickHouse/source settings first."
             ),
             "error": type(exc).__name__,
@@ -339,14 +373,14 @@ async def airflow_run_log_refinement(
             "triggered": False,
             "state": "budget_exceeded",
             "message": (
-                "Requested raw-log interval is too large for interactive LLM refinement. "
-                "Narrow the time range or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST explicitly."
+                "Requested raw-log interval is too large for interactive raw-chunk LLM refinement. "
+                "Use analysis_strategy=context, narrow the time range, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST explicitly."
             ),
             "preflight": estimate,
             "conf": conf,
             "next_steps": [
                 "Do not call airflow_get_dag_run; no DAG was started.",
-                "Ask the user to narrow the time range, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.",
+                "Ask the user to switch to analysis_strategy=context, narrow the time range, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.",
             ],
         }
     trigger = await client.request(
