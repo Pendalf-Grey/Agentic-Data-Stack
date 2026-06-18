@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -89,6 +89,10 @@ INVESTIGATIONS_TABLE = f"{RESULT_DATABASE}.{os.getenv('ADS_LLM_LOG_INVESTIGATION
 CHUNK_REPORTS_TABLE = f"{RESULT_DATABASE}.{os.getenv('ADS_LLM_LOG_CHUNK_REPORTS_TABLE', os.getenv('LLM_LOG_CHUNK_REPORTS_TABLE', 'llm_log_chunk_reports'))}"
 REFINED_SQL_TABLE = f"{RESULT_DATABASE}.{os.getenv('ADS_LLM_LOG_REFINED_SQL_TABLE', os.getenv('LLM_LOG_REFINED_SQL_TABLE', 'llm_log_refined_sql'))}"
 SQL_REPAIR_ATTEMPTS = int(os.getenv("LLM_LOG_SQL_REPAIR_ATTEMPTS", "2"))
+CLICKHOUSE_HTTP_RETRIES = int(os.getenv("ADS_CLICKHOUSE_HTTP_RETRIES", os.getenv("CLICKHOUSE_HTTP_RETRIES", "5")))
+CLICKHOUSE_HTTP_RETRY_DELAY_SECONDS = float(
+    os.getenv("ADS_CLICKHOUSE_HTTP_RETRY_DELAY_SECONDS", os.getenv("CLICKHOUSE_HTTP_RETRY_DELAY_SECONDS", "2"))
+)
 
 
 def env_bool(name, default=False):
@@ -222,17 +226,26 @@ def parse_time(value):
 
 def clickhouse_query(sql, database=CLICKHOUSE_DATABASE, timeout=240):
     params = urlencode({"database": database, "query": sql})
-    request = Request(
-        f"{CLICKHOUSE_HOST}/?{params}",
-        headers={"X-ClickHouse-User": CLICKHOUSE_USER, "X-ClickHouse-Key": CLICKHOUSE_PASSWORD},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return response.read().decode("utf-8")
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(detail or str(error)) from error
+    last_error = None
+    for attempt in range(max(1, CLICKHOUSE_HTTP_RETRIES)):
+        request = Request(
+            f"{CLICKHOUSE_HOST}/?{params}",
+            headers={"X-ClickHouse-User": CLICKHOUSE_USER, "X-ClickHouse-Key": CLICKHOUSE_PASSWORD},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8")
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(detail or str(error)) from error
+        except (ConnectionError, TimeoutError, URLError) as error:
+            last_error = error
+            if attempt + 1 >= max(1, CLICKHOUSE_HTTP_RETRIES):
+                break
+            # ClickHouse может быть недоступен несколько секунд после рестарта контейнера.
+            time.sleep(CLICKHOUSE_HTTP_RETRY_DELAY_SECONDS)
+    raise RuntimeError(str(last_error)) from last_error
 
 
 def insert_rows(table, rows):
@@ -240,22 +253,32 @@ def insert_rows(table, rows):
         return
     body = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
     params = urlencode({"database": CLICKHOUSE_DATABASE, "query": f"INSERT INTO {table} FORMAT JSONEachRow"})
-    request = Request(
-        f"{CLICKHOUSE_HOST}/?{params}",
-        data=body.encode("utf-8"),
-        headers={
-            "X-ClickHouse-User": CLICKHOUSE_USER,
-            "X-ClickHouse-Key": CLICKHOUSE_PASSWORD,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=240) as response:
-            response.read()
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(detail or str(error)) from error
+    last_error = None
+    for attempt in range(max(1, CLICKHOUSE_HTTP_RETRIES)):
+        request = Request(
+            f"{CLICKHOUSE_HOST}/?{params}",
+            data=body.encode("utf-8"),
+            headers={
+                "X-ClickHouse-User": CLICKHOUSE_USER,
+                "X-ClickHouse-Key": CLICKHOUSE_PASSWORD,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=240) as response:
+                response.read()
+                return
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(detail or str(error)) from error
+        except (ConnectionError, TimeoutError, URLError) as error:
+            last_error = error
+            if attempt + 1 >= max(1, CLICKHOUSE_HTTP_RETRIES):
+                break
+            # Повторяем только сетевые сбои, ошибки SQL остаются явными.
+            time.sleep(CLICKHOUSE_HTTP_RETRY_DELAY_SECONDS)
+    raise RuntimeError(str(last_error)) from last_error
 
 
 def utc_now_iso():
@@ -492,7 +515,32 @@ def extract_json_object(text):
     end = stripped.rfind("}")
     if start >= 0 and end > start:
         stripped = stripped[start : end + 1]
-    return json.loads(stripped)
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        # SQL может содержать обратный слеш, который модель не удвоила для строгого JSON.
+        repaired = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', stripped)
+        return json.loads(repaired)
+
+
+def validate_refined_sql_scope(sql, source_table, source_name, index_like):
+    normalized = " ".join(str(sql or "").lower().split())
+    required_tokens = {
+        "source table": str(source_table).lower(),
+        "time filter": "event_time",
+        "source filter": "source_name",
+        "index filter": "index_name",
+    }
+    missing = [label for label, token in required_tokens.items() if token not in normalized]
+    if missing:
+        raise RuntimeError(
+            "Refined SQL is outside the requested Elasticsearch scope; missing " + ", ".join(missing)
+        )
+    if source_name and str(source_name).lower() not in normalized:
+        raise RuntimeError("Refined SQL does not constrain the configured Elasticsearch source_name")
+    index_marker = str(index_like).replace("%", "").replace("_", "").lower()
+    if index_marker and index_marker not in normalized.replace("%", "").replace("_", ""):
+        raise RuntimeError("Refined SQL does not constrain the configured Elasticsearch index pattern")
 
 
 def fetch_log_rows(
@@ -1088,7 +1136,7 @@ def chunk_prompt(user_question, chunk_id, rows, fields):
     ]
 
 
-def final_prompt(user_question, source_table, start, end, reports, fields, period_profile):
+def final_prompt(user_question, source_table, start, end, source_name, index_like, reports, fields, period_profile):
     reports_json = json.dumps(reports, ensure_ascii=False, separators=(",", ":"))
     if len(reports_json) > FINAL_REPORT_MAX_CHARS:
         reports_json = reports_json[:FINAL_REPORT_MAX_CHARS] + "\n...[TRUNCATED_REPORTS_FOR_FINAL_SYNTHESIS]"
@@ -1100,6 +1148,10 @@ def final_prompt(user_question, source_table, start, end, reports, fields, perio
                 "Return strict JSON only. Do not use INSERT/UPDATE/DELETE/ALTER/DROP. "
                 "The query must read from the provided source table and parse fields from document_json when needed. "
                 f"Use only configured field expressions: {field_instructions(fields)}. "
+                "The source table physical columns are source_name, index_name, document_id, event_time, ingest_time, document_json, and version. "
+                "Configured logical field names are not physical columns. Expand their expressions directly or define every logical field in an inner parsed CTE before using its alias in outer CTEs. "
+                "For multi-metric analysis, prefer one parsed CTE that selects event_time plus all required configured field expressions from the source table. "
+                "Every query must filter event_time to the requested range, source_name to the configured source, and index_name to the configured index pattern. "
                 "If the context says full_period_scanned_by=ClickHouse, then counts, frequencies, windows, "
                 "quantiles, rare events, and top traces were computed over the whole matching period. "
                 "Selected raw fragments are evidence samples, not the whole population; do not treat sample size as total row count. "
@@ -1108,7 +1160,9 @@ def final_prompt(user_question, source_table, start, end, reports, fields, perio
                 "If a SELECT groups rows, every selected non-aggregate expression must be in GROUP BY. "
                 "Do not reference pre-aggregation aliases inside a grouped SELECT unless they are aggregated first. "
                 "Do not group by aggregate aliases or boolean aliases derived from aggregate conditions. "
+                "Every downstream CTE may reference only columns explicitly selected by its upstream CTE. If a later step needs incident, path, or another dimension after hourly/daily aggregation, carry that dimension through SELECT and GROUP BY, or explicitly unnest an aggregated array; never reference the original alias after it was dropped. "
                 "Avoid NaN in user-facing aggregates: if a conditional average can be empty, use nullable-safe expressions or group filters that match the aggregate condition. "
+                "ClickHouse toDayOfWeek uses ISO numbering: Monday=1 through Sunday=7. For weekend/weekday comparisons, weekend is IN (6, 7), never IN (1, 7). "
                 f"SQL shape preference: {SQL_SHAPE_HINT} "
                 f"Field semantics: {semantic_instructions()}"
             ),
@@ -1118,6 +1172,8 @@ def final_prompt(user_question, source_table, start, end, reports, fields, perio
             "content": (
                 f"User question:\n{user_question}\n\n"
                 f"Source table: {source_table}\n"
+                f"Source name: {source_name}\n"
+                f"Index pattern: {index_like}\n"
                 f"Time range: {start} to {end}\n\n"
                 "ClickHouse analytical context JSON. Treat this as the compact statistical map of the whole period:\n"
                 f"{json.dumps(period_profile, ensure_ascii=False, separators=(',', ':'))}\n\n"
@@ -1129,7 +1185,19 @@ def final_prompt(user_question, source_table, start, end, reports, fields, perio
     ]
 
 
-def repair_prompt(user_question, source_table, start, end, reports, fields, period_profile, invalid_sql, validation_error):
+def repair_prompt(
+    user_question,
+    source_table,
+    start,
+    end,
+    source_name,
+    index_like,
+    reports,
+    fields,
+    period_profile,
+    invalid_sql,
+    validation_error,
+):
     reports_json = json.dumps(reports, ensure_ascii=False, separators=(",", ":"))
     if len(reports_json) > FINAL_REPORT_MAX_CHARS:
         reports_json = reports_json[:FINAL_REPORT_MAX_CHARS] + "\n...[TRUNCATED_REPORTS_FOR_REPAIR]"
@@ -1140,8 +1208,13 @@ def repair_prompt(user_question, source_table, start, end, reports, fields, peri
                 "Repair an invalid ClickHouse SELECT query. Return strict JSON only with keys: "
                 "refined_sql, rationale, confidence. Do not use INSERT/UPDATE/DELETE/ALTER/DROP. "
                 "The repaired SQL must pass ClickHouse syntax and aggregate validation. "
+                "The only physical source columns are source_name, index_name, document_id, event_time, ingest_time, document_json, and version. "
+                "Expand configured logical field expressions directly or define them in an inner parsed CTE before using their aliases. "
+                "Keep filters for event_time, the configured source_name, and the configured index_name pattern. "
                 "ClickHouse aggregate rules: countIf(condition), avgIf(value, condition), quantileIf(level)(value, condition). "
-                "Do not group by aggregate aliases; do not return NaN-producing conditional aggregates."
+                "Do not group by aggregate aliases; do not return NaN-producing conditional aggregates. "
+                "Check every CTE boundary: downstream CTEs may use only columns explicitly selected upstream. If a later step needs incident, path, or another dimension after aggregation, preserve it in SELECT and GROUP BY or unnest an explicitly selected aggregate array; never reference a dropped source alias."
+                " ClickHouse toDayOfWeek uses ISO numbering; weekends are days 6 and 7."
             ),
         },
         {
@@ -1149,6 +1222,8 @@ def repair_prompt(user_question, source_table, start, end, reports, fields, peri
             "content": (
                 f"User question:\n{user_question}\n\n"
                 f"Source table: {source_table}\n"
+                f"Source name: {source_name}\n"
+                f"Index pattern: {index_like}\n"
                 f"Time range: {start} to {end}\n"
                 f"Configured field expressions: {field_instructions(fields)}\n\n"
                 f"Field semantics: {semantic_instructions()}\n\n"
@@ -1444,7 +1519,17 @@ def llm_guided_log_sql_refinement():
 
             ensure_not_cancelled("final Kimi call")
             final = call_kimi(
-                final_prompt(user_question, source_table, start.isoformat(), end.isoformat(), reports, fields, period_profile),
+                final_prompt(
+                    user_question,
+                    source_table,
+                    start.isoformat(),
+                    end.isoformat(),
+                    source_name,
+                    index_like,
+                    reports,
+                    fields,
+                    period_profile,
+                ),
                 trace_id=trace_id,
                 generation_name="Airflow refined SQL synthesis",
                 metadata={
@@ -1478,6 +1563,7 @@ def llm_guided_log_sql_refinement():
             validation_result = ""
             for repair_attempt in range(SQL_REPAIR_ATTEMPTS + 1):
                 try:
+                    validate_refined_sql_scope(refined_sql, source_table, source_name, index_like)
                     validation_result = clickhouse_query(f"EXPLAIN SYNTAX {refined_sql}", timeout=120)
                     break
                 except Exception as exc:
@@ -1490,6 +1576,8 @@ def llm_guided_log_sql_refinement():
                             source_table,
                             start.isoformat(),
                             end.isoformat(),
+                            source_name,
+                            index_like,
                             reports,
                             fields,
                             period_profile,

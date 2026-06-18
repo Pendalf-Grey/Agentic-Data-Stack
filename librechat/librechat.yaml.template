@@ -53,6 +53,7 @@ mcpServers:
       Use this ClickHouse MCP server for analytics questions. Do not answer database questions from memory.
       Interpret the user's question, inspect the ClickHouse schema when needed, run a single-use SELECT query through the ClickHouse MCP tools, and answer only from returned rows.
       Never add ClickHouse FORMAT clauses such as FORMAT JSON, FORMAT Vertical, FORMAT Pretty, or FORMAT Native to MCP queries; the MCP server controls response formatting.
+      ClickHouse toDayOfWeek uses ISO numbering: Monday=1 through Sunday=7. For weekend/weekday analysis, use IN (6, 7) for weekends; never IN (1, 7).
       For ADS analytics, prefer the ${ADS_ANALYTICS_DATABASE} database unless the user explicitly asks for another database.
       When the user asks for a chart, dashboard, visualization, metric, distribution, dependency, correlation, ranking, aggregation, or comparison, treat it as a data-analysis request and use ClickHouse before answering.
       Select tables and columns dynamically from the schema. If table or column names are unclear, query system.columns for candidate tables/columns and validate with a small SELECT before the final query.
@@ -65,6 +66,9 @@ mcpServers:
       Before querying these refinement tables for the first time in a conversation, inspect their columns or use ClickHouse metadata. In the default ADS schema, the user prompt is stored in user_question.
       When reading ${ADS_LLM_LOG_REFINED_SQL_FQN}, select refined_sql and metadata with a normal SELECT without FORMAT clauses, then execute the returned refined_sql as the next ClickHouse MCP query.
       Do not decide whether a log request is simple or complex. If no completed investigation exists for the requested period/question, call the Airflow MCP tool airflow_run_log_refinement first, then read artifacts.refined_sql_lookup through ClickHouse MCP and execute the returned refined_sql.
+      If the context-first Airflow run is not successful, do not replace it with a manually invented query over the raw Elasticsearch table. Use ClickHouse only for one bounded diagnostic lookup explicitly allowed by the Airflow instructions, then stop without creating a dashboard.
+      После одного успешного выполнения refined_sql не повторяй тот же SELECT в том же ответе. Если пользователь просил график или дашборд, сразу используй Grafana MCP с уже проверенным запросом и формой результата; иначе отвечай по возвращенным строкам.
+      A successful SELECT that returned any rows is final for that answer. Never execute it again because the UI shows "Show more", truncates rows, or omits later time buckets. For a requested chart, immediately pass the exact successful SQL to Grafana; summarize only the visible aggregates and let Grafana execute the complete series.
       Do not try to load millions of raw log rows directly into a single chat response. Use bounded raw samples interactively; use the Airflow refinement flow for full-period log analysis.
       Use concise neutral Russian. Do not show internal reasoning, fake tool JSON, or raw MCP payloads.
       Do not invent tables, columns, rows, metrics, URLs, or values. If the schema/data does not support the question, say that clearly.
@@ -74,13 +78,21 @@ mcpServers:
   grafana:
     type: sse
     url: http://mcp-grafana:8000/sse
-    timeout: 60000
+    timeout: ${GRAFANA_MCP_TIMEOUT_MS}
     serverInstructions: |
       Use this Grafana MCP server only when the user asks to create, find, inspect, or update Grafana dashboards or visualizations.
       For analytics data, use ClickHouse MCP first to produce the exact SELECT query and result rows, then use Grafana MCP to create or update a dashboard/panel based on that query.
       If the user asks to "make/build/draw/create a graph/chart/dashboard", do not stop after returning tabular data. Create or update a Grafana dashboard/panel and return the dashboard link.
       Choose the panel type from the data shape: scatter/XY for relationships between two numeric variables, bar chart for grouped categories, time series/state timeline for time-indexed data, table for detailed rows.
       Build panel queries from the discovered ClickHouse schema and the validated SELECT query. Do not hardcode table names, column names, brands, metrics, or dashboards.
+      Set dashboard.time.from and dashboard.time.to to the exact absolute period requested by the user. Never leave a generated historical dashboard on Grafana's default last-six-hours range.
+      Keep the dashboard time range and panel query range consistent. Prefer Grafana time macros when the validated query supports them; otherwise copy the requested absolute bounds into both places.
+      Never append FORMAT JSONEachRow, FORMAT JSON, or any other FORMAT clause to Grafana ClickHouse rawSql. The Grafana datasource controls the wire format.
+      Unless the user explicitly asks for several panels, create exactly one primary panel. Put related numeric series into that panel instead of duplicating a large CTE across multiple targets or panels.
+      Reuse the already validated refined SQL whenever its result shape fits the requested chart. Do not generate another full-period query only for decoration.
+      Every ClickHouse target must set queryType to sql, format to 1, refId, rawSql, and the clickhouse-analytics datasource. Keep the same datasource on the panel.
+      Before returning the link, make sure every requested panel has a datasource, a non-empty query, and a visualization type compatible with the returned columns.
+      Do not pass folderUid unless it was first returned by a Grafana folder lookup. In particular, never assume that "general" is a valid folder UID.
       Prefer concise dashboard and panel titles. Use the existing ClickHouse datasource when creating panels.
       When returning a Grafana dashboard or panel link to the user, always use the external Grafana base URL ${GRAFANA_BASE_URL}. Do not use the LibreChat URL, the current browser origin, or localhost:3080 for Grafana links.
       If a Grafana tool returns a relative URL such as /d/<uid>/<slug>, convert it to ${GRAFANA_BASE_URL}/d/<uid>/<slug> before answering.
@@ -114,6 +126,7 @@ mcpServers:
       If airflow_run_log_refinement returns state=budget_exceeded or state=preflight_failed, do not call airflow_get_dag_run and do not query ClickHouse refinement tables in a loop. Explain the preflight result and ask the user to narrow the period, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.
       If airflow_run_log_refinement returns state=timeout_cancelled, do not call airflow_get_dag_run and do not query refinement tables in a loop. Tell the user that the wait timeout was reached and the Airflow DagRun was marked failed to stop further background Kimi batch calls.
       If airflow_run_log_refinement returns state=timeout_cancel_failed, state=timeout, or state=failed, call airflow_get_dag_run at most once, then stop tool use and return the dag_run_id/investigation_id with the current state.
+      After any failed context-first run, never ask ClickHouse for a manual fallback analysis and never ask Grafana to create a panel. The failed investigation must be fixed or rerun successfully first.
       Never repeatedly poll Airflow or repeatedly query refinement tables in one answer. One DAG trigger, one optional status check, one refined_sql lookup, and one refined SQL execution are the maximum normal flow.
 
   langfuse:

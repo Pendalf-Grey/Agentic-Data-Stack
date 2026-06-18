@@ -6,10 +6,11 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from mcp import types
 from mcp.server.fastmcp import FastMCP
 
 
@@ -34,6 +35,7 @@ def env_bool(name: str, default: bool) -> bool:
 
 CANCEL_ON_TIMEOUT = env_bool("AIRFLOW_MCP_CANCEL_ON_TIMEOUT", True)
 AUTO_SCALE_BATCH_ROWS = env_bool("AIRFLOW_MCP_AUTO_SCALE_BATCH_ROWS", True)
+ALLOW_BACKGROUND_RUNS = env_bool("AIRFLOW_MCP_ALLOW_BACKGROUND_RUNS", False)
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://clickhouse:8123").rstrip("/")
 if "://" not in CLICKHOUSE_HOST:
@@ -78,9 +80,53 @@ REFINED_SQL_TABLE = os.getenv("ADS_LLM_LOG_REFINED_SQL_TABLE", os.getenv("LLM_LO
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
 SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$")
+NUMBER_WORDS = {
+    "один": 1,
+    "одна": 1,
+    "одно": 1,
+    "два": 2,
+    "две": 2,
+    "три": 3,
+    "четыре": 4,
+    "пять": 5,
+    "шесть": 6,
+    "семь": 7,
+    "восемь": 8,
+    "девять": 9,
+    "десять": 10,
+    "двенадцать": 12,
+}
+RELATIVE_RANGE_RE = re.compile(
+    r"(?:за\s+)?(?:последн(?:ие|их|ий|юю)|прошедш(?:ие|их|ий|ую)|прошл(?:ые|ых|ый|ую))\s+"
+    r"(?P<number>\d+|один|одна|одно|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|двенадцать)\s+"
+    r"(?P<unit>час(?:а|ов)?|сут(?:ки|ок)?|д(?:ень|ня|ней)|недел(?:ю|и|ь)?|месяц(?:а|ев)?|год(?:а|ов)?|лет)",
+    re.IGNORECASE,
+)
+HALF_YEAR_RE = re.compile(r"(?:за\s+)?(?:последн(?:ие|их)|прошедш(?:ие|их)|прошл(?:ые|ых))\s+полгода", re.IGNORECASE)
+EN_RELATIVE_RANGE_RE = re.compile(
+    r"(?:last|past)\s+(?P<number>\d+)\s+(?P<unit>hours?|days?|weeks?|months?|years?)",
+    re.IGNORECASE,
+)
+NOW_OFFSET_RE = re.compile(r"^now(?:\s*(?P<sign>[+-])\s*(?P<number>\d+)\s*(?P<unit>[smhdwMy]|year|years|month|months|week|weeks|day|days|hour|hours|minute|minutes|second|seconds))?$", re.IGNORECASE)
 
 
 app = FastMCP("airflow", host=MCP_HOST, port=MCP_PORT)
+ACTIVE_DAG_RUNS_BY_REQUEST_ID: dict[str, dict[str, str]] = {}
+
+
+async def handle_cancelled_notification(notification: types.CancelledNotification) -> None:
+    request_id = getattr(notification.params, "requestId", None)
+    if request_id is None:
+        return
+    active = ACTIVE_DAG_RUNS_BY_REQUEST_ID.pop(str(request_id), None)
+    if not active or not CANCEL_ON_TIMEOUT:
+        return
+    # LibreChat может показать "Отменен" раньше, чем FastMCP отменит coroutine.
+    # Поэтому отдельно слушаем MCP cancellation notification и гасим Airflow.
+    await cancel_dag_run(active["dag_id"], active["dag_run_id"])
+
+
+app._mcp_server.notification_handlers[types.CancelledNotification] = handle_cancelled_notification
 
 
 class AirflowClient:
@@ -160,6 +206,106 @@ def clickhouse_datetime(value: str) -> str:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_relative_number(value: str) -> int:
+    return int(value) if value.isdigit() else NUMBER_WORDS[value.lower()]
+
+
+def shift_months(value: datetime, months: int) -> datetime:
+    month_index = value.year * 12 + (value.month - 1) - months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    month_lengths = [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    return value.replace(year=year, month=month, day=min(value.day, month_lengths[month - 1]))
+
+
+def shift_years(value: datetime, years: int) -> datetime:
+    try:
+        return value.replace(year=value.year - years)
+    except ValueError:
+        return value.replace(year=value.year - years, month=2, day=28)
+
+
+def relative_range_from_question(question: str) -> dict[str, Any] | None:
+    text = " ".join(str(question or "").strip().split())
+    if not text:
+        return None
+    lower = text.lower()
+    now = datetime.now(timezone.utc)
+    if re.search(r"\bсегодня\b", lower):
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return {"start": iso_utc(start), "end": iso_utc(now), "source": "question_relative_today"}
+    if re.search(r"\bвчера\b", lower):
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return {"start": iso_utc(end - timedelta(days=1)), "end": iso_utc(end), "source": "question_relative_yesterday"}
+    if HALF_YEAR_RE.search(text):
+        return {"start": iso_utc(shift_months(now, 6)), "end": iso_utc(now), "source": "question_relative_half_year"}
+
+    match = RELATIVE_RANGE_RE.search(text) or EN_RELATIVE_RANGE_RE.search(text)
+    if not match:
+        return None
+    number = parse_relative_number(match.group("number"))
+    unit = match.group("unit").lower()
+    if unit.startswith(("час", "hour")):
+        start = now - timedelta(hours=number)
+    elif unit.startswith(("сут", "д", "day")):
+        start = now - timedelta(days=number)
+    elif unit.startswith(("недел", "week")):
+        start = now - timedelta(weeks=number)
+    elif unit.startswith(("месяц", "month")):
+        start = shift_months(now, number)
+    else:
+        start = shift_years(now, number)
+    return {
+        "start": iso_utc(start),
+        "end": iso_utc(now),
+        "source": "question_relative_range",
+        "matched": match.group(0),
+    }
+
+
+def shift_by_unit(value: datetime, number: int, unit: str) -> datetime:
+    if unit == "M":
+        return shift_months(value, number)
+    normalized = unit.lower()
+    if normalized in {"s", "second", "seconds"}:
+        return value - timedelta(seconds=number)
+    if normalized in {"m", "minute", "minutes"}:
+        return value - timedelta(minutes=number)
+    if normalized in {"h", "hour", "hours"}:
+        return value - timedelta(hours=number)
+    if normalized in {"d", "day", "days"}:
+        return value - timedelta(days=number)
+    if normalized in {"w", "week", "weeks"}:
+        return value - timedelta(weeks=number)
+    if normalized in {"month", "months"}:
+        return shift_months(value, number)
+    if normalized in {"y", "year", "years"}:
+        return shift_years(value, number)
+    raise ValueError(f"Неподдерживаемая единица относительного времени: {unit!r}")
+
+
+def resolve_now_expression(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = NOW_OFFSET_RE.match(text)
+    if not match:
+        return text
+    now = datetime.now(timezone.utc)
+    sign = match.group("sign")
+    number = match.group("number")
+    unit = match.group("unit")
+    if not sign or not number or not unit:
+        return iso_utc(now)
+    if sign == "+":
+        raise ValueError(f"Будущий относительный период не поддерживается для анализа логов: {value!r}")
+    return iso_utc(shift_by_unit(now, int(number), unit))
 
 
 def analysis_strategy_name(value: str | None) -> str:
@@ -308,9 +454,16 @@ async def airflow_run_log_refinement(
     wait_for_completion: bool = True,
     wait_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Trigger the ADS LLM-guided log SQL refinement DAG and optionally wait for completion."""
+    """Запускает ADS log refinement; относительные периоды из вопроса вычисляются на стороне MCP."""
     resolved_investigation_id = investigation_id or f"ui-{uuid.uuid4()}"
     dag_run_id = f"mcp__{resolved_investigation_id}__{now_run_suffix()}"
+    relative_range = relative_range_from_question(question)
+    if relative_range:
+        start = relative_range["start"]
+        end = relative_range["end"]
+    else:
+        start = resolve_now_expression(start)
+        end = resolve_now_expression(end)
     # В Airflow уходит только задача и параметры чтения логов. Сам analytical
     # context/chunk reports/refined SQL DAG сохранит в ClickHouse, а не вернет
     # большим MCP payload'ом обратно в LibreChat.
@@ -334,6 +487,8 @@ async def airflow_run_log_refinement(
         "max_chunks": max_chunks if max_chunks is not None else DEFAULT_MAX_CHUNKS,
         "investigation_id": resolved_investigation_id,
     }
+    if relative_range:
+        conf["time_range_normalized_from_question"] = relative_range
     try:
         estimate = await estimate_log_batches(conf)
     except Exception as exc:
@@ -383,6 +538,10 @@ async def airflow_run_log_refinement(
                 "Ask the user to switch to analysis_strategy=context, narrow the time range, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.",
             ],
         }
+    if not wait_for_completion and not ALLOW_BACKGROUND_RUNS:
+        wait_for_completion = True
+        conf["wait_for_completion_forced"] = True
+
     trigger = await client.request(
         "POST",
         f"/api/v1/dags/{dag_id}/dagRuns",
@@ -405,6 +564,15 @@ async def airflow_run_log_refinement(
     if not trigger["ok"] or not wait_for_completion:
         return result
 
+    request_id: str | None = None
+    try:
+        context = app.get_context()
+        if context.request_id is not None:
+            request_id = str(context.request_id)
+            ACTIVE_DAG_RUNS_BY_REQUEST_ID[request_id] = {"dag_id": dag_id, "dag_run_id": dag_run_id}
+    except Exception:
+        request_id = None
+
     requested_wait_timeout_seconds = wait_timeout_seconds
     effective_wait_timeout_seconds = wait_timeout_seconds if wait_timeout_seconds is not None else DEFAULT_WAIT_TIMEOUT_SECONDS
     if MIN_WAIT_TIMEOUT_SECONDS > 0 and effective_wait_timeout_seconds < MIN_WAIT_TIMEOUT_SECONDS:
@@ -416,18 +584,32 @@ async def airflow_run_log_refinement(
     last_run: dict[str, Any] | None = None
     # Держим MCP-вызов открытым до завершения DAG, чтобы Kimi в UI сразу получила
     # state=success и могла перейти к чтению refined_sql через ClickHouse MCP.
-    while time.time() < deadline:
-        last_run = await get_dag_run(dag_id, dag_run_id)
-        state = ((last_run.get("data") or {}).get("state") or "").lower() if last_run.get("ok") else ""
-        if state in {"success", "failed"}:
-            result["dag_run"] = last_run
-            result["state"] = state
-            result["ok"] = state == "success"
-            if state != "success":
-                result["message"] = "Airflow DAG run finished without success. Inspect dag_run and task logs in Airflow."
-            return result
-        result["state"] = state or "unknown"
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    try:
+        try:
+            while time.time() < deadline:
+                last_run = await get_dag_run(dag_id, dag_run_id)
+                state = ((last_run.get("data") or {}).get("state") or "").lower() if last_run.get("ok") else ""
+                if state in {"success", "failed"}:
+                    result["dag_run"] = last_run
+                    result["state"] = state
+                    result["ok"] = state == "success"
+                    if state != "success":
+                        result["message"] = "Airflow DAG run finished without success. Inspect dag_run and task logs in Airflow."
+                    return result
+                result["state"] = state or "unknown"
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            # Если LibreChat остановил генерацию или закрыл MCP-вызов, сразу
+            # гасим DagRun. Иначе Airflow продолжит прямые HTTP-вызовы Kimi в фоне.
+            if CANCEL_ON_TIMEOUT:
+                try:
+                    await asyncio.shield(cancel_dag_run(dag_id, dag_run_id))
+                finally:
+                    raise
+            raise
+    finally:
+        if request_id is not None:
+            ACTIVE_DAG_RUNS_BY_REQUEST_ID.pop(request_id, None)
 
     result["ok"] = False
     result["dag_run"] = last_run

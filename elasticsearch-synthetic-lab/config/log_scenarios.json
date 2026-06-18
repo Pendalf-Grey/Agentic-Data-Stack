@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "generation": {
+    "documents": 720,
+    "target_mb": 1024,
+    "start": "2021-01-01T00:00:00Z",
+    "end": "2026-06-18T00:00:00Z",
+    "index_prefix": "nginx-logs",
+    "index_granularity": "monthly",
+    "output": "data/elasticsearch/synthetic-logs.bulk.ndjson",
+    "max_documents": 50000000
+  },
+  "document": {
+    "environment": "synthetic-prod",
+    "event_dataset": "nginx.access",
+    "event_kind": "event",
+    "source_label": "elasticsearch-synthetic-lab",
+    "log_flavor": "nginx-plus-app-context",
+    "referer": "https://app.example.local/dashboard",
+    "methods": ["GET", "POST", "PUT", "DELETE"],
+    "user_agents": ["desktop-web", "mobile-ios", "mobile-android", "partner-api", "backoffice"],
+    "countries": ["BY", "PL", "DE", "KZ", "TR", "AE", "JP"],
+    "workers": ["nginx-edge-a", "nginx-edge-b", "nginx-edge-c"],
+    "payload_classes": ["small", "medium", "large"],
+    "normal_message": "request completed",
+    "early_warning_message": "early warning threshold exceeded before {incident}",
+    "degraded_message": "degraded upstream latency during {incident}",
+    "recovery_message": "service recovering after {incident}",
+    "degraded_status_exceptions": [409, 429]
+  },
+  "latency": {
+    "base_min_ms": 28,
+    "base_spread_ms": 220,
+    "upstream_delta_ms": 18,
+    "response_overhead_ms": 80,
+    "warning_add_min_ms": 180,
+    "warning_add_spread_ms": 420,
+    "background_error_add_ms": 700,
+    "incident_spread_ms": 900,
+    "early_warning_divisor": 5,
+    "early_warning_spread_ms": 320,
+    "recovery_divisor": 4,
+    "recovery_spread_ms": 260
+  },
+  "traffic": {
+    "base_year": 2021,
+    "annual_growth": 0.11,
+    "weekend_weight": 0.72,
+    "default_hour_weight": 0.38,
+    "hour_weights": [
+      {"start": 8, "end": 12, "weight": 1.45},
+      {"start": 12, "end": 19, "weight": 1.25},
+      {"start": 19, "end": 23, "weight": 0.9}
+    ],
+    "default_month_weight": 1.0,
+    "month_weights": {"1": 0.9, "2": 0.9, "11": 1.22, "12": 1.22},
+    "incident_active_weight": 4.0,
+    "incident_context_weight": 1.8,
+    "warning_hours_before": 2,
+    "recovery_hours_after": 1
+  },
+  "quality": {
+    "warning_modulo": 113,
+    "background_error_modulo": 587,
+    "missing_user_modulo": 4901,
+    "missing_latency_modulo": 8209,
+    "missing_geo_modulo": 1777,
+    "duplicate_modulo": 10000
+  },
+  "services": [
+    {
+      "name": "aurora-gateway",
+      "host": "edge-01",
+      "upstream": "aurora-gateway:8080",
+      "team": "platform",
+      "paths": ["/api/v1/search", "/api/v1/login", "/api/v1/catalog", "/api/v1/orders"],
+      "warning_code": "UPSTREAM_RETRY",
+      "warning_message": "upstream retry succeeded after a transient gateway failure",
+      "background_error_code": "UPSTREAM_BAD_RESPONSE",
+      "background_error_message": "upstream returned an invalid response to the gateway"
+    },
+    {
+      "name": "orion-checkout",
+      "host": "app-01",
+      "upstream": "orion-checkout:8080",
+      "team": "commerce",
+      "paths": ["/checkout", "/checkout/confirm", "/cart/validate", "/orders/create"],
+      "warning_code": "CART_VALIDATION_RETRY",
+      "warning_message": "cart validation required a retry before checkout",
+      "background_error_code": "CHECKOUT_STATE_CONFLICT",
+      "background_error_message": "checkout state changed during order confirmation"
+    },
+    {
+      "name": "vega-payments",
+      "host": "app-02",
+      "upstream": "vega-payments:8080",
+      "team": "payments",
+      "paths": ["/payments/authorize", "/payments/capture", "/payments/refund", "/payments/status"],
+      "warning_code": "PROVIDER_RETRY",
+      "warning_message": "payment provider request succeeded after a retry",
+      "background_error_code": "PAYMENT_PROVIDER_REJECTED",
+      "background_error_message": "payment provider rejected the operation"
+    },
+    {
+      "name": "nova-inventory",
+      "host": "app-03",
+      "upstream": "nova-inventory:8080",
+      "team": "supply",
+      "paths": ["/inventory/reserve", "/inventory/release", "/inventory/search", "/inventory/sync"],
+      "warning_code": "REPLICA_LAG",
+      "warning_message": "inventory read replica lag exceeded the warning threshold",
+      "background_error_code": "INVENTORY_VERSION_CONFLICT",
+      "background_error_message": "inventory version conflict during reservation"
+    },
+    {
+      "name": "lumen-notifications",
+      "host": "app-04",
+      "upstream": "lumen-notifications:8080",
+      "team": "crm",
+      "paths": ["/notifications/email", "/notifications/sms", "/notifications/push", "/webhooks/provider"],
+      "warning_code": "DELIVERY_RETRY",
+      "warning_message": "notification delivery succeeded after a provider retry",
+      "background_error_code": "DELIVERY_PROVIDER_ERROR",
+      "background_error_message": "notification provider rejected the delivery request"
+    }
+  ],
+  "incidents": [
+    {"name":"payment_provider_timeout","service":"vega-payments","start":"2021-03-15T09:10:00Z","end":"2021-03-15T12:40:00Z","error_rate":5,"message":"upstream timed out while reading response header from payment provider","error_code":"PAYMENT_PROVIDER_TIMEOUT","status":504,"latency_add":3400},
+    {"name":"notification_queue_backlog","service":"lumen-notifications","start":"2021-11-26T16:30:00Z","end":"2021-11-26T22:20:00Z","error_rate":4,"message":"message broker publish timeout, notification queue backlog detected","error_code":"QUEUE_BACKLOG","status":429,"latency_add":2800},
+    {"name":"checkout_connection_pool_exhausted","service":"orion-checkout","start":"2022-02-07T12:20:00Z","end":"2022-02-07T17:05:00Z","error_rate":4,"message":"connection pool exhausted while connecting to checkout database","error_code":"CHECKOUT_POOL_EXHAUSTED","status":503,"latency_add":2100},
+    {"name":"gateway_tls_handshake_spike","service":"aurora-gateway","start":"2022-08-19T03:00:00Z","end":"2022-08-19T05:50:00Z","error_rate":6,"message":"SSL_do_handshake() failed while SSL handshaking to upstream","error_code":"TLS_HANDSHAKE_FAILED","status":525,"latency_add":1300},
+    {"name":"inventory_db_lock_contention","service":"nova-inventory","start":"2023-01-24T19:45:00Z","end":"2023-01-25T01:10:00Z","error_rate":6,"message":"database lock wait timeout exceeded during inventory reservation","error_code":"INVENTORY_LOCK_TIMEOUT","status":409,"latency_add":2300},
+    {"name":"payment_provider_timeout","service":"vega-payments","start":"2023-10-09T07:25:00Z","end":"2023-10-09T11:55:00Z","error_rate":5,"message":"upstream timed out while reading response header from payment provider","error_code":"PAYMENT_PROVIDER_TIMEOUT","status":504,"latency_add":3700},
+    {"name":"payment_provider_timeout","service":"vega-payments","start":"2024-09-18T06:20:00Z","end":"2024-09-18T10:10:00Z","error_rate":5,"message":"upstream timed out while reading response header from upstream","error_code":"PAYMENT_PROVIDER_TIMEOUT","status":504,"latency_add":3900},
+    {"name":"checkout_connection_pool_exhausted","service":"orion-checkout","start":"2025-02-03T13:00:00Z","end":"2025-02-03T16:45:00Z","error_rate":4,"message":"connect() failed (111: Connection refused) while connecting to upstream","error_code":"UPSTREAM_CONNECTION_REFUSED","status":502,"latency_add":1800},
+    {"name":"inventory_db_lock_contention","service":"nova-inventory","start":"2025-07-11T21:15:00Z","end":"2025-07-12T01:30:00Z","error_rate":7,"message":"database lock wait timeout exceeded during inventory reservation","error_code":"INVENTORY_LOCK_TIMEOUT","status":409,"latency_add":2400},
+    {"name":"gateway_tls_handshake_spike","service":"aurora-gateway","start":"2025-12-22T03:00:00Z","end":"2025-12-22T05:20:00Z","error_rate":6,"message":"SSL_do_handshake() failed while SSL handshaking to upstream","error_code":"TLS_HANDSHAKE_FAILED","status":525,"latency_add":1200},
+    {"name":"notification_queue_backlog","service":"lumen-notifications","start":"2026-04-28T08:40:00Z","end":"2026-04-28T14:00:00Z","error_rate":3,"message":"message broker publish timeout, notification queue backlog detected","error_code":"QUEUE_BACKLOG","status":429,"latency_add":3100}
+  ],
+  "data_gaps": [
+    {"start": "2022-05-18T02:00:00Z", "end": "2022-05-18T07:00:00Z"},
+    {"start": "2024-01-12T18:00:00Z", "end": "2024-01-13T03:00:00Z"},
+    {"start": "2025-09-03T10:00:00Z", "end": "2025-09-03T14:00:00Z"}
+  ]
+}

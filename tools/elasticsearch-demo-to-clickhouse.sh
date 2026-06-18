@@ -96,7 +96,9 @@ print(len(payload.get("items", [])))
 PY
 )
   bulk_items=$((bulk_items + part_items))
+  rm -f "$bulk_part"
 done
+rmdir "$bulk_part_dir"
 curl -fsS -X POST "$ES_PUBLIC_URL/$ELASTICSEARCH_DEMO_INDEX_PREFIX-*/_refresh" >/dev/null
 printf '{"bulkErrors":false,"items":%s}\n' "$bulk_items" | tee "$bulk_response"
 
