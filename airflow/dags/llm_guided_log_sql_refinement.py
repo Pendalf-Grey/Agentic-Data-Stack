@@ -1162,6 +1162,8 @@ def final_prompt(user_question, source_table, start, end, source_name, index_lik
                 "Do not group by aggregate aliases or boolean aliases derived from aggregate conditions. "
                 "Every downstream CTE may reference only columns explicitly selected by its upstream CTE. If a later step needs incident, path, or another dimension after hourly/daily aggregation, carry that dimension through SELECT and GROUP BY, or explicitly unnest an aggregated array; never reference the original alias after it was dropped. "
                 "Avoid NaN in user-facing aggregates: if a conditional average can be empty, use nullable-safe expressions or group filters that match the aggregate condition. "
+                "For lead/lag or pre-incident analysis, incident labels usually exist only on incident rows. Build incident windows first, then join baseline facts by service and time bounds; never require baseline rows to have the same incident label. Carry the incident label from the incident-window CTE into the result. "
+                "Conditional DateTime aggregates such as minIf return the type default when no row matches. Use an OrNull aggregate combinator or explicitly convert the default epoch value to NULL before computing lead time. Treat no matching pre-incident rows as a valid no-signal result, not as evidence to repeat the query. "
                 "ClickHouse toDayOfWeek uses ISO numbering: Monday=1 through Sunday=7. For weekend/weekday comparisons, weekend is IN (6, 7), never IN (1, 7). "
                 f"SQL shape preference: {SQL_SHAPE_HINT} "
                 f"Field semantics: {semantic_instructions()}"
@@ -1214,6 +1216,8 @@ def repair_prompt(
                 "ClickHouse aggregate rules: countIf(condition), avgIf(value, condition), quantileIf(level)(value, condition). "
                 "Do not group by aggregate aliases; do not return NaN-producing conditional aggregates. "
                 "Check every CTE boundary: downstream CTEs may use only columns explicitly selected upstream. If a later step needs incident, path, or another dimension after aggregation, preserve it in SELECT and GROUP BY or unnest an explicitly selected aggregate array; never reference a dropped source alias."
+                " For lead/lag or pre-incident analysis, join baseline facts to incident windows by service and time bounds, not by equality with the incident label; carry the label from the window CTE."
+                " Use nullable conditional aggregates for empty sets and convert default epoch DateTime values to NULL before dateDiff calculations."
                 " ClickHouse toDayOfWeek uses ISO numbering; weekends are days 6 and 7."
             ),
         },
