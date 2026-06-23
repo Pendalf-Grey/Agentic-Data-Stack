@@ -35,6 +35,7 @@ modelSpecs:
         - "clickhouse"
         - "grafana"
         - "airflow"
+${OPENMODEL_MODEL_SPEC_YAML}
 
 endpoints:
   agents:

@@ -73,6 +73,22 @@ if [ -z "$kimi_model_yaml" ]; then
   kimi_model_yaml='          - "kimi-k2.6"
 '
 fi
+
+openmodel_model_spec_yaml=""
+case "${ANTHROPIC_REVERSE_PROXY:-}" in
+  *api.openmodel.ai*)
+    openmodel_model="$(printf '%s' "${ANTHROPIC_MODELS:-deepseek-v4-flash}" | cut -d, -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "$openmodel_model" ]; then
+      openmodel_model_spec_yaml="    - name: \"openmodel-${openmodel_model}\"
+      label: \"DeepSeek V4 Flash · OpenModel\"
+      description: \"OpenModel cloud: ${openmodel_model}. MCP tools are opt-in to preserve the model context window.\"
+      preset:
+        endpoint: \"anthropic\"
+        model: \"${openmodel_model}\"
+"
+    fi
+    ;;
+esac
 kimi_reasoning_params_enabled="${KIMI_REASONING_PARAMS_ENABLED:-auto}"
 kimi_reasoning_params_yaml=""
 case "$kimi_reasoning_params_enabled:${KIMI_BASE_URL:-https://api.moonshot.ai/v1}" in
@@ -112,6 +128,7 @@ export LIBRECHAT_SUMMARY_MODEL="$summary_model"
 export LOCAL_OLLAMA_MODEL_LIST_YAML="$local_model_yaml"
 export CLOUD_MODEL_ENDPOINT_YAML="$cloud_endpoint_yaml"
 export MODEL_ENDPOINTS_YAML="$model_endpoints_yaml"
+export OPENMODEL_MODEL_SPEC_YAML="$openmodel_model_spec_yaml"
 export LANGFUSE_MCP_BASIC_TOKEN="${LANGFUSE_MCP_BASIC_TOKEN:-}"
 export GRAFANA_BASE_URL="${GRAFANA_BASE_URL:-http://localhost:3001}"
 export GRAFANA_MCP_TIMEOUT_MS="${GRAFANA_MCP_TIMEOUT_MS:-300000}"
@@ -143,6 +160,7 @@ for key in [
     'LOCAL_OLLAMA_MODEL_LIST_YAML',
     'CLOUD_MODEL_ENDPOINT_YAML',
     'MODEL_ENDPOINTS_YAML',
+    'OPENMODEL_MODEL_SPEC_YAML',
     'KIMI_API_KEY',
     'KIMI_BASE_URL',
     'LANGFUSE_MCP_BASIC_TOKEN',
