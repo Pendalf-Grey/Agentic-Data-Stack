@@ -12,9 +12,6 @@ const { truncateText, smartTruncateText } = require('~/app/clients/prompts');
 const clearPendingReq = require('~/cache/clearPendingReq');
 const { sendError } = require('~/server/middleware/error');
 const { abortRun } = require('./abortRun');
-const {
-  cancelAirflowRunsForAbortedMessage,
-} = require('~/server/services/cancelAirflowRunsForAbortedMessage');
 const db = require('~/models');
 
 /**
@@ -92,7 +89,6 @@ async function abortMessage(req, res) {
   }
 
   const { jobData, content, text, collectedUsage } = abortResult;
-  await cancelAirflowRunsForAbortedMessage(jobData);
 
   const completionTokens = await countTokens(text);
   const promptTokens = jobData?.promptTokens ?? 0;

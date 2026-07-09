@@ -14,9 +14,6 @@ const responses = require('./responses');
 const openai = require('./openai');
 const { v1 } = require('./v1');
 const chat = require('./chat');
-const {
-  cancelAirflowRunsForAbortedMessage,
-} = require('~/server/services/cancelAirflowRunsForAbortedMessage');
 
 const { LIMIT_MESSAGE_IP, LIMIT_MESSAGE_USER } = process.env ?? {};
 
@@ -263,7 +260,6 @@ router.post('/chat/abort', async (req, res) => {
       abortResultUserMessageId: abortResult.jobData?.userMessage?.messageId,
       abortResultResponseMessageId: abortResult.jobData?.responseMessageId,
     });
-    await cancelAirflowRunsForAbortedMessage(abortResult.jobData, 'AgentStream');
 
     // CRITICAL: Save partial response BEFORE returning to prevent race condition.
     // If user sends a follow-up immediately after abort, the parentMessageId must exist in DB.
