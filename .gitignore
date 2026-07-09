@@ -9,6 +9,7 @@ npm-debug.log*
 __pycache__/
 *.py[cod]
 elasticsearch-synthetic-lab/data/
+data/elasticsearch/
 data-node/
 logs/
 meili_data_v1.35.1/
