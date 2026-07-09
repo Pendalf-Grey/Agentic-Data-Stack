@@ -7,6 +7,5 @@ WORKDIR /app
 # Кладем исходный код коннектора внутрь контейнера.
 COPY src ./src
 
-# По умолчанию запускается HTTP server для batch-режима.
-# Для stream-режима docker-compose передает ELASTICSEARCH_CONNECTOR_MODE=stream.
+# Запускается HTTP server с единственным demo-режимом: batch import.
 CMD ["python", "src/server.py"]

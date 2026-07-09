@@ -10,9 +10,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
-# elasticsearch-connector переносит документы из Elasticsearch в ClickHouse.
-# Режим batch вызывается разовой командой /batch за заданный интервал.
-# Режим stream работает как micro-batch: периодически читает новые документы по времени события.
+# elasticsearch-connector переносит документы из внешнего Elasticsearch в ClickHouse.
+# Demo-ветка оставляет только простой batch-режим: /batch за заданный интервал.
 
 PORT = int(os.getenv("PORT", "3366"))
 
@@ -26,16 +25,11 @@ ELASTICSEARCH_SOURCE_NAME = os.getenv("ELASTICSEARCH_SOURCE_NAME", "elasticsearc
 ELASTICSEARCH_BATCH_SIZE = int(os.getenv("ELASTICSEARCH_BATCH_SIZE", "1000"))
 ELASTICSEARCH_REQUEST_TIMEOUT_SECONDS = int(os.getenv("ELASTICSEARCH_REQUEST_TIMEOUT_SECONDS", "120"))
 
-ELASTICSEARCH_STREAM_INTERVAL_SECONDS = int(os.getenv("ELASTICSEARCH_STREAM_INTERVAL_SECONDS", "30"))
-ELASTICSEARCH_STREAM_LOOKBACK_SECONDS = int(os.getenv("ELASTICSEARCH_STREAM_LOOKBACK_SECONDS", "120"))
-ELASTICSEARCH_STREAM_CHECKPOINT_NAME = os.getenv("ELASTICSEARCH_STREAM_CHECKPOINT_NAME", "elasticsearch_stream")
-
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://clickhouse:8123").rstrip("/")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "analytics")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "analytics_password")
 CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "analytics")
 CLICKHOUSE_ELASTICSEARCH_TABLE = os.getenv("CLICKHOUSE_ELASTICSEARCH_TABLE", "es_raw_logs")
-CLICKHOUSE_OFFSETS_TABLE = os.getenv("CLICKHOUSE_OFFSETS_TABLE", "ingestion_offsets")
 
 
 def utc_now():
@@ -169,7 +163,7 @@ def clickhouse_insert_json_each_row(table, rows):
 
 
 def ensure_clickhouse_tables():
-    """Создает таблицы Elasticsearch raw/checkpoint, если init SQL еще не выполнялся."""
+    """Создает raw-таблицу Elasticsearch, если init SQL еще не выполнялся."""
     clickhouse_query(
         f"""
 CREATE TABLE IF NOT EXISTS {CLICKHOUSE_DATABASE}.{CLICKHOUSE_ELASTICSEARCH_TABLE}
@@ -185,20 +179,6 @@ CREATE TABLE IF NOT EXISTS {CLICKHOUSE_DATABASE}.{CLICKHOUSE_ELASTICSEARCH_TABLE
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(event_time)
 ORDER BY (source_name, index_name, event_time, document_id)
-"""
-    )
-    clickhouse_query(
-        f"""
-CREATE TABLE IF NOT EXISTS {CLICKHOUSE_DATABASE}.{CLICKHOUSE_OFFSETS_TABLE}
-(
-  source_name LowCardinality(String),
-  checkpoint_name String,
-  last_event_time DateTime64(3, 'UTC'),
-  last_document_id String,
-  updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
-)
-ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (source_name, checkpoint_name)
 """
     )
 
@@ -296,58 +276,6 @@ def migrate_interval(start, end, index_pattern, batch_size):
     return {"inserted": inserted, "batches": batches, "last_event_time": last_event_time, "last_document_id": last_document_id}
 
 
-def read_checkpoint(checkpoint_name):
-    """Читает последний checkpoint из ClickHouse."""
-    ensure_clickhouse_tables()
-    sql = f"""
-SELECT
-  formatDateTime(last_event_time, '%Y-%m-%d %H:%M:%S.%f') AS last_event_time,
-  last_document_id
-FROM {CLICKHOUSE_DATABASE}.{CLICKHOUSE_OFFSETS_TABLE}
-WHERE source_name = {clickhouse_string(ELASTICSEARCH_SOURCE_NAME)}
-  AND checkpoint_name = {clickhouse_string(checkpoint_name)}
-ORDER BY updated_at DESC
-LIMIT 1
-FORMAT JSONEachRow
-"""
-    raw = clickhouse_query(sql)
-    if not raw.strip():
-        return None
-    row = json.loads(raw.splitlines()[0])
-    return {"last_event_time": parse_time(row["last_event_time"]), "last_document_id": row.get("last_document_id") or ""}
-
-
-def write_checkpoint(checkpoint_name, last_event_time, last_document_id):
-    """Записывает checkpoint после успешной вставки micro-batch."""
-    if not last_event_time:
-        return
-    clickhouse_insert_json_each_row(
-        CLICKHOUSE_OFFSETS_TABLE,
-        [
-            {
-                "source_name": ELASTICSEARCH_SOURCE_NAME,
-                "checkpoint_name": checkpoint_name,
-                "last_event_time": clickhouse_datetime64(last_event_time),
-                "last_document_id": last_document_id or "",
-            }
-        ],
-    )
-
-
-def run_micro_batch(checkpoint_name, end=None):
-    """Выполняет один micro-batch для streaming-режима и обновляет checkpoint."""
-    end = end or utc_now()
-    checkpoint = read_checkpoint(checkpoint_name)
-    if checkpoint:
-        start = checkpoint["last_event_time"] - timedelta(seconds=ELASTICSEARCH_STREAM_LOOKBACK_SECONDS)
-    else:
-        start = end - timedelta(seconds=ELASTICSEARCH_STREAM_LOOKBACK_SECONDS)
-    result = migrate_interval(start, end, ELASTICSEARCH_INDEX_PATTERN, ELASTICSEARCH_BATCH_SIZE)
-    if result["last_event_time"]:
-        write_checkpoint(checkpoint_name, result["last_event_time"], result["last_document_id"])
-    return {"start": elasticsearch_time(start), "end": elasticsearch_time(end), **format_result_times(result)}
-
-
 def format_result_times(result):
     """Готовит результат загрузки к JSON-ответу."""
     formatted = dict(result)
@@ -379,26 +307,6 @@ def handle_batch(handler):
     )
 
 
-def handle_stream_once(handler):
-    """HTTP endpoint /stream/once: выполняет один micro-batch и возвращает результат."""
-    body = read_json_body(handler)
-    checkpoint_name = body.get("checkpoint_name") or ELASTICSEARCH_STREAM_CHECKPOINT_NAME
-    result = run_micro_batch(checkpoint_name)
-    send_json(handler, 200, {"ok": True, "mode": "stream_once", "checkpoint_name": checkpoint_name, **result})
-
-
-def stream_loop():
-    """Бесконечный streaming loop: micro-batch, sleep, repeat."""
-    while True:
-        try:
-            result = run_micro_batch(ELASTICSEARCH_STREAM_CHECKPOINT_NAME)
-            print(json.dumps({"ok": True, "mode": "stream", **result}, ensure_ascii=False))
-        except Exception as error:
-            traceback.print_exc()
-            print(json.dumps({"ok": False, "mode": "stream", "error": str(error)}, ensure_ascii=False))
-        time.sleep(ELASTICSEARCH_STREAM_INTERVAL_SECONDS)
-
-
 class ElasticsearchConnectorHandler(BaseHTTPRequestHandler):
     """HTTP endpoints elasticsearch-connector."""
 
@@ -414,7 +322,6 @@ class ElasticsearchConnectorHandler(BaseHTTPRequestHandler):
                     "indexPattern": ELASTICSEARCH_INDEX_PATTERN,
                     "clickhouseDatabase": CLICKHOUSE_DATABASE,
                     "batchPath": "/batch",
-                    "streamOncePath": "/stream/once",
                 },
             )
             return
@@ -424,9 +331,6 @@ class ElasticsearchConnectorHandler(BaseHTTPRequestHandler):
         try:
             if self.path == "/batch":
                 handle_batch(self)
-                return
-            if self.path == "/stream/once":
-                handle_stream_once(self)
                 return
             send_json(self, 404, {"error": "Not found"})
         except Exception as error:
@@ -438,9 +342,6 @@ class ElasticsearchConnectorHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if os.getenv("ELASTICSEARCH_CONNECTOR_MODE", "server") == "stream":
-        stream_loop()
-    else:
-        server = ThreadingHTTPServer(("0.0.0.0", PORT), ElasticsearchConnectorHandler)
-        print(f"elasticsearch-connector listening on 0.0.0.0:{PORT}")
-        server.serve_forever()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), ElasticsearchConnectorHandler)
+    print(f"elasticsearch-connector listening on 0.0.0.0:{PORT}")
+    server.serve_forever()
