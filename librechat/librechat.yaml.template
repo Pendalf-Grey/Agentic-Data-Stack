@@ -18,7 +18,6 @@ mcpSettings:
     - "http://mcp-clickhouse:8000"
     - "http://mcp-log-workflow:8000"
     - "http://mcp-grafana:8000"
-    - "http://mcp-adcore:8000"
     - "http://langfuse-web:3000"
 
 modelSpecs:
@@ -112,17 +111,6 @@ mcpServers:
       Prefer concise dashboard and panel titles. Use the existing ClickHouse datasource when creating panels.
       When returning a Grafana dashboard or panel link to the user, always use the external Grafana base URL ${GRAFANA_BASE_URL}. Do not use the LibreChat URL, the current browser origin, or localhost:3080 for Grafana links.
       If a Grafana tool returns a relative URL such as /d/<uid>/<slug>, convert it to ${GRAFANA_BASE_URL}/d/<uid>/<slug> before answering.
-
-  adcore:
-    type: sse
-    url: http://mcp-adcore:8000/sse
-    timeout: 120000
-    serverInstructions: |
-      Use this Adcore MCP server when the user asks to inspect or operate the external adcore AI DevOps/MLOps platform.
-      The Adcore MCP server is an adapter over the external adcore HTTP API; it does not replace adcore and does not provide a separate model gateway.
-      First check adcore_health, adcore_status, or adcore_openapi when you need to understand availability or supported API shape.
-      Use adcore_send_task to delegate a DevOps/MLOps task to adcore. Do not invent execution results; answer only from tool responses.
-      Treat destructive infrastructure, deployment, credential, or repository actions as requiring explicit user confirmation unless the adcore response clearly says it only planned or inspected.
 
   langfuse:
     type: streamable-http

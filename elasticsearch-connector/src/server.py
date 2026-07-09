@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 PORT = int(os.getenv("PORT", "3366"))
 
-ELASTICSEARCH_BASE_URL = os.getenv("ELASTICSEARCH_BASE_URL", "http://elasticsearch:9200").rstrip("/")
+ELASTICSEARCH_BASE_URL = os.getenv("ELASTICSEARCH_BASE_URL", "http://host.docker.internal:9200").rstrip("/")
 ELASTICSEARCH_USER = os.getenv("ELASTICSEARCH_USER", "")
 ELASTICSEARCH_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD", "")
 ELASTICSEARCH_BEARER_TOKEN = os.getenv("ELASTICSEARCH_BEARER_TOKEN", "")

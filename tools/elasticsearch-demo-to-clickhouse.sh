@@ -1,15 +1,15 @@
 #!/bin/sh
 set -eu
 
-# Скрипт поднимает локальный Elasticsearch demo, загружает synthetic logs
-# и переносит их в ClickHouse через elasticsearch-connector batch endpoint.
+# Скрипт загружает synthetic logs во внешний Elasticsearch и переносит их
+# в ClickHouse через elasticsearch-connector batch endpoint.
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 LAB_DIR="$ROOT_DIR/elasticsearch-synthetic-lab"
 BULK_FILE=${ELASTICSEARCH_DEMO_BULK_FILE:-"$LAB_DIR/data/synthetic-logs.bulk.ndjson"}
 META_FILE=${ELASTICSEARCH_DEMO_META_FILE:-"$LAB_DIR/data/synthetic-logs.meta.json"}
 ES_PUBLIC_URL=${ELASTICSEARCH_PUBLIC_URL:-http://localhost:9200}
-ES_CONTAINER_URL=${ELASTICSEARCH_BASE_URL:-http://elasticsearch:9200}
+ES_CONTAINER_URL=${ELASTICSEARCH_BASE_URL:-http://host.docker.internal:9200}
 ELASTICSEARCH_DEMO_INDEX_PREFIX=${ELASTICSEARCH_DEMO_INDEX_PREFIX:-nginx-logs}
 ELASTICSEARCH_DEMO_CLEAR=${ELASTICSEARCH_DEMO_CLEAR:-true}
 ELASTICSEARCH_DEMO_REGENERATE=${ELASTICSEARCH_DEMO_REGENERATE:-true}
@@ -19,15 +19,13 @@ cd "$ROOT_DIR"
 
 mkdir -p "$LAB_DIR/data/elasticsearch"
 
-# Локальный Elasticsearch живет в compose profile, чтобы не грузить стек без необходимости.
-docker compose --profile elasticsearch up -d elasticsearch
-
 for attempt in $(seq 1 60); do
   if curl -fsS "$ES_PUBLIC_URL/_cluster/health" >/dev/null 2>&1; then
     break
   fi
   if [ "$attempt" -eq 60 ]; then
     echo "Elasticsearch did not become healthy at $ES_PUBLIC_URL" >&2
+    echo "Set ELASTICSEARCH_PUBLIC_URL for host access and ELASTICSEARCH_BASE_URL for container access." >&2
     exit 1
   fi
   sleep 2

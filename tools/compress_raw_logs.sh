@@ -13,7 +13,7 @@ python3 tools/compress_raw_logs.py \
   --user "${CLICKHOUSE_USER:-analytics}" \
   --password "${CLICKHOUSE_PASSWORD:-analytics_password}" \
   --source-name "${LOGS_SOURCE_NAME:-${ELASTICSEARCH_SOURCE_NAME:-elasticsearch-demo}}" \
-  --index-like "${LOGS_INDEX_LIKE:-${ELASTICSEARCH_INDEX_PATTERN:-nginx-logs-%}}" \
+  --index-like "${LOGS_INDEX_LIKE:-${ADS_LLM_LOG_INDEX_LIKE:-nginx-logs-%}}" \
   --batch-rows "${LOG_COMPRESS_BATCH_ROWS:-5000}" \
   --progress-every "${LOG_COMPRESS_PROGRESS_EVERY:-100}" \
   "$@"
