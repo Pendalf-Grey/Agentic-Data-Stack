@@ -34,7 +34,7 @@ CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "http://clickhouse:8123").rstrip(
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "analytics")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "analytics_password")
 CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "analytics")
-CLICKHOUSE_ELASTICSEARCH_TABLE = os.getenv("CLICKHOUSE_ELASTICSEARCH_TABLE", "elasticsearch_events_raw")
+CLICKHOUSE_ELASTICSEARCH_TABLE = os.getenv("CLICKHOUSE_ELASTICSEARCH_TABLE", "es_raw_logs")
 CLICKHOUSE_OFFSETS_TABLE = os.getenv("CLICKHOUSE_OFFSETS_TABLE", "ingestion_offsets")
 
 

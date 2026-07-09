@@ -137,13 +137,18 @@ export KIMI_BASE_URL="${KIMI_BASE_URL:-https://api.moonshot.ai/v1}"
 export KIMI_MODEL="${KIMI_MODEL:-kimi-k2.6}"
 export ADS_ANALYTICS_DATABASE="${ADS_ANALYTICS_DATABASE:-${CLICKHOUSE_DB:-analytics}}"
 ads_llm_result_database="${ADS_LLM_LOG_RESULT_DATABASE:-${LLM_LOG_RESULT_DATABASE:-${CLICKHOUSE_DB:-analytics}}}"
-ads_llm_investigations_table="${ADS_LLM_LOG_INVESTIGATIONS_TABLE:-${LLM_LOG_INVESTIGATIONS_TABLE:-llm_log_investigations}}"
-ads_llm_chunk_reports_table="${ADS_LLM_LOG_CHUNK_REPORTS_TABLE:-${LLM_LOG_CHUNK_REPORTS_TABLE:-llm_log_chunk_reports}}"
-ads_llm_refined_sql_table="${ADS_LLM_LOG_REFINED_SQL_TABLE:-${LLM_LOG_REFINED_SQL_TABLE:-llm_log_refined_sql}}"
-export ADS_LLM_LOG_INVESTIGATIONS_FQN="${ads_llm_result_database}.${ads_llm_investigations_table}"
-export ADS_LLM_LOG_CHUNK_REPORTS_FQN="${ads_llm_result_database}.${ads_llm_chunk_reports_table}"
-export ADS_LLM_LOG_REFINED_SQL_FQN="${ads_llm_result_database}.${ads_llm_refined_sql_table}"
-export ADS_LLM_LOG_REFINEMENT_DAG_ID="${ADS_LLM_LOG_REFINEMENT_DAG_ID:-${AIRFLOW_LLM_SQL_REFINEMENT_DAG_ID:-llm_guided_log_sql_refinement}}"
+ads_llm_investigations_table="${ADS_LLM_INVESTIGATIONS_TABLE:-llm_investigations}"
+ads_llm_map_queue_table="${ADS_LLM_MAP_QUEUE_TABLE:-llm_map_queue}"
+ads_llm_map_results_table="${ADS_LLM_MAP_RESULTS_TABLE:-llm_map_results}"
+ads_llm_reduce_results_table="${ADS_LLM_REDUCE_RESULTS_TABLE:-llm_reduce_results}"
+ads_llm_compressed_batches_table="${ADS_LLM_COMPRESSED_BATCHES_TABLE:-es_log_compressed_batches}"
+ads_llm_map_batch_inputs_view="${ADS_LLM_MAP_BATCH_INPUTS_VIEW:-v_es_log_map_batch_inputs}"
+export ADS_LLM_INVESTIGATIONS_FQN="${ads_llm_result_database}.${ads_llm_investigations_table}"
+export ADS_LLM_MAP_QUEUE_FQN="${ads_llm_result_database}.${ads_llm_map_queue_table}"
+export ADS_LLM_MAP_RESULTS_FQN="${ads_llm_result_database}.${ads_llm_map_results_table}"
+export ADS_LLM_REDUCE_RESULTS_FQN="${ads_llm_result_database}.${ads_llm_reduce_results_table}"
+export ADS_LLM_COMPRESSED_BATCHES_FQN="${ads_llm_result_database}.${ads_llm_compressed_batches_table}"
+export ADS_LLM_MAP_BATCH_INPUTS_FQN="${ads_llm_result_database}.${ads_llm_map_batch_inputs_view}"
 export LIBRECHAT_AGENTS_RECURSION_LIMIT="${LIBRECHAT_AGENTS_RECURSION_LIMIT:-80}"
 export LIBRECHAT_AGENTS_MAX_RECURSION_LIMIT="${LIBRECHAT_AGENTS_MAX_RECURSION_LIMIT:-120}"
 
@@ -168,10 +173,12 @@ for key in [
     'GRAFANA_MCP_TIMEOUT_MS',
     'KIMI_MODEL',
     'ADS_ANALYTICS_DATABASE',
-    'ADS_LLM_LOG_INVESTIGATIONS_FQN',
-    'ADS_LLM_LOG_CHUNK_REPORTS_FQN',
-    'ADS_LLM_LOG_REFINED_SQL_FQN',
-    'ADS_LLM_LOG_REFINEMENT_DAG_ID',
+    'ADS_LLM_INVESTIGATIONS_FQN',
+    'ADS_LLM_MAP_QUEUE_FQN',
+    'ADS_LLM_MAP_RESULTS_FQN',
+    'ADS_LLM_REDUCE_RESULTS_FQN',
+    'ADS_LLM_COMPRESSED_BATCHES_FQN',
+    'ADS_LLM_MAP_BATCH_INPUTS_FQN',
     'LIBRECHAT_AGENTS_RECURSION_LIMIT',
     'LIBRECHAT_AGENTS_MAX_RECURSION_LIMIT',
 ]:

@@ -120,7 +120,7 @@ sh tools/clickhouse-tables.sh
 sh tools/elasticsearch-demo-to-clickhouse.sh
 ```
 
-После выполнения ожидаются строки в `analytics.elasticsearch_events_raw`, а сводку можно увидеть через:
+После выполнения ожидаются строки в `analytics.es_raw_logs`, а сводку можно увидеть через:
 
 ```bash
 sh tools/clickhouse-tables.sh

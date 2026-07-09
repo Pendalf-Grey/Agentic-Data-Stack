@@ -1,0 +1,17 @@
+<functions>
+  <function>
+    <type>executable_pool</type>
+    <name>log_compress_json</name>
+    <return_type>String</return_type>
+    <argument>
+      <type>String</type>
+    </argument>
+    <format>TabSeparated</format>
+    <command>log_compress_udf.py</command>
+    <pool_size>2</pool_size>
+    <send_chunk_header>0</send_chunk_header>
+    <command_read_timeout>30000</command_read_timeout>
+    <command_write_timeout>30000</command_write_timeout>
+    <max_command_execution_time>1800</max_command_execution_time>
+  </function>
+</functions>

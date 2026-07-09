@@ -84,9 +84,15 @@ ___
 ___
 **LibreChat** — web UI для общения с моделью.
 
-В этом проекте LibreChat подключен к Kimi/Moonshot напрямую и видит MCP tools ClickHouse, Grafana и Langfuse.
+В этом проекте LibreChat подключен к Kimi/Moonshot напрямую и видит MCP tools ads-log-workflow, ClickHouse, Grafana и Langfuse.
 
 В других проектах LibreChat часто используют как единый чат-интерфейс к нескольким LLM providers.
+___
+**ADS log MapReduce** — управляемый анализ больших логов через ClickHouse.
+
+Пользователь задает вопрос в LibreChat, Kimi вызывает `ads-log-workflow` MCP, а ClickHouse сам выбирает сжатые куски логов, готовит короткое описание для модели, запускает `aiGenerate(...)`, сохраняет выводы по кускам и затем сводит их в общий результат.
+
+Главная идея: сырые логи и тяжелая нарезка остаются в ClickHouse. Kimi управляет расследованием и читает готовые краткие результаты, а не получает сотни гигабайт логов в чат.
 ___
 **Langfuse** — observability-платформа для LLM.
 
@@ -824,6 +830,7 @@ docker compose up -d --force-recreate librechat
 - `http://localhost:3355/backfill` — historical backfill из Prometheus HTTP API.
 - `http://localhost:8001/sse` — официальный ClickHouse MCP endpoint. Внутри Docker LibreChat использует `http://mcp-clickhouse:8000/sse`.
 - `http://localhost:8002/sse` — официальный Grafana MCP endpoint. Внутри Docker LibreChat использует `http://mcp-grafana:8000/sse`.
+- `http://localhost:8005/sse` — ADS log workflow MCP endpoint для запуска ClickHouse MapReduce. Внутри Docker LibreChat использует `http://mcp-log-workflow:8000/sse`.
 - `http://langfuse-web:3000/api/public/mcp` — внутренний Docker endpoint Langfuse MCP для LibreChat.
 - `http://localhost:8083` — Debezium Kafka Connect REST API.
 - `http://localhost:8083/connectors` — список зарегистрированных Debezium connectors.

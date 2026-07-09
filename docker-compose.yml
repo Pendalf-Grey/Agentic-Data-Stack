@@ -54,18 +54,37 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    build:
+      context: ./clickhouse
+      args:
+        CLICKHOUSE_VERSION: ${CLICKHOUSE_VERSION:-26.6.1.1193-alpine}
+    image: ads-clickhouse:${CLICKHOUSE_VERSION:-26.6.1.1193-alpine}
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_password}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_CHAT_COMPLETIONS_ENDPOINT: ${LLM_CHAT_COMPLETIONS_ENDPOINT:-https://api.openai.com/v1/chat/completions}
+      LLM_MAP_API_KEY: ${LLM_MAP_API_KEY:-}
+      LLM_MAP_BASE_URL: ${LLM_MAP_BASE_URL:-https://api.openai.com/v1}
+      LLM_MAP_CHAT_COMPLETIONS_ENDPOINT: ${LLM_MAP_CHAT_COMPLETIONS_ENDPOINT:-https://api.openai.com/v1/chat/completions}
+      LLM_MAP_MODEL: ${LLM_MAP_MODEL:-qwen/qwen3-14b}
+      LLM_REDUCE_API_KEY: ${LLM_REDUCE_API_KEY:-${KIMI_API_KEY:-${MOONSHOT_API_KEY:-}}}
+      LLM_REDUCE_BASE_URL: ${LLM_REDUCE_BASE_URL:-${KIMI_BASE_URL:-https://api.moonshot.ai/v1}}
+      LLM_REDUCE_CHAT_COMPLETIONS_ENDPOINT: ${LLM_REDUCE_CHAT_COMPLETIONS_ENDPOINT:-${LLM_REDUCE_BASE_URL:-${KIMI_BASE_URL:-https://api.moonshot.ai/v1}}/chat/completions}
+      LLM_REDUCE_MODEL: ${LLM_REDUCE_MODEL:-${KIMI_MODEL:-kimi-k2.6}}
     ports:
       - "8123:8123"
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/functions:/etc/clickhouse-server/functions:ro
+      - ./clickhouse/user_scripts:/var/lib/clickhouse/user_scripts:ro
+      - ./tools:/opt/ads-tools:ro
     healthcheck:
       test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
       interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
@@ -197,7 +216,7 @@ services:
       ELASTICSEARCH_STREAM_INTERVAL_SECONDS: ${ELASTICSEARCH_STREAM_INTERVAL_SECONDS:-30}
       ELASTICSEARCH_STREAM_LOOKBACK_SECONDS: ${ELASTICSEARCH_STREAM_LOOKBACK_SECONDS:-120}
       ELASTICSEARCH_STREAM_CHECKPOINT_NAME: ${ELASTICSEARCH_STREAM_CHECKPOINT_NAME:-elasticsearch_stream}
-      CLICKHOUSE_ELASTICSEARCH_TABLE: ${CLICKHOUSE_ELASTICSEARCH_TABLE:-elasticsearch_events_raw}
+      CLICKHOUSE_ELASTICSEARCH_TABLE: ${CLICKHOUSE_ELASTICSEARCH_TABLE:-es_raw_logs}
       CLICKHOUSE_OFFSETS_TABLE: ${CLICKHOUSE_OFFSETS_TABLE:-ingestion_offsets}
     ports:
       - "3366:3366"
@@ -238,7 +257,7 @@ services:
       ELASTICSEARCH_STREAM_INTERVAL_SECONDS: ${ELASTICSEARCH_STREAM_INTERVAL_SECONDS:-30}
       ELASTICSEARCH_STREAM_LOOKBACK_SECONDS: ${ELASTICSEARCH_STREAM_LOOKBACK_SECONDS:-120}
       ELASTICSEARCH_STREAM_CHECKPOINT_NAME: ${ELASTICSEARCH_STREAM_CHECKPOINT_NAME:-elasticsearch_stream}
-      CLICKHOUSE_ELASTICSEARCH_TABLE: ${CLICKHOUSE_ELASTICSEARCH_TABLE:-elasticsearch_events_raw}
+      CLICKHOUSE_ELASTICSEARCH_TABLE: ${CLICKHOUSE_ELASTICSEARCH_TABLE:-es_raw_logs}
       CLICKHOUSE_OFFSETS_TABLE: ${CLICKHOUSE_OFFSETS_TABLE:-ingestion_offsets}
     healthcheck:
       test: ["CMD-SHELL", "ps -ef | grep -q '[p]ython src/server.py'"]
@@ -740,6 +759,40 @@ services:
       start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
     restart: unless-stopped
 
+  mcp-log-workflow:
+    image: mcp/clickhouse
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    command: ["python", "/app/ads-log-workflow/server.py"]
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_SECURE: "false"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-analytics}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-analytics_password}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-analytics}
+      ADS_MCP_TRANSPORT: sse
+      ADS_MCP_BIND_HOST: 0.0.0.0
+      ADS_MCP_PORT: 8000
+      ADS_LLM_LOG_SOURCE_NAME: ${ADS_LLM_LOG_SOURCE_NAME:-${ELASTICSEARCH_SOURCE_NAME:-elasticsearch-demo}}
+      ADS_LLM_LOG_INDEX_LIKE: ${ADS_LLM_LOG_INDEX_LIKE:-${ELASTICSEARCH_INDEX_PATTERN:-nginx-logs-%}}
+      MAP_PROMPT_FILE: /workspace/prompts/map_compressed_logs.en.txt
+      MAP_INPUT_VIEW_SQL: /workspace/sql/17_create_map_batch_inputs.sql
+    ports:
+      - "8005:8000"
+    volumes:
+      - ./mcp-log-workflow:/app/ads-log-workflow:ro
+      - ./prompts:/workspace/prompts:ro
+      - ./sql:/workspace/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import Request, urlopen; urlopen(Request('http://localhost:8000/sse', method='HEAD'), timeout=5).close()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
+
   mcp-grafana:
     image: grafana/mcp-grafana
     depends_on:
@@ -856,7 +909,7 @@ services:
         condition: service_healthy
       mcp-adcore:
         condition: service_healthy
-      mcp-airflow:
+      mcp-log-workflow:
         condition: service_healthy
       langfuse-web:
         condition: service_healthy
@@ -883,12 +936,7 @@ services:
       KIMI_REASONING_EFFORT: ${KIMI_REASONING_EFFORT:-none}
       KIMI_INCLUDE_REASONING: ${KIMI_INCLUDE_REASONING:-false}
       KIMI_REASONING_EXCLUDE: ${KIMI_REASONING_EXCLUDE:-true}
-      LIBRECHAT_ABORT_AIRFLOW_CANCEL_ENABLED: ${LIBRECHAT_ABORT_AIRFLOW_CANCEL_ENABLED:-true}
-      LIBRECHAT_ABORT_AIRFLOW_LOOKBACK_SECONDS: ${LIBRECHAT_ABORT_AIRFLOW_LOOKBACK_SECONDS:-180}
-      AIRFLOW_API_BASE_URL: ${AIRFLOW_API_BASE_URL:-http://airflow-webserver:8080}
-      AIRFLOW_USERNAME: ${AIRFLOW_USERNAME:-${AIRFLOW_ADMIN_USER:-admin}}
-      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-${AIRFLOW_ADMIN_PASSWORD:-admin}}
-      ADS_LLM_LOG_REFINEMENT_DAG_ID: ${ADS_LLM_LOG_REFINEMENT_DAG_ID:-llm_guided_log_sql_refinement}
+      LIBRECHAT_ABORT_AIRFLOW_CANCEL_ENABLED: ${LIBRECHAT_ABORT_AIRFLOW_CANCEL_ENABLED:-false}
       RAG_PORT: ${RAG_PORT:-8000}
       RAG_API_URL: ${RAG_API_URL:-http://rag_api:8000}
       MODEL: ${MODEL:-qwen2.5:7b}
@@ -911,6 +959,13 @@ services:
       LIBRECHAT_SUMMARY_MODEL: ${LIBRECHAT_SUMMARY_MODEL:-qwen2.5:7b}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-analytics}
       ADS_ANALYTICS_DATABASE: ${ADS_ANALYTICS_DATABASE:-}
+      ADS_LLM_LOG_RESULT_DATABASE: ${ADS_LLM_LOG_RESULT_DATABASE:-${CLICKHOUSE_DB:-analytics}}
+      ADS_LLM_INVESTIGATIONS_TABLE: ${ADS_LLM_INVESTIGATIONS_TABLE:-llm_investigations}
+      ADS_LLM_MAP_QUEUE_TABLE: ${ADS_LLM_MAP_QUEUE_TABLE:-llm_map_queue}
+      ADS_LLM_MAP_RESULTS_TABLE: ${ADS_LLM_MAP_RESULTS_TABLE:-llm_map_results}
+      ADS_LLM_REDUCE_RESULTS_TABLE: ${ADS_LLM_REDUCE_RESULTS_TABLE:-llm_reduce_results}
+      ADS_LLM_COMPRESSED_BATCHES_TABLE: ${ADS_LLM_COMPRESSED_BATCHES_TABLE:-es_log_compressed_batches}
+      ADS_LLM_MAP_BATCH_INPUTS_VIEW: ${ADS_LLM_MAP_BATCH_INPUTS_VIEW:-v_es_log_map_batch_inputs}
       GRAFANA_BASE_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
       GRAFANA_MCP_TIMEOUT_MS: ${GRAFANA_MCP_TIMEOUT_MS:-300000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}

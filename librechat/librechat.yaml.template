@@ -16,9 +16,9 @@ fileConfig:
 mcpSettings:
   allowedDomains:
     - "http://mcp-clickhouse:8000"
+    - "http://mcp-log-workflow:8000"
     - "http://mcp-grafana:8000"
     - "http://mcp-adcore:8000"
-    - "http://mcp-airflow:8000"
     - "http://langfuse-web:3000"
 
 modelSpecs:
@@ -26,15 +26,15 @@ modelSpecs:
   list:
     - name: "kimi-k2.6-ads"
       label: "Kimi k2.6"
-      description: "ADS default: Kimi k2.6 with ClickHouse, Grafana, and Airflow MCP enabled."
+      description: "ADS default: Kimi k2.6 with ClickHouse MapReduce, Grafana, and workflow MCP enabled."
       default: true
       preset:
         endpoint: "Moonshot"
         model: "${KIMI_MODEL}"
       mcpServers:
+        - "ads-log-workflow"
         - "clickhouse"
         - "grafana"
-        - "airflow"
 ${OPENMODEL_MODEL_SPEC_YAML}
 
 endpoints:
@@ -46,6 +46,17 @@ endpoints:
 ${MODEL_ENDPOINTS_YAML}
 
 mcpServers:
+  ads-log-workflow:
+    type: sse
+    url: http://mcp-log-workflow:8000/sse
+    timeout: 300000
+    serverInstructions: |
+      Use this MCP server to run the ADS ClickHouse log MapReduce workflow.
+      For broad Elasticsearch/raw-log analysis, create or reuse an investigation, enqueue map batches, run bounded map steps, check status, and run reduce only after useful map results exist.
+      Prefer small map steps first, for example claim_size=1, before scaling up.
+      This server starts controlled ClickHouse write jobs. Do not use it for arbitrary SELECT queries; use the ClickHouse MCP server for read-only data access and final result checks.
+      The workflow stores the user question and period in ${ADS_LLM_INVESTIGATIONS_FQN}, tracks batch processing in ${ADS_LLM_MAP_QUEUE_FQN}, stores per-batch map summaries in ${ADS_LLM_MAP_RESULTS_FQN}, and stores reduce/final summaries in ${ADS_LLM_REDUCE_RESULTS_FQN}.
+
   clickhouse:
     type: sse
     url: http://mcp-clickhouse:8000/sse
@@ -60,21 +71,20 @@ mcpServers:
       Select tables and columns dynamically from the schema. If table or column names are unclear, query system.columns for candidate tables/columns and validate with a small SELECT before the final query.
       Do not write Python, SQL-only instructions, or synthetic-data examples when ClickHouse data and Grafana tools are available.
       When rendering query results to the user, preserve returned column values exactly. Do not recompute, infer, or manually change numeric cells while converting tool rows into a table.
-      For every log analytics question over Elasticsearch/raw logs, prefer the always-on LLM-guided refinement artifacts:
-      ${ADS_LLM_LOG_INVESTIGATIONS_FQN}, ${ADS_LLM_LOG_CHUNK_REPORTS_FQN}, and ${ADS_LLM_LOG_REFINED_SQL_FQN}.
-      In the default context-first mode these tables contain a ClickHouse-built analytical context over the full period, selected raw evidence fragments, and the refined SQL generated from that context.
-      In raw_chunks mode they may contain chunk-by-chunk Kimi analysis of raw Elasticsearch logs.
-      Before querying these refinement tables for the first time in a conversation, inspect their columns or use ClickHouse metadata. In the default ADS schema, the user prompt is stored in user_question.
-      When reading ${ADS_LLM_LOG_REFINED_SQL_FQN}, select refined_sql and metadata with a normal SELECT without FORMAT clauses, then execute the returned refined_sql as the next ClickHouse MCP query.
-      Do not decide whether a log request is simple or complex. If no completed investigation exists for the requested period/question, call the Airflow MCP tool airflow_run_log_refinement first, then read artifacts.refined_sql_lookup through ClickHouse MCP and execute the returned refined_sql.
-      If the context-first Airflow run is not successful, do not replace it with a manually invented query over the raw Elasticsearch table. Use ClickHouse only for one bounded diagnostic lookup explicitly allowed by the Airflow instructions, then stop without creating a dashboard.
-      После одного успешного выполнения refined_sql не повторяй тот же SELECT в том же ответе. Если пользователь просил график или дашборд, сразу используй Grafana MCP с уже проверенным запросом и формой результата; иначе отвечай по возвращенным строкам.
+      For every broad Elasticsearch/raw-log analytics question, prefer the ADS ClickHouse MapReduce artifacts:
+      ${ADS_LLM_INVESTIGATIONS_FQN}, ${ADS_LLM_MAP_QUEUE_FQN}, ${ADS_LLM_MAP_RESULTS_FQN}, and ${ADS_LLM_REDUCE_RESULTS_FQN}.
+      First check whether a matching completed or in-progress investigation already exists for the same question, time range, source, and index scope.
+      If no suitable investigation exists, call the ads-log-workflow MCP server to create an investigation, enqueue map batches, run bounded map steps, check status, and run reduce after enough map results exist.
+      Read-only ClickHouse MCP must be used for SELECT-only inspection: schema checks, queue status, map/reduce result previews, final SELECT execution, and dashboard data validation.
+      Do not run aiGenerate, INSERT, UPDATE, ALTER, DROP, or materialization jobs through this read-only ClickHouse MCP. Use ads-log-workflow MCP for those controlled jobs.
+      Never SELECT compressed_json directly into chat except a tiny left(compressed_json, N) sample with N <= 2000.
+      For compressed log batches (${ADS_LLM_COMPRESSED_BATCHES_FQN}), aggregate inside ClickHouse and return only grouped counts, services, templates, time windows, and compact evidence.
+      The compact map input view (${ADS_LLM_MAP_BATCH_INPUTS_FQN}) is the LLM-facing representation of each compressed batch; prefer it over raw compressed_json when explaining what map-LLM saw.
+      When reduce results contain refined_sql, read that SQL and execute it at most once through ClickHouse MCP if the user needs checked numbers or a Grafana visualization.
       A successful SELECT that returned any rows is final for that answer. Never execute it again because the UI shows "Show more", truncates rows, or omits later time buckets. For a requested chart, immediately pass the exact successful SQL to Grafana; summarize only the visible aggregates and let Grafana execute the complete series.
       Null, NaN, zero, empty-array, epoch, or otherwise sparse values in a successful SELECT are valid analytical results, not a tool failure. Interpret them as missing evidence or no detected signal. Never retry, rewrite, or rerun the same SELECT merely to replace sparse values; proceed to Grafana when requested, or explain the limitation.
-      Within one answer, execute any refined_sql at most once. After that call returns rows, the next tool may be Grafana, but must not be ClickHouse with the same SQL or a cosmetic rewrite of it.
-      After refined_sql returns successfully, make no further ClickHouse calls in that answer, including dashboard-specific, time-series, validation, or shape-probing queries. Pass the exact successful refined_sql and its known result shape directly to Grafana.
       Keep interactive diagnostic SELECT results bounded to at most 500 rows. Never execute a broad full-period time-series query in chat merely to validate a Grafana panel; Grafana must execute that panel query itself.
-      Do not try to load millions of raw log rows directly into a single chat response. Use bounded raw samples interactively; use the Airflow refinement flow for full-period log analysis.
+      Do not try to load millions of raw log rows or full compressed batches directly into a single chat response. Use bounded samples interactively and use the ADS MapReduce workflow for full-period log analysis.
       Use concise neutral Russian. Do not show internal reasoning, fake tool JSON, or raw MCP payloads.
       Do not invent tables, columns, rows, metrics, URLs, or values. If the schema/data does not support the question, say that clearly.
       Prefer aggregate queries in ClickHouse for analytical questions; LibreChat and the model should only interpret the user request and explain the result.
@@ -113,27 +123,6 @@ mcpServers:
       First check adcore_health, adcore_status, or adcore_openapi when you need to understand availability or supported API shape.
       Use adcore_send_task to delegate a DevOps/MLOps task to adcore. Do not invent execution results; answer only from tool responses.
       Treat destructive infrastructure, deployment, credential, or repository actions as requiring explicit user confirmation unless the adcore response clearly says it only planned or inspected.
-
-  airflow:
-    type: sse
-    url: http://mcp-airflow:8000/sse
-    timeout: 1200000
-    serverInstructions: |
-      Use this Airflow MCP server only to orchestrate ADS Airflow DAGs, primarily the LLM-guided Elasticsearch log SQL refinement flow.
-      For every user analytics question over Elasticsearch/raw logs, call airflow_run_log_refinement with the user's question and the requested time range before final ClickHouse analysis, unless the current conversation already has a successful investigation_id for exactly the same question and time range.
-      Prefer the default analysis_strategy=context. In this mode ClickHouse scans the full period, builds profiles/windows/rare events/top traces/raw evidence samples, and Kimi receives that analytical context instead of every raw row.
-      Do not set wait_timeout_seconds unless the user explicitly asks for a different timeout; the MCP server applies its configured safe default/minimum.
-      Do not hardcode ClickHouse table names, source names, index patterns, DAG IDs, analysis_strategy, or chunk settings. Use defaults exposed by the Airflow MCP tool unless the user explicitly asks for another source, time range, or mode.
-      After airflow_run_log_refinement succeeds, use ClickHouse MCP to read artifacts.refined_sql_lookup, then execute the returned refined_sql through ClickHouse MCP.
-      If airflow_run_log_refinement returns preflight.context_first=true, mention briefly that ClickHouse built the analytical context over all matching rows and Kimi used selected raw evidence fragments.
-      If airflow_run_log_refinement returns preflight.autoscaled_batch_rows=true, mention the effective preflight.batch_rows value briefly; MCP increased raw-log batch size to keep the UI request interactive.
-      If the user asks for a chart or dashboard, run the refined SQL first, then use Grafana MCP to build the visualization from that result/query.
-      Do not claim that raw logs were analyzed unless airflow_run_log_refinement returned success and ClickHouse chunk reports/context reports exist for the returned investigation_id.
-      If airflow_run_log_refinement returns state=budget_exceeded or state=preflight_failed, do not call airflow_get_dag_run and do not query ClickHouse refinement tables in a loop. Explain the preflight result and ask the user to narrow the period, increase batch_rows, or raise AIRFLOW_MCP_MAX_LOG_BATCHES_PER_REQUEST.
-      If airflow_run_log_refinement returns state=timeout_cancelled, do not call airflow_get_dag_run and do not query refinement tables in a loop. Tell the user that the wait timeout was reached and the Airflow DagRun was marked failed to stop further background Kimi batch calls.
-      If airflow_run_log_refinement returns state=timeout_cancel_failed, state=timeout, or state=failed, call airflow_get_dag_run at most once, then stop tool use and return the dag_run_id/investigation_id with the current state.
-      After any failed context-first run, never ask ClickHouse for a manual fallback analysis and never ask Grafana to create a panel. The failed investigation must be fixed or rerun successfully first.
-      Never repeatedly poll Airflow or repeatedly query refinement tables in one answer. One DAG trigger, one optional status check, one refined_sql lookup, and one refined SQL execution are the maximum normal flow.
 
   langfuse:
     type: streamable-http

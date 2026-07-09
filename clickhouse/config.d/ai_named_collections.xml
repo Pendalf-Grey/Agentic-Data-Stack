@@ -1,0 +1,18 @@
+<clickhouse>
+  <named_collections>
+    <llm_map>
+      <provider>openai</provider>
+      <endpoint from_env="LLM_MAP_CHAT_COMPLETIONS_ENDPOINT"/>
+      <api_key from_env="LLM_MAP_API_KEY"/>
+      <model from_env="LLM_MAP_MODEL"/>
+      <max_tokens>1024</max_tokens>
+    </llm_map>
+    <llm_reduce>
+      <provider>openai</provider>
+      <endpoint from_env="LLM_REDUCE_CHAT_COMPLETIONS_ENDPOINT"/>
+      <api_key from_env="LLM_REDUCE_API_KEY"/>
+      <model from_env="LLM_REDUCE_MODEL"/>
+      <max_tokens>4096</max_tokens>
+    </llm_reduce>
+  </named_collections>
+</clickhouse>

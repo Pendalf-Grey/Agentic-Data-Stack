@@ -5,6 +5,7 @@ cache: true
 mcpSettings:
   allowedDomains:
     - "http://mcp-clickhouse:8000"
+    - "http://mcp-log-workflow:8000"
     - "http://mcp-grafana:8000"
     - "http://langfuse-web:3000"
 
@@ -23,6 +24,15 @@ endpoints:
       summaryModel: "kimi-k2.6"
 
 mcpServers:
+  ads-log-workflow:
+    type: sse
+    url: http://mcp-log-workflow:8000/sse
+    timeout: 300000
+    serverInstructions: |
+      Use this MCP server to run the ADS ClickHouse log MapReduce workflow.
+      For broad Elasticsearch/raw-log analysis, create an investigation, enqueue map batches, run bounded map steps, check status, and run reduce after useful map results exist.
+      Use the ClickHouse MCP server for read-only SELECT queries and final result checks.
+
   clickhouse:
     type: sse
     url: http://mcp-clickhouse:8000/sse
@@ -30,6 +40,9 @@ mcpServers:
     serverInstructions: |
       Use this ClickHouse MCP server for analytics questions. Do not answer database questions from memory.
       Interpret the user's question, inspect the ClickHouse schema when needed, run a single-use SELECT query through the ClickHouse MCP tools, and answer only from returned rows.
+      For broad Elasticsearch/raw-log questions, prefer stored ADS MapReduce investigations, map results, and reduce results. If no suitable investigation exists, use ads-log-workflow MCP to run the controlled workflow.
+      Never SELECT compressed_json directly into chat except a tiny left(compressed_json, N) sample with N <= 2000.
+      Do not run aiGenerate, INSERT, UPDATE, ALTER, DROP, or materialization jobs through this read-only ClickHouse MCP.
       Use concise neutral Russian. Do not show internal reasoning, fake tool JSON, or raw MCP payloads.
       Do not invent tables, columns, rows, metrics, URLs, or values. If the schema/data does not support the question, say that clearly.
       Prefer aggregate queries in ClickHouse for analytical questions; LibreChat and the model should only interpret the user request and explain the result.
