@@ -1,5 +1,7 @@
 import os
+import json
 import socket
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +16,9 @@ DEFAULT_SOURCE_NAME = os.getenv("ADS_LLM_LOG_SOURCE_NAME", os.getenv("LOGS_SOURC
 DEFAULT_INDEX_LIKE = os.getenv("ADS_LLM_LOG_INDEX_LIKE", os.getenv("LOGS_INDEX_LIKE", "nginx-logs-%"))
 DEFAULT_MAP_CONTEXT_TOKENS = int(os.getenv("LLM_MAP_CONTEXT_TOKENS", "132000"))
 DEFAULT_REDUCE_CONTEXT_TOKENS = int(os.getenv("LLM_REDUCE_CONTEXT_TOKENS", "256000"))
+DEFAULT_WORKFLOW_MAX_RUNTIME_SEC = int(os.getenv("ADS_LLM_WORKFLOW_MAX_RUNTIME_SEC", "1200"))
+DEFAULT_WORKFLOW_MAP_CLAIM_SIZE = int(os.getenv("ADS_LLM_WORKFLOW_MAP_CLAIM_SIZE", "4"))
+DEFAULT_WORKFLOW_MAP_MAX_ATTEMPTS = int(os.getenv("ADS_LLM_WORKFLOW_MAP_MAX_ATTEMPTS", "2"))
 
 mcp = FastMCP(name="ads-log-mapreduce")
 
@@ -145,6 +150,45 @@ ORDER BY status
     )
 
 
+def queue_totals(status_rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    totals = {"total": 0, "done": 0, "failed": 0, "pending": 0, "in_progress": 0}
+    for row in status_rows:
+        status = str(row.get("status") or "")
+        batches = int(row.get("batches") or 0)
+        totals["total"] += batches
+        if status in totals:
+            totals[status] += batches
+    totals["terminal"] = totals["done"] + totals["failed"]
+    totals["unfinished"] = totals["pending"] + totals["in_progress"]
+    return totals
+
+
+def claimable_map_batches(investigation_id: str, max_attempts: int) -> int:
+    return int(
+        scalar(
+            f"""
+SELECT count()
+FROM analytics.llm_map_queue FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+  AND attempt_count < {int(max_attempts)}
+  AND
+  (
+    status IN ('pending', 'failed')
+    OR (status = 'in_progress' AND locked_until < now64(3))
+  )
+  AND (investigation_id, batch_id) NOT IN
+  (
+    SELECT investigation_id, batch_id
+    FROM analytics.llm_map_results FINAL
+    WHERE investigation_id = {sql_string(investigation_id)}
+      AND isValidJSON(map_summary_json)
+  )
+"""
+        )
+        or 0
+    )
+
+
 def reduce_schema_context() -> str:
     schema_rows = rows(
         """
@@ -215,11 +259,9 @@ def compact_reduce_schema_context() -> str:
 
 def reduce_json_instruction() -> str:
     return (
-        "Use the normalized user question and all supplied map JSONs. "
-        "Return one minified valid JSON object only, no Markdown. "
-        "The whole response must be under 1800 characters and must finish completely. "
+        "Return minified valid JSON only. "
         "Keys: executive_summary, root_causes, top_services, latency_findings, recommendations, confidence. "
-        "Arrays max 3 strings. Each string max 140 characters. No nested objects."
+        "Arrays max 3 strings. No markdown."
     )
 
 
@@ -251,6 +293,23 @@ def refined_sql_for_investigation(investigation_id: str) -> str:
         "FROM analytics.llm_map_results "
         f"WHERE investigation_id = '{safe_id}' "
         "ORDER BY batch_no"
+    )
+
+
+def has_valid_final_reduce(investigation_id: str) -> bool:
+    return bool(
+        scalar(
+            f"""
+SELECT count()
+FROM analytics.llm_reduce_results FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+  AND reduce_level = 2
+  AND reduce_group = 0
+  AND length(summary_json) > 0
+  AND isValidJSON(summary_json)
+"""
+        )
+        or 0
     )
 
 
@@ -600,15 +659,15 @@ def run_log_reduce(investigation_id: str, group_size: int = 50, request_timeout_
     """Run reduce over stored map results and store reduce summaries."""
     group_size = max(1, min(int(group_size), 200))
     status_rows = queue_status(investigation_id)
-    total_batches = sum(int(row.get("batches") or 0) for row in status_rows)
-    done_batches = sum(int(row.get("batches") or 0) for row in status_rows if row.get("status") == "done")
-    if total_batches == 0 or done_batches != total_batches:
+    totals = queue_totals(status_rows)
+    if totals["total"] == 0 or totals["unfinished"] > 0:
         return {
             "investigation_id": investigation_id,
             "status": "not_ready",
-            "error": "Reduce is allowed only after every queued map batch is done.",
-            "done_batches": done_batches,
-            "total_batches": total_batches,
+            "error": "Reduce is allowed only after every queued map batch is terminal: done or failed.",
+            "done_batches": totals["done"],
+            "failed_batches": totals["failed"],
+            "total_batches": totals["total"],
             "queue": status_rows,
         }
     schema_context = reduce_schema_context()
@@ -623,6 +682,16 @@ WHERE investigation_id = {sql_string(investigation_id)}
         )
         or 0
     )
+    if map_rows == 0:
+        return {
+            "investigation_id": investigation_id,
+            "status": "not_ready",
+            "error": "No valid map results are available for reduce.",
+            "done_batches": totals["done"],
+            "failed_batches": totals["failed"],
+            "total_batches": totals["total"],
+            "queue": status_rows,
+        }
     stored_question = str(
         scalar(
             f"""
@@ -643,25 +712,28 @@ SELECT
   i.investigation_id,
   2 AS reduce_level,
   0 AS reduce_group,
-  replaceRegexpAll(
-    replaceRegexpAll(
-      aiGenerate(
-        concat(
-          'Normalized user question:',
-          '\\n',
-          {sql_string(question_context)},
-          '\\n\\nMap JSONs:',
-          '\\n',
-          arrayStringConcat(groupArray(r.map_summary_json), '\\n')
+  aiGenerate(
+    concat(
+      'User wants log incident analysis and recommendations for the investigation period. Normalized request:',
+      '\\n',
+      {sql_string(question_context)},
+      '\\n\\nUse only these compact batch notes:',
+      '\\n',
+      arrayStringConcat(
+        groupArray(
+          concat(
+            'batch ', toString(r.batch_no), ': ',
+            left(JSONExtractString(r.map_summary_json, 'executive_summary'), 450),
+            ' roots=', left(JSONExtractRaw(r.map_summary_json, 'root_cause_hypotheses'), 500),
+            ' latency=', left(JSONExtractRaw(r.map_summary_json, 'latency_findings'), 350),
+            ' recs=', left(JSONExtractRaw(r.map_summary_json, 'recommendations'), 350)
+          )
         ),
-        {sql_string(reduce_json_instruction())},
-        1.0
-      ),
-      '^```[A-Za-z]*\\\\s*',
-      ''
+        '\\n'
+      )
     ),
-    '\\\\s*```\\\\s*$',
-    ''
+    {sql_string(reduce_json_instruction())},
+    1.0
   ) AS summary_json,
   {sql_string(refined_sql)} AS refined_sql,
   now64(3) AS created_at
@@ -676,12 +748,16 @@ SETTINGS
   ai_function_credentials = 'llm_reduce',
   ai_function_max_api_calls_per_query = 1,
   ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
-  ai_function_max_output_tokens_per_query = 100000,
+  ai_function_max_output_tokens_per_query = 4096,
   ai_function_request_timeout_sec = {request_timeout_sec},
   ai_function_max_retries = 2
 """
         )
-        return get_log_investigation_status(investigation_id)
+        status = get_log_investigation_status(investigation_id)
+        if not has_valid_final_reduce(investigation_id):
+            status["status"] = "reduce_failed"
+            status["error"] = "Reduce LLM returned empty or invalid JSON."
+        return status
 
     command(
         f"""
@@ -711,6 +787,7 @@ FROM
     intDiv(row_number() OVER (ORDER BY batch_no) - 1, {group_size}) AS reduce_group
   FROM analytics.llm_map_results FINAL
   WHERE investigation_id = {sql_string(investigation_id)}
+    AND isValidJSON(map_summary_json)
 )
 GROUP BY investigation_id, reduce_group
 SETTINGS
@@ -718,7 +795,7 @@ SETTINGS
   ai_function_credentials = 'llm_reduce',
   ai_function_max_api_calls_per_query = 16,
   ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
-  ai_function_max_output_tokens_per_query = 100000,
+  ai_function_max_output_tokens_per_query = 4096,
   ai_function_request_timeout_sec = {request_timeout_sec},
   ai_function_max_retries = 2
 """
@@ -760,12 +837,16 @@ SETTINGS
   ai_function_credentials = 'llm_reduce',
   ai_function_max_api_calls_per_query = 1,
   ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
-  ai_function_max_output_tokens_per_query = 100000,
+  ai_function_max_output_tokens_per_query = 4096,
   ai_function_request_timeout_sec = {request_timeout_sec},
   ai_function_max_retries = 2
 """
     )
-    return get_log_investigation_status(investigation_id)
+    status = get_log_investigation_status(investigation_id)
+    if not has_valid_final_reduce(investigation_id):
+        status["status"] = "reduce_failed"
+        status["error"] = "Reduce LLM returned empty or invalid JSON."
+    return status
 
 
 def get_log_investigation_status(investigation_id: str) -> Dict[str, Any]:
@@ -825,18 +906,220 @@ SELECT
 FROM analytics.llm_map_results FINAL
 WHERE investigation_id = {sql_string(investigation_id)}
 ORDER BY batch_no
-LIMIT 10
+            LIMIT 10
 """
         ),
     }
 
 
-mcp.add_tool(Tool.from_function(create_log_investigation))
-mcp.add_tool(Tool.from_function(enqueue_log_map_batches))
-mcp.add_tool(Tool.from_function(run_log_map_step))
-mcp.add_tool(Tool.from_function(run_log_reduce))
-mcp.add_tool(Tool.from_function(get_log_investigation_status))
-mcp.add_tool(Tool.from_function(get_log_investigation_results))
+def get_log_analysis_status(investigation_id: str) -> Dict[str, Any]:
+    """Return high-level ADS-2 log analysis status without exposing batch workflow controls."""
+    status_rows = queue_status(investigation_id)
+    totals = queue_totals(status_rows)
+    map_counts = rows(
+        f"""
+SELECT
+  count() AS map_rows,
+  sum(isValidJSON(map_summary_json)) AS valid_map_rows,
+  sum(rows_read) AS mapped_rows_read,
+  min(batch_no) AS first_batch_no,
+  max(batch_no) AS last_batch_no
+FROM analytics.llm_map_results FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+"""
+    )[0]
+    reduce_counts = rows(
+        f"""
+SELECT
+  reduce_level,
+  count() AS rows,
+  max(isValidJSON(summary_json)) AS has_valid_json,
+  max(length(summary_json)) AS max_summary_chars,
+  max(created_at) AS last_created_at
+FROM analytics.llm_reduce_results FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+GROUP BY reduce_level
+ORDER BY reduce_level
+"""
+    )
+    if totals["total"] == 0:
+        status = "empty"
+    elif totals["unfinished"] > 0 or claimable_map_batches(investigation_id, DEFAULT_WORKFLOW_MAP_MAX_ATTEMPTS) > 0:
+        status = "running"
+    elif has_valid_final_reduce(investigation_id):
+        status = "reduced"
+    elif reduce_counts:
+        status = "reduce_failed"
+    elif totals["done"] > 0:
+        status = "mapped"
+    else:
+        status = "failed"
+    return {
+        "investigation_id": investigation_id,
+        "status": status,
+        "batches": totals,
+        "queue": status_rows,
+        "map": map_counts,
+        "reduce": reduce_counts,
+    }
+
+
+def get_log_analysis_results(investigation_id: str, preview_chars: int = 8000) -> Dict[str, Any]:
+    """Return high-level ADS-2 log analysis results for Kimi's final answer."""
+    preview_chars = max(1000, min(int(preview_chars), 20000))
+    status = get_log_analysis_status(investigation_id)
+    reduce_rows = rows(
+        f"""
+SELECT
+  reduce_level,
+  reduce_group,
+  isValidJSON(summary_json) AS valid_json,
+  left(summary_json, {preview_chars}) AS summary_json,
+  refined_sql,
+  created_at
+FROM analytics.llm_reduce_results FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+  AND length(summary_json) > 0
+  AND isValidJSON(summary_json)
+ORDER BY reduce_level DESC, reduce_group ASC
+LIMIT 5
+"""
+    )
+    failed_batches = rows(
+        f"""
+SELECT
+  batch_no,
+  rows_read,
+  attempt_count,
+  left(last_error, 500) AS last_error
+FROM analytics.llm_map_queue FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+  AND status = 'failed'
+ORDER BY batch_no
+LIMIT 20
+"""
+    )
+    map_previews = []
+    if not reduce_rows:
+        map_previews = rows(
+            f"""
+SELECT
+  batch_no,
+  event_time_from,
+  event_time_to,
+  rows_read,
+  isValidJSON(map_summary_json) AS valid_json,
+  left(map_summary_json, {preview_chars}) AS map_summary_json
+FROM analytics.llm_map_results FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+ORDER BY batch_no
+LIMIT 10
+"""
+        )
+    return {
+        "investigation_id": investigation_id,
+        "status": status,
+        "reduce_results": reduce_rows,
+        "failed_batches": failed_batches,
+        "map_previews": map_previews,
+    }
+
+
+def run_log_analysis(
+    user_question: str,
+    time_from: Optional[str] = None,
+    time_to: Optional[str] = None,
+    source_name: str = DEFAULT_SOURCE_NAME,
+    index_like: str = DEFAULT_INDEX_LIKE,
+    investigation_id: Optional[str] = None,
+    map_claim_size: int = DEFAULT_WORKFLOW_MAP_CLAIM_SIZE,
+    map_max_attempts: int = DEFAULT_WORKFLOW_MAP_MAX_ATTEMPTS,
+    max_runtime_sec: int = DEFAULT_WORKFLOW_MAX_RUNTIME_SEC,
+    map_request_timeout_sec: int = 240,
+    reduce_request_timeout_sec: int = 360,
+    reduce_group_size: int = 50,
+) -> Dict[str, Any]:
+    """Run the complete ADS-2 log MapReduce analysis as one high-level workflow trigger.
+
+    Kimi should call this once for a broad log-analysis question. The MCP service
+    keeps the map queue internal: ClickHouse stores the queue and executes the
+    aiGenerate map/reduce SQL, while this MCP function repeats bounded steps
+    until the workflow is done, blocked, or the runtime limit is reached.
+    """
+    started = time.monotonic()
+    map_claim_size = max(1, min(int(map_claim_size), 10))
+    map_max_attempts = max(1, min(int(map_max_attempts), 5))
+    max_runtime_sec = max(60, min(int(max_runtime_sec), 7200))
+
+    investigation = create_log_investigation(
+        user_question=user_question,
+        time_from=time_from,
+        time_to=time_to,
+        source_name=source_name,
+        index_like=index_like,
+        investigation_id=investigation_id,
+    )
+    current_id = investigation["investigation_id"]
+    enqueue = enqueue_log_map_batches(current_id)
+
+    map_steps = 0
+    last_step: Dict[str, Any] = {}
+    while True:
+        status_rows = queue_status(current_id)
+        totals = queue_totals(status_rows)
+        claimable = claimable_map_batches(current_id, map_max_attempts)
+
+        if totals["total"] == 0:
+            workflow_status = "empty"
+            break
+        if totals["unfinished"] == 0 and claimable == 0:
+            workflow_status = "mapped"
+            break
+        if claimable == 0:
+            workflow_status = "blocked"
+            break
+        if time.monotonic() - started >= max_runtime_sec:
+            workflow_status = "running"
+            break
+
+        last_step = run_log_map_step(
+            current_id,
+            claim_size=map_claim_size,
+            max_attempts=map_max_attempts,
+            request_timeout_sec=map_request_timeout_sec,
+        )
+        map_steps += 1
+
+    reduce_result: Dict[str, Any] = {}
+    current_status = get_log_analysis_status(current_id)
+    current_totals = current_status["batches"]
+    if current_totals["unfinished"] == 0 and current_totals["done"] > 0:
+        reduce_result = run_log_reduce(
+            current_id,
+            group_size=reduce_group_size,
+            request_timeout_sec=reduce_request_timeout_sec,
+        )
+        workflow_status = "reduced" if has_valid_final_reduce(current_id) else "reduce_failed"
+
+    results = get_log_analysis_results(current_id)
+    results.update(
+        {
+            "workflow_status": workflow_status,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "map_steps_executed_inside_mcp": map_steps,
+            "investigation": investigation,
+            "enqueue": enqueue,
+            "last_map_step": last_step,
+            "reduce": reduce_result,
+            "note": "Map queue processing was orchestrated inside ads-log-workflow MCP; Kimi did not need to call per-batch map tools.",
+        }
+    )
+    return results
+
+
+mcp.add_tool(Tool.from_function(run_log_analysis))
+mcp.add_tool(Tool.from_function(get_log_analysis_status))
+mcp.add_tool(Tool.from_function(get_log_analysis_results))
 
 
 if __name__ == "__main__":

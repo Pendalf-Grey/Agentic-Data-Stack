@@ -25,14 +25,13 @@ modelSpecs:
   list:
     - name: "kimi-k2.6-ads"
       label: "Kimi k2.6"
-      description: "ADS default: Kimi k2.6 with ClickHouse MapReduce, Grafana, and workflow MCP enabled."
+      description: "ADS default: Kimi k2.6 with high-level ADS-2 log workflow and Grafana MCP enabled."
       default: true
       preset:
         endpoint: "Moonshot"
         model: "${KIMI_MODEL}"
       mcpServers:
         - "ads-log-workflow"
-        - "clickhouse"
         - "grafana"
 ${OPENMODEL_MODEL_SPEC_YAML}
 
@@ -48,11 +47,14 @@ mcpServers:
   ads-log-workflow:
     type: sse
     url: http://mcp-log-workflow:8000/sse
-    timeout: 300000
+    timeout: 1800000
     serverInstructions: |
-      Use this MCP server to run the ADS ClickHouse log MapReduce workflow.
-      For broad Elasticsearch/raw-log analysis, create or reuse an investigation, enqueue map batches, run bounded map steps, check status, and run reduce only after useful map results exist.
-      Prefer small map steps first, for example claim_size=1, before scaling up.
+      Use this MCP server as a high-level ADS ClickHouse log-analysis workflow trigger.
+      For every broad Elasticsearch/raw-log analysis question, call run_log_analysis exactly once with the user's question, absolute time range, source_name, and index_like when known.
+      Do not manually orchestrate queue internals. Do not call or expect per-batch map tools.
+      The map queue is an internal workflow mechanism: ClickHouse stores the queue and executes aiGenerate map/reduce SQL; ads-log-workflow MCP repeats the internal steps until completion, timeout, or a terminal partial result.
+      Use get_log_analysis_status only when the user asks for progress on a known investigation_id.
+      Use get_log_analysis_results only when the user asks for results of a known investigation_id.
       This server starts controlled ClickHouse write jobs. Do not use it for arbitrary SELECT queries; use the ClickHouse MCP server for read-only data access and final result checks.
       The workflow stores the user question and period in ${ADS_LLM_INVESTIGATIONS_FQN}, tracks batch processing in ${ADS_LLM_MAP_QUEUE_FQN}, stores per-batch map summaries in ${ADS_LLM_MAP_RESULTS_FQN}, and stores reduce/final summaries in ${ADS_LLM_REDUCE_RESULTS_FQN}.
 
@@ -73,7 +75,7 @@ mcpServers:
       For every broad Elasticsearch/raw-log analytics question, prefer the ADS ClickHouse MapReduce artifacts:
       ${ADS_LLM_INVESTIGATIONS_FQN}, ${ADS_LLM_MAP_QUEUE_FQN}, ${ADS_LLM_MAP_RESULTS_FQN}, and ${ADS_LLM_REDUCE_RESULTS_FQN}.
       First check whether a matching completed or in-progress investigation already exists for the same question, time range, source, and index scope.
-      If no suitable investigation exists, call the ads-log-workflow MCP server to create an investigation, enqueue map batches, run bounded map steps, check status, and run reduce after enough map results exist.
+      If no suitable investigation exists, call ads-log-workflow.run_log_analysis once. Do not manually create investigations, enqueue batches, run map steps, or run reduce.
       Read-only ClickHouse MCP must be used for SELECT-only inspection: schema checks, queue status, map/reduce result previews, final SELECT execution, and dashboard data validation.
       Do not run aiGenerate, INSERT, UPDATE, ALTER, DROP, or materialization jobs through this read-only ClickHouse MCP. Use ads-log-workflow MCP for those controlled jobs.
       Never SELECT compressed_json directly into chat except a tiny left(compressed_json, N) sample with N <= 2000.
@@ -95,20 +97,11 @@ mcpServers:
     timeout: ${GRAFANA_MCP_TIMEOUT_MS}
     serverInstructions: |
       Use this Grafana MCP server only when the user asks to create, find, inspect, or update Grafana dashboards or visualizations.
-      For analytics data, use ClickHouse MCP first to produce the exact SELECT query and result rows, then use Grafana MCP to create or update a dashboard/panel based on that query.
+      For ADS-2 log-analysis results, create or update the dashboard by calling create_grafana_dashboard_from_analysis with the investigation_id returned by run_log_analysis.
+      create_grafana_dashboard_from_analysis is a high-level tool: it reads the investigation period and reduce/map results itself and builds the dashboard queries internally.
       If the user asks to "make/build/draw/create a graph/chart/dashboard", do not stop after returning tabular data. Create or update a Grafana dashboard/panel and return the dashboard link.
-      Choose the panel type from the data shape: scatter/XY for relationships between two numeric variables, bar chart for grouped categories, time series/state timeline for time-indexed data, table for detailed rows.
-      Build panel queries from the discovered ClickHouse schema and the validated SELECT query. Do not hardcode table names, column names, brands, metrics, or dashboards.
-      Set dashboard.time.from and dashboard.time.to to the exact absolute period requested by the user. Never leave a generated historical dashboard on Grafana's default last-six-hours range.
-      Keep the dashboard time range and panel query range consistent. Prefer Grafana time macros when the validated query supports them; otherwise copy the requested absolute bounds into both places.
+      Do not ask ClickHouse MCP to build, validate, or rerun dashboard queries for ADS-2 log-analysis dashboards.
       Never append FORMAT JSONEachRow, FORMAT JSON, or any other FORMAT clause to Grafana ClickHouse rawSql. The Grafana datasource controls the wire format.
-      Unless the user explicitly asks for several panels, create exactly one primary panel. Put related numeric series into that panel instead of duplicating a large CTE across multiple targets or panels.
-      Reuse the already validated refined SQL whenever its result shape fits the requested chart. Do not generate another full-period query only for decoration.
-      Do not ask ClickHouse MCP to pre-run or validate a derived dashboard query after refined_sql succeeded. Create the panel from the exact successful refined_sql and known returned columns.
-      Every ClickHouse target must set queryType to sql, format to 1, refId, rawSql, and the clickhouse-analytics datasource. Keep the same datasource on the panel.
-      Before returning the link, make sure every requested panel has a datasource, a non-empty query, and a visualization type compatible with the returned columns.
-      Do not pass folderUid unless it was first returned by a Grafana folder lookup. In particular, never assume that "general" is a valid folder UID.
-      Prefer concise dashboard and panel titles. Use the existing ClickHouse datasource when creating panels.
       When returning a Grafana dashboard or panel link to the user, always use the external Grafana base URL ${GRAFANA_BASE_URL}. Do not use the LibreChat URL, the current browser origin, or localhost:3080 for Grafana links.
       If a Grafana tool returns a relative URL such as /d/<uid>/<slug>, convert it to ${GRAFANA_BASE_URL}/d/<uid>/<slug> before answering.
 
