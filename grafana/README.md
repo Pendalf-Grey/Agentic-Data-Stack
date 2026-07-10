@@ -2,7 +2,7 @@
 
 Эта директория не содержит исходный код Grafana. Grafana запускается из готового образа `grafana/grafana-oss:11.3.0`.
 
-Мы пишем только конфигурацию и стартовые dashboard'ы.
+Мы пишем только конфигурацию datasource и dashboard-шаблоны для API/MCP.
 
 ## `provisioning/datasources/clickhouse.yml`
 
@@ -14,19 +14,23 @@ Datasource получает uid `clickhouse-analytics`. Этот uid испол�
 
 ## `provisioning/dashboards/dashboards.yml`
 
-Provisioning dashboard provider.
+Dashboard provisioning сейчас отключен.
 
-Он говорит Grafana: "читай dashboard JSON из `/var/lib/grafana/dashboards` и показывай их в папке `Agentic Data Stack`".
+Простыми словами: Grafana не пытается сама импортировать dashboard JSON при старте.
+Это важно для demo-ветки, потому что Kimi и Grafana MCP создают/обновляют dashboard'ы
+динамически через Grafana HTTP API. Если одновременно включить файловый provisioning и
+API-создание с одним и тем же `uid`, Grafana начинает конфликтовать.
 
-В `docker-compose.yml` этот путь смонтирован из локальной директории `./grafana/dashboards`.
+Файл `dashboards.yml` поэтому содержит пустой список providers.
 
 ## `dashboards/agentic-data-stack-events.json`
 
-Стартовый dashboard в формате JSON.
+Dashboard-шаблон в формате JSON.
 
 Dashboard JSON - это сохраненное описание dashboard: панели, SQL-запросы, размеры, цвета, datasource uid.
 
-Grafana UI умеет экспортировать dashboard в такой JSON, а provisioning умеет импортировать его обратно при старте контейнера.
+Grafana UI умеет экспортировать dashboard в такой JSON. В этой demo-ветке такой JSON
+можно использовать как шаблон для API/MCP-создания dashboard.
 
 Обычные комментарии в `.json` добавлять нельзя, иначе Grafana не сможет прочитать dashboard. Поэтому пояснение лежит в этом README.
 
@@ -38,6 +42,6 @@ Grafana UI умеет экспортировать dashboard в такой JSON,
 
 - взяли готовый Docker image Grafana;
 - подключили ClickHouse datasource через provisioning;
-- добавили стартовый dashboard JSON;
+- добавили dashboard JSON-шаблон;
 - открыли порт `3001`;
 - разрешили модели/MCP создавать новые dashboard'ы через Grafana HTTP API.

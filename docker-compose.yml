@@ -428,23 +428,44 @@ services:
     restart: unless-stopped
 
   mcp-grafana:
-    image: grafana/mcp-grafana
+    image: mcp/clickhouse
     depends_on:
       grafana:
         condition: service_healthy
+    command: ["python", "/app/ads-grafana/server.py"]
     environment:
-      GRAFANA_URL: ${GRAFANA_MCP_URL:-http://host.docker.internal:3001}
+      GRAFANA_URL: ${GRAFANA_INTERNAL_URL:-http://grafana:3000}
+      GRAFANA_PUBLIC_URL: ${GRAFANA_BASE_URL:-http://localhost:3001}
       GRAFANA_USERNAME: ${GRAFANA_ADMIN_USER:-admin}
       GRAFANA_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GRAFANA_ORG_ID: 1
+      ADS_MCP_TRANSPORT: sse
+      ADS_MCP_BIND_HOST: 0.0.0.0
+      ADS_MCP_PORT: 8000
+      ADS_GRAFANA_DASHBOARD_TEMPLATE: /workspace/grafana/dashboards/agentic-data-stack-events.json
     ports:
       - "8002:8000"
+    volumes:
+      - ./mcp-grafana:/app/ads-grafana:ro
+      - ./grafana/dashboards:/workspace/grafana/dashboards:ro
     healthcheck:
       test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/127.0.0.1/8000'"]
       interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
       timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
       retries: ${ADS_HEALTHCHECK_RETRIES:-10}
       start_period: ${ADS_HEALTHCHECK_START_PERIOD:-30s}
+    restart: unless-stopped
+
+  moonshot-relay:
+    build:
+      context: ./moonshot-relay
+    image: moonshot-relay-local
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/health', timeout=3).read()\""]
+      interval: ${ADS_HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${ADS_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${ADS_HEALTHCHECK_RETRIES:-10}
+      start_period: ${ADS_HEALTHCHECK_START_PERIOD:-10s}
     restart: unless-stopped
 
   librechat:
@@ -462,6 +483,8 @@ services:
         condition: service_healthy
       mcp-log-workflow:
         condition: service_healthy
+      moonshot-relay:
+        condition: service_healthy
       langfuse-web:
         condition: service_healthy
     environment:
@@ -476,7 +499,7 @@ services:
       ALLOW_UNVERIFIED_EMAIL_LOGIN: ${ALLOW_UNVERIFIED_EMAIL_LOGIN:-true}
       ALLOW_PASSWORD_RESET: ${ALLOW_PASSWORD_RESET:-false}
       KIMI_API_KEY: ${KIMI_API_KEY:-${MOONSHOT_API_KEY:-}}
-      KIMI_BASE_URL: ${KIMI_BASE_URL:-https://api.moonshot.ai/v1}
+      KIMI_BASE_URL: ${LIBRECHAT_KIMI_BASE_URL:-http://moonshot-relay:18080/v1}
       KIMI_ONLY: ${KIMI_ONLY:-true}
       KIMI_MODEL: ${KIMI_MODEL:-kimi-k2.6}
       KIMI_MODELS: ${KIMI_MODELS:-kimi-k2.6}

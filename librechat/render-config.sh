@@ -122,7 +122,8 @@ ${kimi_reasoning_params_yaml}
       summaryModel: \"${KIMI_SUMMARY_MODEL:-$kimi_model}\"
 "
 
-# LibreChat ходит к Kimi/Moonshot напрямую. MCP tools подключаются самим LibreChat.
+# LibreChat может ходить к Kimi/Moonshot через moonshot-relay, чтобы нормализовать
+# streaming tool-call ответы для агентского режима. MCP tools подключаются самим LibreChat.
 export LIBRECHAT_TITLE_MODEL="$title_model"
 export LIBRECHAT_SUMMARY_MODEL="$summary_model"
 export LOCAL_OLLAMA_MODEL_LIST_YAML="$local_model_yaml"
