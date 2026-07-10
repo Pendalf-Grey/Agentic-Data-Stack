@@ -55,18 +55,92 @@ Rules:
 - If a "request completed" template dominates and related error templates do not indicate a problem, treat it as normal background traffic.
 - Do not return raw logs.
 
-Return valid JSON only, no Markdown. Use these top-level keys:
+Return valid JSON only, no Markdown.
+The response must be complete and parseable as JSON. Do not stop mid-string.
+Be detailed enough for a reduce model to make an investigation-level conclusion without rereading the batch.
+Use concise natural language inside fields, but do not over-compress the meaning.
+
+Use these top-level keys:
 {
   "executive_summary": string,
-  "data_scale": object,
-  "normal_background": array,
-  "errors_and_degradations": array,
-  "affected_services": array,
-  "chronology": array,
-  "root_cause_hypotheses": array,
-  "recommendations": array,
-  "additional_checks": array,
-  "candidate_filters": array,
-  "evidence": array,
+  "data_scale": {
+    "rows_read": number,
+    "batch_time_from": string,
+    "batch_time_to": string,
+    "important_template_count": number,
+    "important_run_count": number
+  },
+  "normal_background": [
+    {
+      "description": string,
+      "weight": string,
+      "services": array
+    }
+  ],
+  "errors_and_degradations": [
+    {
+      "service": string,
+      "symptom": string,
+      "severity": string,
+      "count_or_weight": string,
+      "time_window": string
+    }
+  ],
+  "affected_services": [
+    {
+      "service": string,
+      "impact": string,
+      "evidence": string
+    }
+  ],
+  "latency_findings": [
+    {
+      "service": string,
+      "signal": string,
+      "possible_reason": string
+    }
+  ],
+  "chronology": [
+    {
+      "time_window": string,
+      "event": string,
+      "evidence": string
+    }
+  ],
+  "root_cause_hypotheses": [
+    {
+      "hypothesis": string,
+      "supporting_evidence": string,
+      "confidence": number
+    }
+  ],
+  "recommendations": [
+    {
+      "priority": string,
+      "action": string,
+      "reason": string
+    }
+  ],
+  "additional_checks": [
+    {
+      "check": string,
+      "why": string
+    }
+  ],
+  "candidate_filters": [
+    {
+      "field": string,
+      "operator": string,
+      "value": string,
+      "reason": string
+    }
+  ],
+  "evidence": [
+    {
+      "kind": string,
+      "value": string,
+      "interpretation": string
+    }
+  ],
   "confidence": number
 }

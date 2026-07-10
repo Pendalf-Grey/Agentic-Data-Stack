@@ -411,6 +411,8 @@ services:
       ADS_MCP_PORT: 8000
       ADS_LLM_LOG_SOURCE_NAME: ${ADS_LLM_LOG_SOURCE_NAME:-${ELASTICSEARCH_SOURCE_NAME:-elasticsearch-demo}}
       ADS_LLM_LOG_INDEX_LIKE: ${ADS_LLM_LOG_INDEX_LIKE:-nginx-logs-%}
+      LLM_MAP_CONTEXT_TOKENS: ${LLM_MAP_CONTEXT_TOKENS:-132000}
+      LLM_REDUCE_CONTEXT_TOKENS: ${LLM_REDUCE_CONTEXT_TOKENS:-256000}
       MAP_PROMPT_FILE: /workspace/prompts/map_compressed_logs.en.txt
       MAP_INPUT_VIEW_SQL: /workspace/sql/17_create_map_batch_inputs.sql
     ports:

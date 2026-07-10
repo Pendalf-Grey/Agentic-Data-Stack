@@ -12,6 +12,8 @@ from fastmcp.tools import Tool
 EPOCH = "toDateTime64('1970-01-01 00:00:00.000', 3, 'UTC')"
 DEFAULT_SOURCE_NAME = os.getenv("ADS_LLM_LOG_SOURCE_NAME", os.getenv("LOGS_SOURCE_NAME", "elasticsearch-demo"))
 DEFAULT_INDEX_LIKE = os.getenv("ADS_LLM_LOG_INDEX_LIKE", os.getenv("LOGS_INDEX_LIKE", "nginx-logs-%"))
+DEFAULT_MAP_CONTEXT_TOKENS = int(os.getenv("LLM_MAP_CONTEXT_TOKENS", "132000"))
+DEFAULT_REDUCE_CONTEXT_TOKENS = int(os.getenv("LLM_REDUCE_CONTEXT_TOKENS", "256000"))
 
 mcp = FastMCP(name="ads-log-mapreduce")
 
@@ -143,6 +145,115 @@ ORDER BY status
     )
 
 
+def reduce_schema_context() -> str:
+    schema_rows = rows(
+        """
+SELECT
+  table,
+  name,
+  type
+FROM system.columns
+WHERE database = currentDatabase()
+  AND table IN
+  (
+    'es_raw_logs',
+    'es_log_compressed_batches',
+    'v_es_log_map_batch_inputs',
+    'llm_investigations',
+    'llm_map_queue',
+    'v_llm_map_queue_status',
+    'llm_map_results',
+    'v_llm_map_results_preview',
+    'llm_reduce_results'
+  )
+ORDER BY table, position
+"""
+    )
+    grouped: Dict[str, List[str]] = {}
+    for row in schema_rows:
+        grouped.setdefault(row["table"], []).append(f"{row['name']} {row['type']}")
+    lines = ["Actual ClickHouse ADS-2 schema. Use only these tables/views and columns:"]
+    for table_name in sorted(grouped):
+        columns = ", ".join(grouped[table_name])
+        lines.append(f"- analytics.{table_name}({columns})")
+    lines.extend(
+        [
+            "",
+            "Reduce-required artifacts:",
+            "- analytics.llm_map_queue: use investigation_id, batch_id, batch_no, status, rows_read, event_time_from, event_time_to to verify every queued batch is done before reducing.",
+            "- analytics.llm_map_results: use investigation_id, batch_id, batch_no, rows_read, event_time_from, event_time_to, map_summary_json as the only semantic input for reduce.",
+            "- analytics.llm_reduce_results: store and read reduce output; reduce must not summarize directly from raw logs.",
+            "- analytics.es_log_compressed_batches: use only for compact coverage checks, batch counts, time windows, and dashboard queries.",
+            "- analytics.v_es_log_map_batch_inputs: this is the compact LLM-facing batch input view; use it for explaining what map-LLM saw, not for replacing map results during reduce.",
+            "- analytics.es_raw_logs: not needed for reduce. Use it only for a separate bounded verification query when explicitly requested.",
+            "",
+            "SQL rules:",
+            "- Never reference a table named logs.",
+            "- Prefer analytics.llm_map_results, analytics.llm_reduce_results, analytics.llm_map_queue, analytics.v_llm_map_queue_status, and analytics.es_log_compressed_batches.",
+            "- For compressed-log verification, query analytics.es_log_compressed_batches or analytics.v_es_log_map_batch_inputs.",
+            "- If raw-log verification is explicitly necessary, use analytics.es_raw_logs and JSONExtract* over document_json, with tight time filters and LIMIT.",
+            "- refined_sql must be executable ClickHouse SQL for this schema, without FORMAT clauses.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def compact_reduce_schema_context() -> str:
+    return "\n".join(
+        [
+            "Actual ADS-2 ClickHouse schema for reduce:",
+            "[REDUCE INPUT] analytics.llm_map_results(investigation_id String, batch_id String, batch_no UInt64, event_time_from DateTime64(3,'UTC'), event_time_to DateTime64(3,'UTC'), rows_read UInt64, map_summary_json String, created_at DateTime64(3,'UTC'))",
+            "[REDUCE COMPLETENESS] analytics.llm_map_queue(investigation_id String, batch_id String, batch_no UInt64, event_time_from DateTime64(3,'UTC'), event_time_to DateTime64(3,'UTC'), rows_read UInt64, status LowCardinality(String), last_error String, created_at DateTime64(3,'UTC'), updated_at DateTime64(3,'UTC'))",
+            "[REDUCE OUTPUT] analytics.llm_reduce_results(investigation_id String, reduce_level UInt8, reduce_group UInt64, summary_json String, refined_sql String, created_at DateTime64(3,'UTC'))",
+            "[COVERAGE/DASHBOARD] analytics.es_log_compressed_batches(batch_id String, source_name LowCardinality(String), index_name String, batch_no UInt64, event_time_from DateTime64(3,'UTC'), event_time_to DateTime64(3,'UTC'), rows_read UInt64, raw_chars UInt64, compressed_chars UInt64, compressed_json String, created_at DateTime64(3,'UTC'))",
+            "[STATUS VIEW] analytics.v_llm_map_queue_status(investigation_id String, status LowCardinality(String), batches UInt64, rows_read UInt64, first_batch_no UInt64, last_batch_no UInt64, event_time_from DateTime64(3,'UTC'), event_time_to DateTime64(3,'UTC'))",
+            "[RAW LOGS - not for reduce] analytics.es_raw_logs(source_name LowCardinality(String), index_name String, document_id String, event_time DateTime64(3,'UTC'), ingest_time DateTime64(3,'UTC'), document_json String, version UInt64)",
+            "Rules: reduce uses analytics.llm_map_results.map_summary_json only; never use a table named logs; refined_sql must use only columns listed above and no FORMAT clause.",
+        ]
+    )
+
+
+def reduce_json_instruction() -> str:
+    return (
+        "Use the normalized user question and all supplied map JSONs. "
+        "Return one minified valid JSON object only, no Markdown. "
+        "The whole response must be under 1800 characters and must finish completely. "
+        "Keys: executive_summary, root_causes, top_services, latency_findings, recommendations, confidence. "
+        "Arrays max 3 strings. Each string max 140 characters. No nested objects."
+    )
+
+
+def normalize_reduce_question(user_question: str) -> str:
+    question = (user_question or "").strip()
+    if question.isascii():
+        return question
+
+    lowered = question.casefold()
+    intents: List[str] = []
+    if any(token in lowered for token in ("пад", "ошиб", "сбо", "failed", "error")):
+        intents.append("identify which services failed most often and why")
+    if any(token in lowered for token in ("латен", "задерж", "timeout", "latency")):
+        intents.append("explain whether latency increased and what caused it")
+    if any(token in lowered for token in ("рекомен", "исправ", "предотврат", "avoid", "recommend")):
+        intents.append("recommend how to fix the issues and prevent recurrence")
+    if any(token in lowered for token in ("граф", "дашборд", "grafana", "dashboard")):
+        intents.append("provide Grafana dashboard hints when useful")
+    if not intents:
+        intents.append("answer the user's log-analysis question using the map summaries")
+    return "User question was normalized for the reduce model: " + "; ".join(intents) + "."
+
+
+def refined_sql_for_investigation(investigation_id: str) -> str:
+    safe_id = investigation_id.replace("'", "''")
+    return (
+        "SELECT batch_no, batch_id, event_time_from, event_time_to, rows_read, "
+        "map_summary_json, created_at "
+        "FROM analytics.llm_map_results "
+        f"WHERE investigation_id = '{safe_id}' "
+        "ORDER BY batch_no"
+    )
+
+
 def create_log_investigation(
     user_question: str,
     time_from: Optional[str] = None,
@@ -257,6 +368,7 @@ WHERE i.investigation_id = {sql_string(investigation_id)}
     SELECT investigation_id, batch_id
     FROM analytics.llm_map_results FINAL
     WHERE investigation_id = {sql_string(investigation_id)}
+      AND isValidJSON(map_summary_json)
   )
 ORDER BY b.batch_no
 """
@@ -271,7 +383,7 @@ def run_log_map_step(
     max_attempts: int = 3,
     request_timeout_sec: int = 180,
     ai_retries: int = 1,
-    max_input_tokens: int = 1000000,
+    max_input_tokens: int = DEFAULT_MAP_CONTEXT_TOKENS,
     max_output_tokens: int = 100000,
     worker_index: int = 0,
     worker_count: int = 1,
@@ -328,6 +440,7 @@ FROM
       SELECT investigation_id, batch_id
       FROM analytics.llm_map_results FINAL
       WHERE investigation_id = {sql_string(investigation_id)}
+        AND isValidJSON(map_summary_json)
     )
   ORDER BY batch_no
   LIMIT {claim_size}
@@ -449,6 +562,35 @@ INNER JOIN analytics.llm_map_results AS r FINAL
 WHERE q.investigation_id = {sql_string(investigation_id)}
   AND q.status = 'in_progress'
   AND q.locked_by = {sql_string(lease_id)}
+  AND isValidJSON(r.map_summary_json)
+"""
+    )
+    command(
+        f"""
+INSERT INTO analytics.llm_map_queue
+SELECT
+  q.investigation_id,
+  q.batch_id,
+  q.batch_no,
+  q.event_time_from,
+  q.event_time_to,
+  q.rows_read,
+  'failed',
+  q.locked_by,
+  q.locked_until,
+  q.attempt_count,
+  'Map LLM returned invalid JSON',
+  {version_expr("q.batch_no")},
+  q.created_at,
+  now64(3)
+FROM analytics.llm_map_queue AS q FINAL
+INNER JOIN analytics.llm_map_results AS r FINAL
+  ON r.investigation_id = q.investigation_id
+ AND r.batch_id = q.batch_id
+WHERE q.investigation_id = {sql_string(investigation_id)}
+  AND q.status = 'in_progress'
+  AND q.locked_by = {sql_string(lease_id)}
+  AND NOT isValidJSON(r.map_summary_json)
 """
     )
     return {"investigation_id": investigation_id, "claimed": claimed, "status": "done", "queue": queue_status(investigation_id)}
@@ -457,6 +599,90 @@ WHERE q.investigation_id = {sql_string(investigation_id)}
 def run_log_reduce(investigation_id: str, group_size: int = 50, request_timeout_sec: int = 240) -> Dict[str, Any]:
     """Run reduce over stored map results and store reduce summaries."""
     group_size = max(1, min(int(group_size), 200))
+    status_rows = queue_status(investigation_id)
+    total_batches = sum(int(row.get("batches") or 0) for row in status_rows)
+    done_batches = sum(int(row.get("batches") or 0) for row in status_rows if row.get("status") == "done")
+    if total_batches == 0 or done_batches != total_batches:
+        return {
+            "investigation_id": investigation_id,
+            "status": "not_ready",
+            "error": "Reduce is allowed only after every queued map batch is done.",
+            "done_batches": done_batches,
+            "total_batches": total_batches,
+            "queue": status_rows,
+        }
+    schema_context = reduce_schema_context()
+    map_rows = int(
+        scalar(
+            f"""
+SELECT count()
+FROM analytics.llm_map_results FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+  AND isValidJSON(map_summary_json)
+"""
+        )
+        or 0
+    )
+    stored_question = str(
+        scalar(
+            f"""
+SELECT user_question
+FROM analytics.llm_investigations FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+"""
+        )
+        or ""
+    )
+    question_context = normalize_reduce_question(stored_question)
+    if map_rows <= group_size:
+        refined_sql = refined_sql_for_investigation(investigation_id)
+        command(
+            f"""
+INSERT INTO analytics.llm_reduce_results
+SELECT
+  i.investigation_id,
+  2 AS reduce_level,
+  0 AS reduce_group,
+  replaceRegexpAll(
+    replaceRegexpAll(
+      aiGenerate(
+        concat(
+          'Normalized user question:',
+          '\\n',
+          {sql_string(question_context)},
+          '\\n\\nMap JSONs:',
+          '\\n',
+          arrayStringConcat(groupArray(r.map_summary_json), '\\n')
+        ),
+        {sql_string(reduce_json_instruction())},
+        1.0
+      ),
+      '^```[A-Za-z]*\\\\s*',
+      ''
+    ),
+    '\\\\s*```\\\\s*$',
+    ''
+  ) AS summary_json,
+  {sql_string(refined_sql)} AS refined_sql,
+  now64(3) AS created_at
+FROM analytics.llm_investigations AS i FINAL
+INNER JOIN analytics.llm_map_results AS r FINAL
+  ON r.investigation_id = i.investigation_id
+WHERE i.investigation_id = {sql_string(investigation_id)}
+  AND isValidJSON(r.map_summary_json)
+GROUP BY i.investigation_id
+SETTINGS
+  allow_experimental_ai_functions = 1,
+  ai_function_credentials = 'llm_reduce',
+  ai_function_max_api_calls_per_query = 1,
+  ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
+  ai_function_max_output_tokens_per_query = 100000,
+  ai_function_request_timeout_sec = {request_timeout_sec},
+  ai_function_max_retries = 2
+"""
+        )
+        return get_log_investigation_status(investigation_id)
+
     command(
         f"""
 INSERT INTO analytics.llm_reduce_results
@@ -465,8 +691,15 @@ SELECT
   1 AS reduce_level,
   reduce_group,
   aiGenerate(
-    concat('Map summaries:', '\\n', arrayStringConcat(groupArray(map_summary_json), '\\n')),
-    'You are a level-1 Reduce LLM for SRE log analysis. Compress Map-LLM results into valid JSON only. Keep only root causes, affected services, time windows, ClickHouse filters, evidence, missing data, and confidence. Do not invent data.',
+    concat(
+      'ClickHouse schema:',
+      '\\n',
+      {sql_string(schema_context)},
+      '\\n\\nMap summaries:',
+      '\\n',
+      arrayStringConcat(groupArray(map_summary_json), '\\n')
+    ),
+    'You are a level-1 Reduce LLM for SRE log analysis. Compress Map-LLM results into valid JSON only. Keep only root causes, affected services, time windows, ClickHouse filters, evidence, missing data, and confidence. Do not invent data. If you mention SQL filters or tables, use only the supplied ClickHouse schema.',
     1.0
   ) AS summary_json,
   '' AS refined_sql,
@@ -484,7 +717,7 @@ SETTINGS
   allow_experimental_ai_functions = 1,
   ai_function_credentials = 'llm_reduce',
   ai_function_max_api_calls_per_query = 16,
-  ai_function_max_input_tokens_per_query = 1000000,
+  ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
   ai_function_max_output_tokens_per_query = 100000,
   ai_function_request_timeout_sec = {request_timeout_sec},
   ai_function_max_retries = 2
@@ -498,8 +731,18 @@ SELECT
   2 AS reduce_level,
   0 AS reduce_group,
   aiGenerate(
-    concat('User question:', '\\n', i.user_question, '\\n\\nReduced map summaries:', '\\n', arrayStringConcat(groupArray(r.summary_json), '\\n')),
-    'You are the final Reduce LLM for SRE log analysis. Return valid JSON only with executive_summary, root_causes, affected_services, incident_timeline, evidence, preventive_actions, refined_sql, dashboard_hints, confidence. Do not invent data.',
+    concat(
+      'User question:',
+      '\\n',
+      {sql_string(question_context)},
+      '\\n\\nClickHouse schema:',
+      '\\n',
+      {sql_string(schema_context)},
+      '\\n\\nReduced map summaries:',
+      '\\n',
+      arrayStringConcat(groupArray(r.summary_json), '\\n')
+    ),
+    {sql_string(reduce_json_instruction())},
     1.0
   ) AS summary_json,
   JSONExtractString(summary_json, 'refined_sql') AS refined_sql,
@@ -509,12 +752,14 @@ INNER JOIN analytics.llm_reduce_results AS r FINAL
   ON r.investigation_id = i.investigation_id
 WHERE i.investigation_id = {sql_string(investigation_id)}
   AND r.reduce_level = 1
+  AND isValidJSON(r.summary_json)
+  AND length(r.summary_json) > 0
 GROUP BY i.investigation_id, i.user_question
 SETTINGS
   allow_experimental_ai_functions = 1,
   ai_function_credentials = 'llm_reduce',
   ai_function_max_api_calls_per_query = 1,
-  ai_function_max_input_tokens_per_query = 1000000,
+  ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
   ai_function_max_output_tokens_per_query = 100000,
   ai_function_request_timeout_sec = {request_timeout_sec},
   ai_function_max_retries = 2
