@@ -467,7 +467,7 @@ SELECT
   aiGenerate(
     concat('Map summaries:', '\\n', arrayStringConcat(groupArray(map_summary_json), '\\n')),
     'You are a level-1 Reduce LLM for SRE log analysis. Compress Map-LLM results into valid JSON only. Keep only root causes, affected services, time windows, ClickHouse filters, evidence, missing data, and confidence. Do not invent data.',
-    0.1
+    1.0
   ) AS summary_json,
   '' AS refined_sql,
   now64(3) AS created_at
@@ -500,7 +500,7 @@ SELECT
   aiGenerate(
     concat('User question:', '\\n', i.user_question, '\\n\\nReduced map summaries:', '\\n', arrayStringConcat(groupArray(r.summary_json), '\\n')),
     'You are the final Reduce LLM for SRE log analysis. Return valid JSON only with executive_summary, root_causes, affected_services, incident_timeline, evidence, preventive_actions, refined_sql, dashboard_hints, confidence. Do not invent data.',
-    0.1
+    1.0
   ) AS summary_json,
   JSONExtractString(summary_json, 'refined_sql') AS refined_sql,
   now64(3) AS created_at
