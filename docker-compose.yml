@@ -485,8 +485,6 @@ services:
         condition: service_healthy
       rag_api:
         condition: service_healthy
-      mcp-clickhouse:
-        condition: service_healthy
       mcp-grafana:
         condition: service_healthy
       mcp-log-workflow:

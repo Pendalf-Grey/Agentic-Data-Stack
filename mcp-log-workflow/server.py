@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import socket
 import time
@@ -56,6 +57,10 @@ def scalar(sql: str) -> Any:
 
 def version_expr(offset: str = "batch_no") -> str:
     return f"toUInt64(toUnixTimestamp64Milli(now64(3))) * 1000000 + toUInt64({offset})"
+
+
+def sql_comment(value: str) -> str:
+    return value.replace("*/", "").replace("\n", " ")[:500]
 
 
 def read_file(path_value: str) -> str:
@@ -151,16 +156,112 @@ ORDER BY status
 
 
 def queue_totals(status_rows: List[Dict[str, Any]]) -> Dict[str, int]:
-    totals = {"total": 0, "done": 0, "failed": 0, "pending": 0, "in_progress": 0}
+    totals = {"total": 0, "done": 0, "failed": 0, "cancelled": 0, "pending": 0, "in_progress": 0}
     for row in status_rows:
         status = str(row.get("status") or "")
         batches = int(row.get("batches") or 0)
         totals["total"] += batches
         if status in totals:
             totals[status] += batches
-    totals["terminal"] = totals["done"] + totals["failed"]
+    totals["terminal"] = totals["done"] + totals["failed"] + totals["cancelled"]
     totals["unfinished"] = totals["pending"] + totals["in_progress"]
     return totals
+
+
+def investigation_status(investigation_id: str) -> str:
+    return str(
+        scalar(
+            f"""
+SELECT status
+FROM analytics.llm_investigations FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+"""
+        )
+        or ""
+    )
+
+
+def mark_investigation_status(investigation_id: str, status: str) -> None:
+    command(
+        f"""
+INSERT INTO analytics.llm_investigations
+SELECT
+  investigation_id,
+  user_question,
+  time_from,
+  time_to,
+  source_name,
+  index_like,
+  {sql_string(status)} AS status,
+  created_at,
+  now64(3) AS updated_at
+FROM analytics.llm_investigations FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+"""
+    )
+
+
+def cancel_map_queue(investigation_id: str, reason: str) -> None:
+    command(
+        f"""
+INSERT INTO analytics.llm_map_queue
+(
+  investigation_id,
+  batch_id,
+  batch_no,
+  event_time_from,
+  event_time_to,
+  rows_read,
+  status,
+  locked_by,
+  locked_until,
+  attempt_count,
+  last_error,
+  version,
+  created_at,
+  updated_at
+)
+SELECT
+  investigation_id,
+  batch_id,
+  batch_no,
+  event_time_from,
+  event_time_to,
+  rows_read,
+  'cancelled',
+  locked_by,
+  locked_until,
+  attempt_count,
+  {sql_string(reason[:1000])},
+  {version_expr("batch_no")},
+  created_at,
+  now64(3)
+FROM analytics.llm_map_queue FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+  AND status IN ('pending', 'in_progress', 'failed')
+"""
+    )
+
+
+def cancel_running_queries(workflow_token: str) -> None:
+    if not workflow_token:
+        return
+    try:
+        command(
+            f"""
+KILL QUERY
+WHERE position(query, {sql_string(workflow_token)}) > 0
+ASYNC
+"""
+        )
+    except Exception:
+        pass
+
+
+def cancel_log_analysis_internal(investigation_id: str, workflow_token: str, reason: str) -> None:
+    cancel_running_queries(workflow_token)
+    mark_investigation_status(investigation_id, "cancelled")
+    cancel_map_queue(investigation_id, reason)
 
 
 def claimable_map_batches(investigation_id: str, max_attempts: int) -> int:
@@ -446,6 +547,7 @@ def run_log_map_step(
     max_output_tokens: int = 100000,
     worker_index: int = 0,
     worker_count: int = 1,
+    workflow_token: str = "",
 ) -> Dict[str, Any]:
     """Run one bounded Map-LLM step through ClickHouse aiGenerate."""
     ensure_schema()
@@ -522,9 +624,11 @@ WHERE investigation_id = {sql_string(investigation_id)}
         return {"investigation_id": investigation_id, "claimed": 0, "queue": queue_status(investigation_id)}
 
     prompt = read_file(os.getenv("MAP_PROMPT_FILE", "/workspace/prompts/map_compressed_logs.en.txt"))
+    marker = sql_comment(f"ADS_LOG_WORKFLOW_MAP investigation_id={investigation_id} lease_id={lease_id} token={workflow_token}")
     try:
         command(
             f"""
+/* {marker} */
 INSERT INTO analytics.llm_map_results
 SELECT
   q.investigation_id,
@@ -566,10 +670,14 @@ SETTINGS
   ai_function_max_input_tokens_per_query = {max_input_tokens},
   ai_function_max_output_tokens_per_query = {max_output_tokens},
   ai_function_request_timeout_sec = {request_timeout_sec},
-  ai_function_max_retries = {ai_retries}
+  ai_function_max_retries = {ai_retries},
+  max_execution_time = {int(request_timeout_sec) + 30}
 """
         )
-    except Exception as exc:
+    except BaseException as exc:
+        cancel_running_queries(workflow_token)
+        queue_status_value = "cancelled" if investigation_status(investigation_id) == "cancelled" else "failed"
+        error_text = "Cancelled while running map step" if queue_status_value == "cancelled" else str(exc)[:1000]
         command(
             f"""
 INSERT INTO analytics.llm_map_queue
@@ -580,11 +688,11 @@ SELECT
   event_time_from,
   event_time_to,
   rows_read,
-  'failed',
+  {sql_string(queue_status_value)},
   locked_by,
   locked_until,
   attempt_count,
-  {sql_string(str(exc)[:1000])},
+  {sql_string(error_text)},
   {version_expr("batch_no")},
   created_at,
   now64(3)
@@ -594,7 +702,15 @@ WHERE investigation_id = {sql_string(investigation_id)}
   AND locked_by = {sql_string(lease_id)}
 """
         )
-        return {"investigation_id": investigation_id, "claimed": claimed, "status": "failed", "error": str(exc)[:1000], "queue": queue_status(investigation_id)}
+        if not isinstance(exc, Exception):
+            raise
+        return {
+            "investigation_id": investigation_id,
+            "claimed": claimed,
+            "status": queue_status_value,
+            "error": error_text,
+            "queue": queue_status(investigation_id),
+        }
 
     command(
         f"""
@@ -655,7 +771,12 @@ WHERE q.investigation_id = {sql_string(investigation_id)}
     return {"investigation_id": investigation_id, "claimed": claimed, "status": "done", "queue": queue_status(investigation_id)}
 
 
-def run_log_reduce(investigation_id: str, group_size: int = 50, request_timeout_sec: int = 240) -> Dict[str, Any]:
+def run_log_reduce(
+    investigation_id: str,
+    group_size: int = 50,
+    request_timeout_sec: int = 240,
+    workflow_token: str = "",
+) -> Dict[str, Any]:
     """Run reduce over stored map results and store reduce summaries."""
     group_size = max(1, min(int(group_size), 200))
     status_rows = queue_status(investigation_id)
@@ -703,10 +824,12 @@ WHERE investigation_id = {sql_string(investigation_id)}
         or ""
     )
     question_context = normalize_reduce_question(stored_question)
+    marker = sql_comment(f"ADS_LOG_WORKFLOW_REDUCE investigation_id={investigation_id} token={workflow_token}")
     if map_rows <= group_size:
         refined_sql = refined_sql_for_investigation(investigation_id)
         command(
             f"""
+/* {marker} */
 INSERT INTO analytics.llm_reduce_results
 SELECT
   i.investigation_id,
@@ -750,7 +873,8 @@ SETTINGS
   ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
   ai_function_max_output_tokens_per_query = 4096,
   ai_function_request_timeout_sec = {request_timeout_sec},
-  ai_function_max_retries = 2
+  ai_function_max_retries = 2,
+  max_execution_time = {int(request_timeout_sec) + 30}
 """
         )
         status = get_log_investigation_status(investigation_id)
@@ -761,6 +885,7 @@ SETTINGS
 
     command(
         f"""
+/* {marker} level=1 */
 INSERT INTO analytics.llm_reduce_results
 SELECT
   investigation_id,
@@ -797,11 +922,13 @@ SETTINGS
   ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
   ai_function_max_output_tokens_per_query = 4096,
   ai_function_request_timeout_sec = {request_timeout_sec},
-  ai_function_max_retries = 2
+  ai_function_max_retries = 2,
+  max_execution_time = {int(request_timeout_sec) + 30}
 """
     )
     command(
         f"""
+/* {marker} level=2 */
 INSERT INTO analytics.llm_reduce_results
 SELECT
   i.investigation_id,
@@ -839,7 +966,8 @@ SETTINGS
   ai_function_max_input_tokens_per_query = {DEFAULT_REDUCE_CONTEXT_TOKENS},
   ai_function_max_output_tokens_per_query = 4096,
   ai_function_request_timeout_sec = {request_timeout_sec},
-  ai_function_max_retries = 2
+  ai_function_max_retries = 2,
+  max_execution_time = {int(request_timeout_sec) + 30}
 """
     )
     status = get_log_investigation_status(investigation_id)
@@ -942,7 +1070,10 @@ GROUP BY reduce_level
 ORDER BY reduce_level
 """
     )
-    if totals["total"] == 0:
+    inv_status = investigation_status(investigation_id)
+    if inv_status == "cancelled":
+        status = "cancelled"
+    elif totals["total"] == 0:
         status = "empty"
     elif totals["unfinished"] > 0 or claimable_map_batches(investigation_id, DEFAULT_WORKFLOW_MAP_MAX_ATTEMPTS) > 0:
         status = "running"
@@ -1025,7 +1156,7 @@ LIMIT 10
     }
 
 
-def run_log_analysis(
+async def run_log_analysis(
     user_question: str,
     time_from: Optional[str] = None,
     time_to: Optional[str] = None,
@@ -1047,74 +1178,106 @@ def run_log_analysis(
     until the workflow is done, blocked, or the runtime limit is reached.
     """
     started = time.monotonic()
+    workflow_token = "adswf-" + uuid.uuid4().hex
+    current_id = ""
     map_claim_size = max(1, min(int(map_claim_size), 10))
     map_max_attempts = max(1, min(int(map_max_attempts), 5))
     max_runtime_sec = max(60, min(int(max_runtime_sec), 7200))
 
-    investigation = create_log_investigation(
-        user_question=user_question,
-        time_from=time_from,
-        time_to=time_to,
-        source_name=source_name,
-        index_like=index_like,
-        investigation_id=investigation_id,
-    )
-    current_id = investigation["investigation_id"]
-    enqueue = enqueue_log_map_batches(current_id)
-
-    map_steps = 0
-    last_step: Dict[str, Any] = {}
-    while True:
-        status_rows = queue_status(current_id)
-        totals = queue_totals(status_rows)
-        claimable = claimable_map_batches(current_id, map_max_attempts)
-
-        if totals["total"] == 0:
-            workflow_status = "empty"
-            break
-        if totals["unfinished"] == 0 and claimable == 0:
-            workflow_status = "mapped"
-            break
-        if claimable == 0:
-            workflow_status = "blocked"
-            break
-        if time.monotonic() - started >= max_runtime_sec:
-            workflow_status = "running"
-            break
-
-        last_step = run_log_map_step(
-            current_id,
-            claim_size=map_claim_size,
-            max_attempts=map_max_attempts,
-            request_timeout_sec=map_request_timeout_sec,
+    try:
+        investigation = await asyncio.to_thread(
+            create_log_investigation,
+            user_question=user_question,
+            time_from=time_from,
+            time_to=time_to,
+            source_name=source_name,
+            index_like=index_like,
+            investigation_id=investigation_id,
         )
-        map_steps += 1
+        current_id = investigation["investigation_id"]
+        enqueue = await asyncio.to_thread(enqueue_log_map_batches, current_id)
 
-    reduce_result: Dict[str, Any] = {}
-    current_status = get_log_analysis_status(current_id)
-    current_totals = current_status["batches"]
-    if current_totals["unfinished"] == 0 and current_totals["done"] > 0:
-        reduce_result = run_log_reduce(
-            current_id,
-            group_size=reduce_group_size,
-            request_timeout_sec=reduce_request_timeout_sec,
+        map_steps = 0
+        last_step: Dict[str, Any] = {}
+        while True:
+            status_rows = await asyncio.to_thread(queue_status, current_id)
+            totals = queue_totals(status_rows)
+            claimable = await asyncio.to_thread(claimable_map_batches, current_id, map_max_attempts)
+
+            if investigation_status(current_id) == "cancelled":
+                workflow_status = "cancelled"
+                break
+            if totals["total"] == 0:
+                workflow_status = "empty"
+                break
+            if totals["unfinished"] == 0 and claimable == 0:
+                workflow_status = "mapped"
+                break
+            if claimable == 0:
+                workflow_status = "blocked"
+                break
+            if time.monotonic() - started >= max_runtime_sec:
+                workflow_status = "running"
+                break
+
+            last_step = await asyncio.to_thread(
+                run_log_map_step,
+                current_id,
+                claim_size=map_claim_size,
+                max_attempts=map_max_attempts,
+                request_timeout_sec=map_request_timeout_sec,
+                workflow_token=workflow_token,
+            )
+            map_steps += 1
+            if last_step.get("status") == "cancelled":
+                workflow_status = "cancelled"
+                break
+
+        reduce_result: Dict[str, Any] = {}
+        current_status = await asyncio.to_thread(get_log_analysis_status, current_id)
+        current_totals = current_status["batches"]
+        if workflow_status != "cancelled" and current_totals["unfinished"] == 0 and current_totals["done"] > 0:
+            reduce_result = await asyncio.to_thread(
+                run_log_reduce,
+                current_id,
+                group_size=reduce_group_size,
+                request_timeout_sec=reduce_request_timeout_sec,
+                workflow_token=workflow_token,
+            )
+            workflow_status = "reduced" if has_valid_final_reduce(current_id) else "reduce_failed"
+
+        results = await asyncio.to_thread(get_log_analysis_results, current_id)
+        results.update(
+            {
+                "workflow_status": workflow_status,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "map_steps_executed_inside_mcp": map_steps,
+                "investigation": investigation,
+                "enqueue": enqueue,
+                "last_map_step": last_step,
+                "reduce": reduce_result,
+                "note": "Map queue processing was orchestrated inside ads-log-workflow MCP; Kimi did not need to call per-batch map tools.",
+            }
         )
-        workflow_status = "reduced" if has_valid_final_reduce(current_id) else "reduce_failed"
-
-    results = get_log_analysis_results(current_id)
-    results.update(
-        {
-            "workflow_status": workflow_status,
-            "elapsed_seconds": round(time.monotonic() - started, 3),
-            "map_steps_executed_inside_mcp": map_steps,
-            "investigation": investigation,
-            "enqueue": enqueue,
-            "last_map_step": last_step,
-            "reduce": reduce_result,
-            "note": "Map queue processing was orchestrated inside ads-log-workflow MCP; Kimi did not need to call per-batch map tools.",
-        }
-    )
-    return results
+        return results
+    except asyncio.CancelledError:
+        if current_id:
+            await asyncio.to_thread(
+                cancel_log_analysis_internal,
+                current_id,
+                workflow_token,
+                "Cancelled because the MCP client stopped the request.",
+            )
+        raise
+    except BaseException:
+        if current_id and investigation_status(current_id) == "cancelled":
+            await asyncio.to_thread(
+                cancel_log_analysis_internal,
+                current_id,
+                workflow_token,
+                "Cancelled while cleaning up interrupted workflow.",
+            )
+        raise
 
 
 mcp.add_tool(Tool.from_function(run_log_analysis))

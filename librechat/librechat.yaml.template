@@ -15,7 +15,6 @@ fileConfig:
 
 mcpSettings:
   allowedDomains:
-    - "http://mcp-clickhouse:8000"
     - "http://mcp-log-workflow:8000"
     - "http://mcp-grafana:8000"
     - "http://langfuse-web:3000"
@@ -55,41 +54,8 @@ mcpServers:
       The map queue is an internal workflow mechanism: ClickHouse stores the queue and executes aiGenerate map/reduce SQL; ads-log-workflow MCP repeats the internal steps until completion, timeout, or a terminal partial result.
       Use get_log_analysis_status only when the user asks for progress on a known investigation_id.
       Use get_log_analysis_results only when the user asks for results of a known investigation_id.
-      This server starts controlled ClickHouse write jobs. Do not use it for arbitrary SELECT queries; use the ClickHouse MCP server for read-only data access and final result checks.
+      This server starts controlled ClickHouse jobs and returns the final map/reduce results. Do not use separate low-level ClickHouse tools for ADS-2 log analysis.
       The workflow stores the user question and period in ${ADS_LLM_INVESTIGATIONS_FQN}, tracks batch processing in ${ADS_LLM_MAP_QUEUE_FQN}, stores per-batch map summaries in ${ADS_LLM_MAP_RESULTS_FQN}, and stores reduce/final summaries in ${ADS_LLM_REDUCE_RESULTS_FQN}.
-
-  clickhouse:
-    type: sse
-    url: http://mcp-clickhouse:8000/sse
-    timeout: 60000
-    serverInstructions: |
-      Use this ClickHouse MCP server for analytics questions. Do not answer database questions from memory.
-      Interpret the user's question, inspect the ClickHouse schema when needed, run a single-use SELECT query through the ClickHouse MCP tools, and answer only from returned rows.
-      Never add ClickHouse FORMAT clauses such as FORMAT JSON, FORMAT Vertical, FORMAT Pretty, or FORMAT Native to MCP queries; the MCP server controls response formatting.
-      ClickHouse toDayOfWeek uses ISO numbering: Monday=1 through Sunday=7. For weekend/weekday analysis, use IN (6, 7) for weekends; never IN (1, 7).
-      For ADS analytics, prefer the ${ADS_ANALYTICS_DATABASE} database unless the user explicitly asks for another database.
-      When the user asks for a chart, dashboard, visualization, metric, distribution, dependency, correlation, ranking, aggregation, or comparison, treat it as a data-analysis request and use ClickHouse before answering.
-      Select tables and columns dynamically from the schema. If table or column names are unclear, query system.columns for candidate tables/columns and validate with a small SELECT before the final query.
-      Do not write Python, SQL-only instructions, or synthetic-data examples when ClickHouse data and Grafana tools are available.
-      When rendering query results to the user, preserve returned column values exactly. Do not recompute, infer, or manually change numeric cells while converting tool rows into a table.
-      For every broad Elasticsearch/raw-log analytics question, prefer the ADS ClickHouse MapReduce artifacts:
-      ${ADS_LLM_INVESTIGATIONS_FQN}, ${ADS_LLM_MAP_QUEUE_FQN}, ${ADS_LLM_MAP_RESULTS_FQN}, and ${ADS_LLM_REDUCE_RESULTS_FQN}.
-      First check whether a matching completed or in-progress investigation already exists for the same question, time range, source, and index scope.
-      If no suitable investigation exists, call ads-log-workflow.run_log_analysis once. Do not manually create investigations, enqueue batches, run map steps, or run reduce.
-      Read-only ClickHouse MCP must be used for SELECT-only inspection: schema checks, queue status, map/reduce result previews, final SELECT execution, and dashboard data validation.
-      Do not run aiGenerate, INSERT, UPDATE, ALTER, DROP, or materialization jobs through this read-only ClickHouse MCP. Use ads-log-workflow MCP for those controlled jobs.
-      Never SELECT compressed_json directly into chat except a tiny left(compressed_json, N) sample with N <= 2000.
-      For compressed log batches (${ADS_LLM_COMPRESSED_BATCHES_FQN}), aggregate inside ClickHouse and return only grouped counts, services, templates, time windows, and compact evidence.
-      The compact map input view (${ADS_LLM_MAP_BATCH_INPUTS_FQN}) is the LLM-facing representation of each compressed batch; prefer it over raw compressed_json when explaining what map-LLM saw.
-      When reduce results contain refined_sql, read that SQL and execute it at most once through ClickHouse MCP if the user needs checked numbers or a Grafana visualization.
-      A successful SELECT that returned any rows is final for that answer. Never execute it again because the UI shows "Show more", truncates rows, or omits later time buckets. For a requested chart, immediately pass the exact successful SQL to Grafana; summarize only the visible aggregates and let Grafana execute the complete series.
-      Null, NaN, zero, empty-array, epoch, or otherwise sparse values in a successful SELECT are valid analytical results, not a tool failure. Interpret them as missing evidence or no detected signal. Never retry, rewrite, or rerun the same SELECT merely to replace sparse values; proceed to Grafana when requested, or explain the limitation.
-      Keep interactive diagnostic SELECT results bounded to at most 500 rows. Never execute a broad full-period time-series query in chat merely to validate a Grafana panel; Grafana must execute that panel query itself.
-      Do not try to load millions of raw log rows or full compressed batches directly into a single chat response. Use bounded samples interactively and use the ADS MapReduce workflow for full-period log analysis.
-      Use concise neutral Russian. Do not show internal reasoning, fake tool JSON, or raw MCP payloads.
-      Do not invent tables, columns, rows, metrics, URLs, or values. If the schema/data does not support the question, say that clearly.
-      Prefer aggregate queries in ClickHouse for analytical questions; LibreChat and the model should only interpret the user request and explain the result.
-      Use concise neutral Russian. Do not use playful filler words such as "Почемучка", "Почемуче", or "Почемучу".
 
   grafana:
     type: sse
@@ -100,7 +66,7 @@ mcpServers:
       For ADS-2 log-analysis results, create or update the dashboard by calling create_grafana_dashboard_from_analysis with the investigation_id returned by run_log_analysis.
       create_grafana_dashboard_from_analysis is a high-level tool: it reads the investigation period and reduce/map results itself and builds the dashboard queries internally.
       If the user asks to "make/build/draw/create a graph/chart/dashboard", do not stop after returning tabular data. Create or update a Grafana dashboard/panel and return the dashboard link.
-      Do not ask ClickHouse MCP to build, validate, or rerun dashboard queries for ADS-2 log-analysis dashboards.
+      Do not ask for separate low-level database tools to build, validate, or rerun dashboard queries for ADS-2 log-analysis dashboards.
       Never append FORMAT JSONEachRow, FORMAT JSON, or any other FORMAT clause to Grafana ClickHouse rawSql. The Grafana datasource controls the wire format.
       When returning a Grafana dashboard or panel link to the user, always use the external Grafana base URL ${GRAFANA_BASE_URL}. Do not use the LibreChat URL, the current browser origin, or localhost:3080 for Grafana links.
       If a Grafana tool returns a relative URL such as /d/<uid>/<slug>, convert it to ${GRAFANA_BASE_URL}/d/<uid>/<slug> before answering.
