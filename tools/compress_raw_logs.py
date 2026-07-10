@@ -82,16 +82,17 @@ def insert_query(args: argparse.Namespace, batch_no: int, last_time: str | None,
     return f"""
 INSERT INTO {args.compressed_table}
 SELECT
-  concat(meta.source_name, ':', meta.index_name, ':', toString({batch_no})) AS batch_id,
-  meta.source_name,
-  meta.index_name,
+  concat(batch.source_name, ':', batch.index_name, ':', toString({batch_no})) AS batch_id,
+  batch.source_name,
+  batch.index_name,
   {batch_no} AS batch_no,
-  meta.event_time_from,
-  meta.event_time_to,
-  meta.rows_read,
-  meta.raw_chars,
-  length(comp.compressed_json) AS compressed_chars,
-  comp.compressed_json,
+  batch.event_time_from,
+  batch.event_time_to,
+  batch.document_id_to,
+  batch.rows_read,
+  batch.raw_chars,
+  length(batch.compressed_json) AS compressed_chars,
+  batch.compressed_json,
   now64(3) AS created_at
 FROM
 (
@@ -100,16 +101,13 @@ FROM
     index_name,
     min(event_time) AS event_time_from,
     max(event_time) AS event_time_to,
+    argMax(document_id, tuple(event_time, document_id)) AS document_id_to,
     count() AS rows_read,
-    sum(length(document_json)) AS raw_chars
+    sum(length(document_json)) AS raw_chars,
+    log_compress_json(arrayStringConcat(groupArray(document_json), '\\n')) AS compressed_json
   FROM ({batch_select})
   GROUP BY source_name, index_name
-) AS meta
-CROSS JOIN
-(
-  SELECT log_compress_json(arrayStringConcat(groupArray(document_json), '\\n')) AS compressed_json
-  FROM ({batch_select})
-) AS comp
+) AS batch
 """
 
 
@@ -117,8 +115,8 @@ def existing_state(args: argparse.Namespace) -> tuple[int, str | None, str | Non
     query = f"""
 SELECT
   ifNull(max(batch_no), -1),
-  argMax(toString(event_time_to), batch_no),
-  argMax(batch_id, batch_no)
+  argMax(toString(event_time_to), tuple(batch_no, event_time_to, document_id_to)),
+  argMax(document_id_to, tuple(batch_no, event_time_to, document_id_to))
 FROM {args.compressed_table}
 WHERE source_name = {sql_string(args.source_name)}
   AND index_name LIKE {sql_string(args.index_like)}
@@ -127,11 +125,14 @@ FORMAT TabSeparatedRaw
     out = http_query(args.clickhouse_url, args.user, args.password, args.database, query).strip()
     if not out:
         return 0, None, None
-    max_batch_raw, time_to, batch_id = out.split("\t")
+    max_batch_raw, time_to, document_id_to = out.split("\t")
     max_batch = int(max_batch_raw)
     if max_batch < 0:
         return 0, None, None
-    # Resume is intentionally conservative: use the recorded event_time_to and the max document_id at that time.
+    if document_id_to:
+        return max_batch + 1, time_to, document_id_to
+
+    # Backward-compatible fallback for compressed rows written before document_id_to existed.
     document_query = f"""
 SELECT document_id
 FROM {args.raw_table}

@@ -30,6 +30,14 @@ cd "$ROOT_DIR"
 
 # Поднимаем ClickHouse, официальный ClickHouse MCP и HTTP-режим elasticsearch-connector.
 docker compose up -d clickhouse mcp-clickhouse
+
+# На чистом volume эти SQL уже выполняет ClickHouse init. На старом volume init
+# пропускается, поэтому перед импортом явно доприменяем нужную demo-схему.
+sh tools/run_sql.sh clickhouse/init/001_schema.sql
+sh tools/run_sql.sh clickhouse/init/003_ads2_mapreduce.sql
+sh tools/run_sql.sh clickhouse/init/004_drop_legacy_llm_refinement.sql
+sh tools/run_sql.sh clickhouse/init/005_compressed_batch_cursor.sql
+
 docker compose up -d --build --force-recreate elasticsearch-connector
 
 # Ждем health endpoint connector'а, чтобы /batch не ушел слишком рано.

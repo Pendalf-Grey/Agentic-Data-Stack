@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS analytics.es_log_compressed_batches
   batch_no UInt64,
   event_time_from DateTime64(3, 'UTC'),
   event_time_to DateTime64(3, 'UTC'),
+  document_id_to String DEFAULT '',
   rows_read UInt64,
   raw_chars UInt64,
   compressed_chars UInt64,
