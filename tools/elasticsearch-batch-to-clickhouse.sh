@@ -37,6 +37,8 @@ sh tools/run_sql.sh clickhouse/init/001_schema.sql
 sh tools/run_sql.sh clickhouse/init/003_ads2_mapreduce.sql
 sh tools/run_sql.sh clickhouse/init/004_drop_legacy_llm_refinement.sql
 sh tools/run_sql.sh clickhouse/init/005_compressed_batch_cursor.sql
+sh tools/run_sql.sh clickhouse/init/006_create_map_batch_inputs.sql
+sh tools/run_sql.sh clickhouse/init/007_drop_legacy_demo_tables.sql
 
 docker compose up -d --build --force-recreate elasticsearch-connector
 

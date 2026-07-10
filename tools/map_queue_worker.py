@@ -144,6 +144,10 @@ GROUP BY investigation_id, status
 """
 
 
+def create_map_batch_inputs_view_sql() -> str:
+    return (REPO_ROOT / "clickhouse/init/006_create_map_batch_inputs.sql").read_text(encoding="utf-8")
+
+
 def require_investigation_id(args: argparse.Namespace) -> str:
     if not args.investigation_id:
         raise SystemExit("Set --investigation-id or INVESTIGATION_ID.")
@@ -462,6 +466,7 @@ def main() -> int:
         run_query(args, create_prompts_table_sql())
         run_query(args, create_queue_table_sql())
         run_query(args, create_queue_status_view_sql())
+        run_query(args, create_map_batch_inputs_view_sql())
     if args.create_schema or args.sync_prompts or args.prompts_only:
         sync_map_prompt(args)
     if args.prompts_only:

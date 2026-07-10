@@ -50,6 +50,7 @@ do
 done
 
 sh tools/run_sql.sh clickhouse/init/005_compressed_batch_cursor.sql >/dev/null
+sh tools/run_sql.sh clickhouse/init/006_create_map_batch_inputs.sql >/dev/null
 
 python3 tools/compress_raw_logs.py \
   --clickhouse-url "${CLICKHOUSE_URL:-http://localhost:8123}" \
