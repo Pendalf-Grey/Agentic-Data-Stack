@@ -1,15 +1,19 @@
 import os
 import asyncio
+import hmac
 import json
 import socket
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import clickhouse_connect
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.tools import Tool
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 
 EPOCH = "toDateTime64('1970-01-01 00:00:00.000', 3, 'UTC')"
@@ -18,8 +22,12 @@ DEFAULT_INDEX_LIKE = os.getenv("ADS_LLM_LOG_INDEX_LIKE", os.getenv("LOGS_INDEX_L
 DEFAULT_MAP_CONTEXT_TOKENS = int(os.getenv("LLM_MAP_CONTEXT_TOKENS", "132000"))
 DEFAULT_REDUCE_CONTEXT_TOKENS = int(os.getenv("LLM_REDUCE_CONTEXT_TOKENS", "256000"))
 DEFAULT_WORKFLOW_MAX_RUNTIME_SEC = int(os.getenv("ADS_LLM_WORKFLOW_MAX_RUNTIME_SEC", "1200"))
-DEFAULT_WORKFLOW_MAP_CLAIM_SIZE = int(os.getenv("ADS_LLM_WORKFLOW_MAP_CLAIM_SIZE", "4"))
+DEFAULT_WORKFLOW_MAP_CLAIM_SIZE = int(os.getenv("ADS_LLM_WORKFLOW_MAP_CLAIM_SIZE", "1"))
+DEFAULT_WORKFLOW_MAP_WORKER_COUNT = int(os.getenv("ADS_LLM_WORKFLOW_MAP_WORKER_COUNT", "8"))
+MAX_MAP_INPUT_ROWS = 5000
 DEFAULT_WORKFLOW_MAP_MAX_ATTEMPTS = int(os.getenv("ADS_LLM_WORKFLOW_MAP_MAX_ATTEMPTS", "2"))
+RECENT_INVESTIGATION_REUSE_SEC = int(os.getenv("ADS_LLM_INVESTIGATION_REUSE_SEC", "1800"))
+WORKFLOW_CONTROL_TOKEN = os.getenv("ADS_WORKFLOW_CONTROL_TOKEN", "")
 
 mcp = FastMCP(name="ads-log-mapreduce")
 
@@ -68,6 +76,24 @@ def read_file(path_value: str) -> str:
 
 
 def ensure_schema() -> None:
+    command(
+        """
+CREATE TABLE IF NOT EXISTS analytics.llm_map_inputs
+(
+  investigation_id String,
+  batch_id String,
+  batch_no UInt64,
+  event_time_from DateTime64(3, 'UTC'),
+  event_time_to DateTime64(3, 'UTC'),
+  rows_read UInt64,
+  map_input_json String,
+  created_at DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(created_at)
+PARTITION BY toYYYYMM(event_time_from)
+ORDER BY (investigation_id, batch_no, batch_id)
+"""
+    )
     command(
         """
 CREATE TABLE IF NOT EXISTS analytics.llm_prompts
@@ -168,6 +194,14 @@ def queue_totals(status_rows: List[Dict[str, Any]]) -> Dict[str, int]:
     return totals
 
 
+def progress_message(phase: str, totals: Dict[str, int]) -> str:
+    return (
+        f"{phase}. Батчей: всего {totals['total']}, готово {totals['done']}, "
+        f"в работе {totals['in_progress']}, в очереди {totals['pending']}, "
+        f"ошибок {totals['failed']}."
+    )
+
+
 def investigation_status(investigation_id: str) -> str:
     return str(
         scalar(
@@ -243,14 +277,19 @@ WHERE investigation_id = {sql_string(investigation_id)}
     )
 
 
-def cancel_running_queries(workflow_token: str) -> None:
-    if not workflow_token:
+def cancel_running_queries(workflow_token: str = "", investigation_id: str = "") -> None:
+    conditions = []
+    if workflow_token:
+        conditions.append(f"position(query, {sql_string(workflow_token)}) > 0")
+    if investigation_id:
+        conditions.append(f"position(query, {sql_string(investigation_id)}) > 0")
+    if not conditions:
         return
     try:
         command(
             f"""
 KILL QUERY
-WHERE position(query, {sql_string(workflow_token)}) > 0
+WHERE {" OR ".join(conditions)}
 ASYNC
 """
         )
@@ -259,9 +298,35 @@ ASYNC
 
 
 def cancel_log_analysis_internal(investigation_id: str, workflow_token: str, reason: str) -> None:
-    cancel_running_queries(workflow_token)
+    cancel_running_queries(workflow_token, investigation_id)
     mark_investigation_status(investigation_id, "cancelled")
     cancel_map_queue(investigation_id, reason)
+
+
+@mcp.custom_route("/internal/ads/workflow/cancel", methods=["POST"], include_in_schema=False)
+async def cancel_log_analysis_request(request: Request) -> JSONResponse:
+    received_token = request.headers.get("X-ADS-Workflow-Control-Token", "")
+    if not WORKFLOW_CONTROL_TOKEN or not hmac.compare_digest(received_token, WORKFLOW_CONTROL_TOKEN):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    investigation_id = str(payload.get("investigation_id", ""))
+    if not investigation_id.startswith("log-investigation-") or len(investigation_id) != 30:
+        return JSONResponse({"error": "Invalid investigation_id"}, status_code=400)
+    if not investigation_status(investigation_id):
+        return JSONResponse({"error": "Unknown investigation_id"}, status_code=404)
+
+    await asyncio.to_thread(
+        cancel_log_analysis_internal,
+        investigation_id,
+        "",
+        "Cancelled by LibreChat.",
+    )
+    return JSONResponse({"investigation_id": investigation_id, "status": "cancelled"})
 
 
 def claimable_map_batches(investigation_id: str, max_attempts: int) -> int:
@@ -361,9 +426,21 @@ def compact_reduce_schema_context() -> str:
 def reduce_json_instruction() -> str:
     return (
         "Return minified valid JSON only. "
-        "Keys: executive_summary, root_causes, top_services, latency_findings, recommendations, confidence. "
-        "Arrays max 3 strings. No markdown."
+        "Keys: executive_summary, root_causes, top_services, latency_findings, recommendations. "
+        "Arrays max 3 strings. No markdown. "
+        "Write every human-readable string value in Russian (Cyrillic); preserve service identifiers, host names, metric names, error codes, SQL, JSON keys, and timestamps unchanged."
     )
+
+
+def without_reduce_confidence(summary_json: str) -> str:
+    try:
+        summary = json.loads(summary_json)
+    except (TypeError, json.JSONDecodeError):
+        return summary_json
+    if not isinstance(summary, dict) or "confidence" not in summary:
+        return summary_json
+    summary.pop("confidence", None)
+    return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
 
 
 def normalize_reduce_question(user_question: str) -> str:
@@ -412,6 +489,39 @@ WHERE investigation_id = {sql_string(investigation_id)}
         )
         or 0
     )
+
+
+def find_recent_investigation(
+    time_from: Optional[str],
+    time_to: Optional[str],
+    source_name: str,
+    index_like: str,
+) -> Optional[Dict[str, Any]]:
+    """Return a recent active or completed investigation for the exact period."""
+    if not time_from or not time_to or RECENT_INVESTIGATION_REUSE_SEC <= 0:
+        return None
+    matching = rows(
+        f"""
+SELECT
+  investigation_id,
+  status,
+  time_from,
+  time_to,
+  source_name,
+  index_like,
+  updated_at
+FROM analytics.llm_investigations FINAL
+WHERE source_name = {sql_string(source_name)}
+  AND index_like = {sql_string(index_like)}
+  AND time_from = toDateTime64({sql_string(time_from)}, 3, 'UTC')
+  AND time_to = toDateTime64({sql_string(time_to)}, 3, 'UTC')
+  AND status IN ('running', 'reduced')
+  AND updated_at >= now64(3) - INTERVAL {int(RECENT_INVESTIGATION_REUSE_SEC)} SECOND
+ORDER BY updated_at DESC
+LIMIT 1
+"""
+    )
+    return matching[0] if matching else None
 
 
 def create_log_investigation(
@@ -472,10 +582,234 @@ VALUES
     }
 
 
+def slice_map_run(run: Dict[str, Any], offset: int, count: int) -> Dict[str, Any]:
+    part = dict(run)
+    part["count"] = count
+    first_index = run.get("first_record_index")
+    last_index = run.get("last_record_index")
+    if first_index is not None and last_index is not None:
+        part["first_record_index"] = int(first_index) + offset
+        part["last_record_index"] = int(first_index) + offset + count - 1
+    return part
+
+
+def split_map_runs(runs: List[Dict[str, Any]], source_rows: int) -> List[List[Dict[str, Any]]]:
+    """Split one stored compressed batch into Map inputs bounded by raw-row count."""
+    fragments: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_rows = 0
+    remaining_source_rows = source_rows
+    for run in runs:
+        remaining_run_rows = min(int(run.get("count") or 0), remaining_source_rows)
+        offset = 0
+        while remaining_run_rows > 0:
+            take = min(remaining_run_rows, MAX_MAP_INPUT_ROWS - current_rows)
+            current.append(slice_map_run(run, offset, take))
+            current_rows += take
+            offset += take
+            remaining_run_rows -= take
+            remaining_source_rows -= take
+            if current_rows == MAX_MAP_INPUT_ROWS:
+                fragments.append(current)
+                current = []
+                current_rows = 0
+        if remaining_source_rows == 0:
+            break
+    if current:
+        fragments.append(current)
+    if sum(sum(int(run.get("count") or 0) for run in fragment) for fragment in fragments) != source_rows:
+        raise ValueError("Compressed batch does not contain enough RLE rows for its declared rows_read.")
+    return fragments
+
+
+def map_fragment_payload(base: Dict[str, Any], fragment: List[Dict[str, Any]], virtual_batch_id: str) -> str:
+    payload = json.loads(str(base["compressed_json"]))
+    templates = {str(item.get("id") or ""): item for item in payload.get("templates") or []}
+    stats: Dict[str, Dict[str, Any]] = {}
+    for run in fragment:
+        template_id = str(run.get("template_id") or "")
+        item = stats.setdefault(
+            template_id,
+            {"count": 0, "first_seen": None, "last_seen": None, "services": Counter(), "hosts": Counter(), "levels": Counter()},
+        )
+        count = int(run.get("count") or 0)
+        item["count"] += count
+        for value in (run.get("start_time"), run.get("end_time")):
+            if value:
+                value = str(value)
+                item["first_seen"] = min(item["first_seen"], value) if item["first_seen"] else value
+                item["last_seen"] = max(item["last_seen"], value) if item["last_seen"] else value
+        for field, counter_name in (("service", "services"), ("host", "hosts"), ("level", "levels")):
+            if run.get(field):
+                item[counter_name][str(run[field])] += count
+
+    def top_value(counter: Counter) -> str:
+        return str(counter.most_common(1)[0][0]) if counter else ""
+
+    important_templates = []
+    for template_id, item in sorted(stats.items()):
+        source_template = templates.get(template_id, {})
+        important_templates.append(
+            {
+                "template_id": template_id,
+                "template_text": str(source_template.get("template") or template_id),
+                "event_count": item["count"],
+                "first_seen": item["first_seen"] or "",
+                "last_seen": item["last_seen"] or "",
+                "top_level": top_value(item["levels"]),
+                "top_service": top_value(item["services"]),
+                "top_host": top_value(item["hosts"]),
+            }
+        )
+    signal_words = ("timeout", "degraded", "failed", "exhausted", "backlog", "lock", "ssl", "tls")
+    important_runs = []
+    for run in fragment:
+        template_id = str(run.get("template_id") or "")
+        template_text = str(templates.get(template_id, {}).get("template") or template_id)
+        if str(run.get("level") or "").upper() in ("WARN", "ERROR", "FATAL") or any(
+            word in template_text.lower() for word in signal_words
+        ):
+            important_runs.append(run)
+    selected_runs = (important_runs or fragment)[:80]
+    fragment_rows = sum(int(run.get("count") or 0) for run in fragment)
+    raw_chars = int(base.get("raw_chars") or 0)
+    source_rows = int(base["rows_read"])
+    return json.dumps(
+        {
+            "batch_id": virtual_batch_id,
+            "source_batch_id": base["batch_id"],
+            "source_name": base["source_name"],
+            "index_name": base["index_name"],
+            "batch_no": base["batch_no"],
+            "event_time_from": str(base["event_time_from"]),
+            "event_time_to": str(base["event_time_to"]),
+            "rows_read": fragment_rows,
+            "raw_chars": round(raw_chars * fragment_rows / source_rows) if raw_chars and source_rows else 0,
+            "important_templates": important_templates,
+            "important_runs": [
+                {
+                    "template_id": str(run.get("template_id") or ""),
+                    "template_text": str(templates.get(str(run.get("template_id") or ""), {}).get("template") or ""),
+                    "run_count": int(run.get("count") or 0),
+                    "start_time": str(run.get("start_time") or ""),
+                    "end_time": str(run.get("end_time") or ""),
+                    "service": str(run.get("service") or ""),
+                    "host": str(run.get("host") or ""),
+                    "level": str(run.get("level") or ""),
+                }
+                for run in selected_runs
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def materialize_map_inputs(investigation_id: str) -> Dict[str, int]:
+    base_batches = rows(
+        f"""
+SELECT
+  b.batch_id AS batch_id,
+  b.source_name AS source_name,
+  b.index_name AS index_name,
+  b.batch_no AS batch_no,
+  b.event_time_from AS event_time_from,
+  b.event_time_to AS event_time_to,
+  b.rows_read AS rows_read,
+  b.raw_chars AS raw_chars,
+  b.compressed_json AS compressed_json
+FROM analytics.llm_investigations AS i FINAL
+INNER JOIN analytics.es_log_compressed_batches AS b
+  ON b.source_name = i.source_name
+ AND b.index_name LIKE i.index_like
+ AND b.event_time_to >= i.time_from
+ AND b.event_time_from < i.time_to
+WHERE i.investigation_id = {sql_string(investigation_id)}
+ORDER BY b.event_time_from, b.batch_id
+"""
+    )
+    expected_rows = sum(int(base["rows_read"]) for base in base_batches)
+    existing = rows(
+        f"""
+SELECT
+  count() AS inputs,
+  sum(rows_read) AS total_rows,
+  max(rows_read) AS max_rows
+FROM analytics.llm_map_inputs FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+"""
+    )[0]
+    existing_inputs = int(existing["inputs"] or 0)
+    if existing_inputs:
+        existing_rows = int(existing["total_rows"] or 0)
+        existing_max_rows = int(existing["max_rows"] or 0)
+        if existing_rows == expected_rows and existing_max_rows <= MAX_MAP_INPUT_ROWS:
+            return {"inputs": existing_inputs, "rows_read": existing_rows, "reused": 1}
+        command(
+            f"""
+ALTER TABLE analytics.llm_map_inputs
+DELETE WHERE investigation_id = {sql_string(investigation_id)}
+SETTINGS mutations_sync = 1
+"""
+        )
+    columns = [
+        "investigation_id", "batch_id", "batch_no", "event_time_from", "event_time_to", "rows_read", "map_input_json"
+    ]
+    pending: List[List[Any]] = []
+    virtual_batch_no = 0
+    total_rows = 0
+    for base in base_batches:
+        source_rows = int(base["rows_read"])
+        payload = json.loads(str(base["compressed_json"]))
+        for fragment_no, fragment in enumerate(split_map_runs(payload.get("rle_runs") or [], source_rows)):
+            virtual_batch_id = f"{base['batch_id']}#map-{fragment_no:04d}"
+            fragment_rows = sum(int(run.get("count") or 0) for run in fragment)
+            pending.append(
+                [
+                    investigation_id,
+                    virtual_batch_id,
+                    virtual_batch_no,
+                    base["event_time_from"],
+                    base["event_time_to"],
+                    fragment_rows,
+                    map_fragment_payload(base, fragment, virtual_batch_id),
+                ]
+            )
+            virtual_batch_no += 1
+            total_rows += fragment_rows
+            if len(pending) >= 200:
+                ch_client().insert("analytics.llm_map_inputs", pending, column_names=columns)
+                pending = []
+    if pending:
+        ch_client().insert("analytics.llm_map_inputs", pending, column_names=columns)
+    validation = rows(
+        f"""
+SELECT
+  count() AS inputs,
+  sum(rows_read) AS total_rows,
+  max(rows_read) AS max_rows
+FROM analytics.llm_map_inputs FINAL
+WHERE investigation_id = {sql_string(investigation_id)}
+"""
+    )[0]
+    validation_inputs = int(validation["inputs"] or 0)
+    validation_rows = int(validation["total_rows"] or 0)
+    validation_max_rows = int(validation["max_rows"] or 0)
+    if (
+        validation_inputs != virtual_batch_no
+        or validation_rows != total_rows
+        or total_rows != expected_rows
+        or validation_max_rows > MAX_MAP_INPUT_ROWS
+    ):
+        raise RuntimeError("Virtual Map inputs failed the 5000-row safety validation.")
+    return {"inputs": virtual_batch_no, "rows_read": total_rows, "reused": 0}
+
+
 def enqueue_log_map_batches(investigation_id: str) -> Dict[str, Any]:
-    """Create pending queue rows for all matching compressed log batches."""
+    """Materialize bounded virtual Map inputs and enqueue them for analysis."""
     ensure_schema()
     sync_map_prompt()
+    materialized = materialize_map_inputs(investigation_id)
     command(
         f"""
 INSERT INTO analytics.llm_map_queue
@@ -496,44 +830,39 @@ INSERT INTO analytics.llm_map_queue
   updated_at
 )
 SELECT
-  i.investigation_id,
-  b.batch_id,
-  b.batch_no,
-  b.event_time_from,
-  b.event_time_to,
-  b.rows_read,
+  p.investigation_id,
+  p.batch_id,
+  p.batch_no,
+  p.event_time_from,
+  p.event_time_to,
+  p.rows_read,
   'pending',
   '',
   {EPOCH},
   0,
   '',
-  {version_expr("b.batch_no")},
+  {version_expr("p.batch_no")},
   now64(3),
   now64(3)
-FROM analytics.llm_investigations AS i FINAL
-INNER JOIN analytics.es_log_compressed_batches AS b
-  ON b.source_name = i.source_name
- AND b.index_name LIKE i.index_like
- AND b.event_time_to >= i.time_from
- AND b.event_time_from < i.time_to
-WHERE i.investigation_id = {sql_string(investigation_id)}
-  AND (i.investigation_id, b.batch_id) NOT IN
+FROM analytics.llm_map_inputs AS p FINAL
+WHERE p.investigation_id = {sql_string(investigation_id)}
+  AND (p.investigation_id, p.batch_id) NOT IN
   (
     SELECT investigation_id, batch_id
     FROM analytics.llm_map_queue FINAL
     WHERE investigation_id = {sql_string(investigation_id)}
   )
-  AND (i.investigation_id, b.batch_id) NOT IN
+  AND (p.investigation_id, p.batch_id) NOT IN
   (
     SELECT investigation_id, batch_id
     FROM analytics.llm_map_results FINAL
     WHERE investigation_id = {sql_string(investigation_id)}
       AND isValidJSON(map_summary_json)
   )
-ORDER BY b.batch_no
+ORDER BY p.batch_no
 """
     )
-    return {"investigation_id": investigation_id, "queue": queue_status(investigation_id)}
+    return {"investigation_id": investigation_id, "materialized": materialized, "queue": queue_status(investigation_id)}
 
 
 def run_log_map_step(
@@ -552,7 +881,10 @@ def run_log_map_step(
     """Run one bounded Map-LLM step through ClickHouse aiGenerate."""
     ensure_schema()
     sync_map_prompt()
-    claim_size = max(1, min(int(claim_size), 10))
+    # A worker claims one virtual input at a time: one aiGenerate call equals one Map batch.
+    claim_size = 1
+    worker_count = max(1, min(int(worker_count), 8))
+    worker_index = int(worker_index) % worker_count
     lease_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
     command(
         f"""
@@ -632,30 +964,29 @@ WHERE investigation_id = {sql_string(investigation_id)}
 INSERT INTO analytics.llm_map_results
 SELECT
   q.investigation_id,
-  b.batch_id,
-  b.batch_no,
-  b.event_time_from,
-  b.event_time_to,
-  b.rows_read,
+  q.batch_id,
+  q.batch_no,
+  q.event_time_from,
+  q.event_time_to,
+  q.rows_read,
   aiGenerate(
     concat(
       'Investigation context:',
       '\\nuser_question=', i.user_question,
       '\\ninvestigation_time_from=', toString(i.time_from),
       '\\ninvestigation_time_to=', toString(i.time_to),
-      '\\nbatch_time_from=', toString(b.event_time_from),
-      '\\nbatch_time_to=', toString(b.event_time_to),
-      '\\nmap_input_json=', m.map_input_json
+      '\\nbatch_time_from=', toString(q.event_time_from),
+      '\\nbatch_time_to=', toString(q.event_time_to),
+      '\\nmap_input_json=', p.map_input_json
     ),
     {sql_string(prompt)},
     0.1
   ) AS map_summary_json,
   now64(3) AS created_at
 FROM analytics.llm_map_queue AS q FINAL
-INNER JOIN analytics.es_log_compressed_batches AS b
-  ON b.batch_id = q.batch_id
-INNER JOIN analytics.v_es_log_map_batch_inputs AS m
-  ON m.batch_id = b.batch_id
+INNER JOIN analytics.llm_map_inputs AS p FINAL
+  ON p.investigation_id = q.investigation_id
+ AND p.batch_id = q.batch_id
 INNER JOIN analytics.llm_investigations AS i FINAL
   ON i.investigation_id = q.investigation_id
 WHERE q.investigation_id = {sql_string(investigation_id)}
@@ -900,7 +1231,7 @@ SELECT
       '\\n',
       arrayStringConcat(groupArray(map_summary_json), '\\n')
     ),
-    'You are a level-1 Reduce LLM for SRE log analysis. Compress Map-LLM results into valid JSON only. Keep only root causes, affected services, time windows, ClickHouse filters, evidence, missing data, and confidence. Do not invent data. If you mention SQL filters or tables, use only the supplied ClickHouse schema.',
+    'You are a level-1 Reduce LLM for SRE log analysis. Compress Map-LLM results into valid JSON only. Keep only root causes, affected services, time windows, ClickHouse filters, evidence, and missing data. Do not invent data. Write every human-readable string value in Russian (Cyrillic), while preserving identifiers, metrics, error codes, SQL, JSON keys, and timestamps unchanged. If you mention SQL filters or tables, use only the supplied ClickHouse schema.',
     1.0
   ) AS summary_json,
   '' AS refined_sql,
@@ -1020,6 +1351,8 @@ LIMIT 5
 """
     )
     if reduce_rows:
+        for reduce_row in reduce_rows:
+            reduce_row["summary_json_preview"] = without_reduce_confidence(str(reduce_row["summary_json_preview"]))
         return {"investigation_id": investigation_id, "reduce_results": reduce_rows}
     return {
         "investigation_id": investigation_id,
@@ -1116,6 +1449,8 @@ ORDER BY reduce_level DESC, reduce_group ASC
 LIMIT 5
 """
     )
+    for reduce_row in reduce_rows:
+        reduce_row["summary_json"] = without_reduce_confidence(str(reduce_row["summary_json"]))
     failed_batches = rows(
         f"""
 SELECT
@@ -1164,11 +1499,13 @@ async def run_log_analysis(
     index_like: str = DEFAULT_INDEX_LIKE,
     investigation_id: Optional[str] = None,
     map_claim_size: int = DEFAULT_WORKFLOW_MAP_CLAIM_SIZE,
+    map_worker_count: int = DEFAULT_WORKFLOW_MAP_WORKER_COUNT,
     map_max_attempts: int = DEFAULT_WORKFLOW_MAP_MAX_ATTEMPTS,
     max_runtime_sec: int = DEFAULT_WORKFLOW_MAX_RUNTIME_SEC,
     map_request_timeout_sec: int = 240,
     reduce_request_timeout_sec: int = 360,
     reduce_group_size: int = 50,
+    ctx: Context = None,
 ) -> Dict[str, Any]:
     """Run the complete ADS-2 log MapReduce analysis as one high-level workflow trigger.
 
@@ -1180,11 +1517,64 @@ async def run_log_analysis(
     started = time.monotonic()
     workflow_token = "adswf-" + uuid.uuid4().hex
     current_id = ""
-    map_claim_size = max(1, min(int(map_claim_size), 10))
+    map_claim_size = 1
+    map_worker_count = max(1, min(int(map_worker_count), 8))
     map_max_attempts = max(1, min(int(map_max_attempts), 5))
     max_runtime_sec = max(60, min(int(max_runtime_sec), 7200))
+    last_progress_at = 0.0
+    progress_sequence = 0
+
+    async def publish_progress(phase: str, force: bool = False) -> None:
+        nonlocal last_progress_at, progress_sequence
+        now = time.monotonic()
+        if not force and now - last_progress_at < 30:
+            return
+        if not current_id or ctx is None:
+            return
+
+        status_rows = await asyncio.to_thread(queue_status, current_id)
+        totals = queue_totals(status_rows)
+        progress_sequence += 1
+        try:
+            await ctx.report_progress(
+                progress=progress_sequence,
+                message=(
+                    f"__ADS_INVESTIGATION_ID__={current_id}\n"
+                    f"{progress_message(phase, totals)}"
+                ),
+            )
+        except Exception:
+            # Progress is optional transport feedback and must not stop the investigation.
+            pass
+        last_progress_at = now
 
     try:
+        if investigation_id is None:
+            recent_investigation = await asyncio.to_thread(
+                find_recent_investigation,
+                time_from,
+                time_to,
+                source_name,
+                index_like,
+            )
+            if recent_investigation:
+                current_id = str(recent_investigation["investigation_id"])
+                results = await asyncio.to_thread(get_log_analysis_results, current_id)
+                await publish_progress("Используется существующее расследование", force=True)
+                results.update(
+                    {
+                        "workflow_status": "reused",
+                        "reused_investigation": True,
+                        "investigation": recent_investigation,
+                        "note": (
+                            "A recent investigation for this exact period already exists. "
+                            "Do not call run_log_analysis again. If the user requested a dashboard, "
+                            "call create_grafana_dashboard_from_analysis with this investigation_id."
+                        ),
+                    }
+                )
+                return results
+
         investigation = await asyncio.to_thread(
             create_log_investigation,
             user_question=user_question,
@@ -1196,6 +1586,7 @@ async def run_log_analysis(
         )
         current_id = investigation["investigation_id"]
         enqueue = await asyncio.to_thread(enqueue_log_map_batches, current_id)
+        await publish_progress("Расследование подготовлено", force=True)
 
         map_steps = 0
         last_step: Dict[str, Any] = {}
@@ -1220,16 +1611,38 @@ async def run_log_analysis(
                 workflow_status = "running"
                 break
 
-            last_step = await asyncio.to_thread(
-                run_log_map_step,
-                current_id,
-                claim_size=map_claim_size,
-                max_attempts=map_max_attempts,
-                request_timeout_sec=map_request_timeout_sec,
-                workflow_token=workflow_token,
-            )
-            map_steps += 1
-            if last_step.get("status") == "cancelled":
+            map_tasks = [
+                asyncio.create_task(
+                    asyncio.to_thread(
+                        run_log_map_step,
+                        current_id,
+                        claim_size=map_claim_size,
+                        max_attempts=map_max_attempts,
+                        request_timeout_sec=map_request_timeout_sec,
+                        worker_index=worker_index,
+                        worker_count=map_worker_count,
+                        workflow_token=workflow_token,
+                    )
+                )
+                for worker_index in range(map_worker_count)
+            ]
+            workers_completion = asyncio.gather(*map_tasks)
+            while not all(task.done() for task in map_tasks):
+                await publish_progress("Map: анализ батчей")
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(workers_completion),
+                        timeout=30,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            worker_steps = await workers_completion
+            last_step = {
+                "workers": worker_steps,
+                "claimed": sum(int(step.get("claimed") or 0) for step in worker_steps),
+            }
+            map_steps += len(worker_steps)
+            if any(step.get("status") == "cancelled" for step in worker_steps):
                 workflow_status = "cancelled"
                 break
 
@@ -1237,16 +1650,28 @@ async def run_log_analysis(
         current_status = await asyncio.to_thread(get_log_analysis_status, current_id)
         current_totals = current_status["batches"]
         if workflow_status != "cancelled" and current_totals["unfinished"] == 0 and current_totals["done"] > 0:
-            reduce_result = await asyncio.to_thread(
-                run_log_reduce,
-                current_id,
-                group_size=reduce_group_size,
-                request_timeout_sec=reduce_request_timeout_sec,
-                workflow_token=workflow_token,
+            reduce_task = asyncio.create_task(
+                asyncio.to_thread(
+                    run_log_reduce,
+                    current_id,
+                    group_size=reduce_group_size,
+                    request_timeout_sec=reduce_request_timeout_sec,
+                    workflow_token=workflow_token,
+                )
             )
+            while not reduce_task.done():
+                await publish_progress("Reduce: сведение результатов")
+                try:
+                    await asyncio.wait_for(asyncio.shield(reduce_task), timeout=30)
+                except asyncio.TimeoutError:
+                    pass
+            reduce_result = await reduce_task
             workflow_status = "reduced" if has_valid_final_reduce(current_id) else "reduce_failed"
 
+        if workflow_status not in ("running", "cancelled"):
+            await asyncio.to_thread(mark_investigation_status, current_id, workflow_status)
         results = await asyncio.to_thread(get_log_analysis_results, current_id)
+        await publish_progress("Расследование завершено", force=True)
         results.update(
             {
                 "workflow_status": workflow_status,
@@ -1280,7 +1705,31 @@ async def run_log_analysis(
         raise
 
 
-mcp.add_tool(Tool.from_function(run_log_analysis))
+mcp.add_tool(
+    Tool.from_function(
+        run_log_analysis,
+        description=(
+            "Run the complete ADS-2 log MapReduce investigation once for the user's "
+            "question and time range. This tool returns the final investigation result; "
+            "do not call it again in the same answer. If the user requested a dashboard, "
+            "call create_grafana_dashboard_from_analysis next with the returned investigation_id. "
+            "The log source, index pattern, queue controls, and investigation identifier are "
+            "managed internally."
+        ),
+        exclude_args=[
+            "source_name",
+            "index_like",
+            "investigation_id",
+            "map_claim_size",
+            "map_worker_count",
+            "map_max_attempts",
+            "max_runtime_sec",
+            "map_request_timeout_sec",
+            "reduce_request_timeout_sec",
+            "reduce_group_size",
+        ],
+    )
+)
 mcp.add_tool(Tool.from_function(get_log_analysis_status))
 mcp.add_tool(Tool.from_function(get_log_analysis_results))
 

@@ -49,7 +49,8 @@ mcpServers:
     timeout: 1800000
     serverInstructions: |
       Use this MCP server as a high-level ADS ClickHouse log-analysis workflow trigger.
-      For every broad Elasticsearch/raw-log analysis question, call run_log_analysis exactly once with the user's question, absolute time range, source_name, and index_like when known.
+      For every broad Elasticsearch/raw-log analysis question, call run_log_analysis exactly once with the user's question and absolute time range. The workflow selects the configured log source and index pattern internally.
+      If the user also requests a dashboard, after run_log_analysis returns call create_grafana_dashboard_from_analysis exactly once with its investigation_id. Never call run_log_analysis a second time to prepare a dashboard.
       Do not manually orchestrate queue internals. Do not call or expect per-batch map tools.
       The map queue is an internal workflow mechanism: ClickHouse stores the queue and executes aiGenerate map/reduce SQL; ads-log-workflow MCP repeats the internal steps until completion, timeout, or a terminal partial result.
       Use get_log_analysis_status only when the user asks for progress on a known investigation_id.

@@ -129,6 +129,158 @@ def _panel(panel_id: int, title: str, panel_type: str, raw_sql: str, x: int, y: 
     return panel
 
 
+def _stat_panel(
+    panel_id: int,
+    title: str,
+    raw_sql: str,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    defaults: Dict[str, Any],
+) -> Dict[str, Any]:
+    panel = _panel(panel_id, title, "stat", raw_sql, x, y, w, h)
+    panel["fieldConfig"] = {"defaults": defaults, "overrides": []}
+    return panel
+
+
+def _text_panel(panel_id: int, title: str, markdown: str, x: int, y: int, w: int, h: int) -> Dict[str, Any]:
+    return {
+        "id": panel_id,
+        "title": title,
+        "type": "text",
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "options": {"content": markdown, "mode": "markdown"},
+        "transparent": True,
+    }
+
+
+def _business_chart_panel(
+    panel_id: int,
+    title: str,
+    raw_sql: str,
+    option_script: str,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+) -> Dict[str, Any]:
+    return {
+        "id": panel_id,
+        "title": title,
+        "type": "volkovlabs-echarts-panel",
+        "pluginVersion": "6.5.0",
+        "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse-analytics"},
+        "gridPos": {"x": x, "y": y, "w": w, "h": h},
+        "targets": [_target(raw_sql)],
+        "fieldConfig": {"defaults": {}, "overrides": []},
+        "options": {
+            # Keep the complete Business Charts v6 schema. Grafana does not
+            # reliably hydrate omitted plugin defaults in saved dashboards.
+            "editorMode": "code",
+            "editor": {"format": "auto", "height": 280},
+            "followTheme": True,
+            "getOption": option_script,
+            "map": "none",
+            "renderer": "canvas",
+            "themeEditor": {"name": "default", "config": "{}"},
+            "visualEditor": {"dataset": [], "series": [], "code": "return {};"},
+        },
+    }
+
+
+def _analysis_summary(investigation_id: str) -> Dict[str, Any]:
+    result = _clickhouse_query(
+        f"""
+SELECT summary_json
+FROM analytics.llm_reduce_results FINAL
+WHERE investigation_id = {_sql_string(investigation_id)}
+  AND reduce_level = 2
+ORDER BY created_at DESC
+LIMIT 1
+"""
+    )
+    if not result:
+        return {}
+    try:
+        return json.loads(str(result[0].get("summary_json", "{}")))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _markdown_items(items: Any, empty: str) -> str:
+    if not isinstance(items, list) or not items:
+        return empty
+    return "\n".join(f"- {str(item)}" for item in items[:4])
+
+
+SERVICE_IMPACT_OPTION = """
+const frame = context.panel.data.series[0];
+if (!frame) {
+  return { title: { text: 'Нет обнаруженных инцидентов', left: 'center', top: 'center' } };
+}
+const values = (name) => {
+  const field = frame.fields.find((item) => item.name === name);
+  const raw = field?.values;
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw?.buffer)) return raw.buffer;
+  if (typeof raw?.toArray === 'function') return raw.toArray();
+  return Array.from(raw || []);
+};
+const services = values('service');
+const events = values('events');
+const severityScores = values('severity_score');
+const severityColors = { 4: '#e5484d', 3: '#f5a524', 2: '#4c9aff', 1: '#46a758' };
+return {
+  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+  grid: { left: 16, right: 36, top: 12, bottom: 8, containLabel: true },
+  xAxis: { type: 'value', splitLine: { lineStyle: { color: 'rgba(127,127,127,0.16)' } } },
+  yAxis: { type: 'category', inverse: true, data: services, axisTick: { show: false }, axisLine: { show: false } },
+  series: [{
+    name: 'Инциденты',
+    type: 'bar',
+    data: events.map((value, index) => ({ value, itemStyle: { color: severityColors[severityScores[index]] || '#4c9aff' } })),
+    barMaxWidth: 28,
+    label: { show: true, position: 'right', formatter: '{c}' },
+    itemStyle: { borderRadius: [0, 4, 4, 0] },
+  }],
+};
+""".strip()
+
+
+SEVERITY_OPTION = """
+const frame = context.panel.data.series[0];
+if (!frame) {
+  return { title: { text: 'Нет данных о серьёзности', left: 'center', top: 'center' } };
+}
+const values = (name) => {
+  const field = frame.fields.find((item) => item.name === name);
+  const raw = field?.values;
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw?.buffer)) return raw.buffer;
+  if (typeof raw?.toArray === 'function') return raw.toArray();
+  return Array.from(raw || []);
+};
+const severity = values('severity');
+const events = values('events');
+const colors = { 'Критическая': '#e5484d', 'Высокая': '#f5a524', 'Средняя': '#4c9aff', 'Низкая': '#46a758' };
+return {
+  tooltip: { trigger: 'item', valueFormatter: (value) => `${value} событий` },
+  legend: { bottom: 0, icon: 'circle', textStyle: { fontSize: 11 } },
+  series: [{
+    type: 'pie',
+    radius: ['48%', '74%'],
+    center: ['50%', '43%'],
+    itemStyle: { borderColor: 'transparent', borderRadius: 5, borderWidth: 2 },
+    label: { show: false },
+    labelLine: { show: false },
+    emphasis: { label: { show: true, formatter: '{b} {d}%', fontWeight: 'bold' } },
+    data: severity.map((name, index) => ({ value: events[index], name, itemStyle: { color: colors[name] || '#8b8d98' } })),
+  }],
+};
+""".strip()
+
+
 def _analysis_metadata(investigation_id: str) -> Dict[str, Any]:
     if not investigation_id:
         return {}
@@ -150,83 +302,116 @@ LIMIT 1
 
 def _dashboard_for_analysis(investigation_id: str, title: str, request: str) -> Dict[str, Any]:
     meta = _analysis_metadata(investigation_id)
+    summary = _analysis_summary(investigation_id)
     inv = _sql_string(investigation_id)
-    dashboard_title = title or f"ADS-2 Log Analysis - {investigation_id}"
+    dashboard_title = title or f"ADS-2 Анализ логов - {investigation_id}"
     if investigation_id not in dashboard_title:
         dashboard_title = f"{dashboard_title} ({investigation_id})"
     time_from = _grafana_time(str(meta.get("time_from", "")), "now-30d")
     time_to = _grafana_time(str(meta.get("time_to", "")), "now")
     tags = sorted({"ads-2", "log-analysis", investigation_id})
 
+    executive_summary = str(summary.get("executive_summary") or "Финальный вывод расследования пока не сформирован.")
+    overview_markdown = (
+        f"## Вывод расследования\n\n{executive_summary}\n\n"
+        f"### Основные гипотезы\n{_markdown_items(summary.get('root_causes'), '- Нет подтвержденных гипотез.') }"
+    )
+    actions_markdown = (
+        "## Приоритетные действия\n\n"
+        f"{_markdown_items(summary.get('recommendations'), '- Рекомендации появятся после Reduce.') }"
+    )
+    issue_count = (
+        "arraySum(arrayMap(value -> toUInt64OrZero(value), "
+        "extractAll(JSONExtractString(issue, 'count_or_weight'), '\\\\d+')))"
+    )
+
     mapped_logs_sql = f"""
 SELECT sum(rows_read) AS mapped_logs
 FROM analytics.llm_map_results FINAL
 WHERE investigation_id = {inv}
 """
-    confidence_sql = f"""
-SELECT JSONExtractFloat(summary_json, 'confidence') AS reduce_confidence
-FROM analytics.llm_reduce_results FINAL
-WHERE investigation_id = {inv}
-  AND reduce_level = 2
-"""
-    service_events_sql = f"""
+    completion_sql = f"""
 SELECT
-  toStartOfHour(greatest(v.event_time_from, i.time_from)) AS time,
-  JSONExtractString(t, 'top_service') AS service,
-  sum(JSONExtractUInt(t, 'event_count')) AS events
-FROM analytics.v_es_log_map_batch_inputs AS v
-INNER JOIN analytics.llm_investigations AS i FINAL
-  ON i.investigation_id = {inv}
-ARRAY JOIN JSONExtractArrayRaw(v.map_input_json, 'important_templates') AS t
-WHERE v.batch_id IN
-(
-  SELECT batch_id
-  FROM analytics.llm_map_results FINAL
-  WHERE investigation_id = {inv}
-)
-  AND v.event_time_to >= i.time_from
-  AND v.event_time_from < i.time_to
-  AND lower(JSONExtractString(t, 'top_level')) IN ('warn', 'error')
-GROUP BY time, service
-ORDER BY time, service
-"""
-    top_problems_sql = f"""
-SELECT
-  JSONExtractString(t, 'top_service') AS service,
-  JSONExtractString(t, 'template_text') AS problem,
-  lower(JSONExtractString(t, 'top_level')) AS level,
-  sum(JSONExtractUInt(t, 'event_count')) AS events
-FROM analytics.v_es_log_map_batch_inputs AS v
-ARRAY JOIN JSONExtractArrayRaw(v.map_input_json, 'important_templates') AS t
-WHERE v.batch_id IN
-(
-  SELECT batch_id
-  FROM analytics.llm_map_results FINAL
-  WHERE investigation_id = {inv}
-)
-  AND lower(JSONExtractString(t, 'top_level')) IN ('warn', 'error')
-GROUP BY service, problem, level
-ORDER BY events DESC
-LIMIT 50
-"""
-    reduce_summary_sql = f"""
-SELECT 'top_service' AS kind, arrayJoin(JSONExtract(summary_json, 'top_services', 'Array(String)')) AS item
-FROM analytics.llm_reduce_results FINAL
-WHERE investigation_id = {inv} AND reduce_level = 2
-UNION ALL
-SELECT 'root_cause' AS kind, arrayJoin(JSONExtract(summary_json, 'root_causes', 'Array(String)')) AS item
-FROM analytics.llm_reduce_results FINAL
-WHERE investigation_id = {inv} AND reduce_level = 2
-UNION ALL
-SELECT 'recommendation' AS kind, arrayJoin(JSONExtract(summary_json, 'recommendations', 'Array(String)')) AS item
-FROM analytics.llm_reduce_results FINAL
-WHERE investigation_id = {inv} AND reduce_level = 2
-"""
-    queue_sql = f"""
-SELECT status, batches, rows_read, event_time_from, event_time_to
+  if(sum(batches) = 0, 0, sumIf(batches, status = 'done') / sum(batches)) AS completion
 FROM analytics.v_llm_map_queue_status
 WHERE investigation_id = {inv}
-ORDER BY status
+"""
+
+    service_impact_sql = f"""
+SELECT
+  JSONExtractString(issue, 'service') AS service,
+  sum({issue_count}) AS events,
+  max(multiIf(
+    lower(JSONExtractString(issue, 'severity')) = 'critical', 4,
+    lower(JSONExtractString(issue, 'severity')) = 'high', 3,
+    lower(JSONExtractString(issue, 'severity')) = 'medium', 2,
+    1
+  )) AS severity_score
+FROM analytics.llm_map_results FINAL
+ARRAY JOIN JSONExtractArrayRaw(map_summary_json, 'errors_and_degradations') AS issue
+WHERE investigation_id = {inv}
+  AND JSONExtractString(issue, 'service') != ''
+GROUP BY service
+ORDER BY events DESC
+LIMIT 10
+"""
+
+    severity_mix_sql = f"""
+SELECT
+  multiIf(
+    lower(JSONExtractString(issue, 'severity')) = 'critical', 'Критическая',
+    lower(JSONExtractString(issue, 'severity')) = 'high', 'Высокая',
+    lower(JSONExtractString(issue, 'severity')) = 'medium', 'Средняя',
+    'Низкая'
+  ) AS severity,
+  sum({issue_count}) AS events
+FROM analytics.llm_map_results FINAL
+ARRAY JOIN JSONExtractArrayRaw(map_summary_json, 'errors_and_degradations') AS issue
+WHERE investigation_id = {inv}
+GROUP BY severity
+ORDER BY indexOf(['Критическая', 'Высокая', 'Средняя', 'Низкая'], severity)
+"""
+
+    timeline_sql = f"""
+SELECT
+  toStartOfHour(greatest(r.event_time_from, i.time_from)) AS time,
+  sum({issue_count}) AS "События"
+FROM analytics.llm_map_results AS r FINAL
+INNER JOIN analytics.llm_investigations AS i FINAL
+  ON i.investigation_id = r.investigation_id
+ARRAY JOIN JSONExtractArrayRaw(r.map_summary_json, 'errors_and_degradations') AS issue
+WHERE r.investigation_id = {inv}
+  AND JSONExtractString(issue, 'service') != ''
+GROUP BY time
+ORDER BY time
+"""
+
+    issue_details_sql = f"""
+SELECT
+  JSONExtractString(issue, 'service') AS "Сервис",
+  multiIf(
+    match(JSONExtractString(issue, 'symptom'), '[А-Яа-яЁё]'), JSONExtractString(issue, 'symptom'),
+    JSONExtractString(issue, 'service') = 'nova-inventory', 'Задержка репликации и конфликты версий',
+    JSONExtractString(issue, 'service') = 'vega-payments', 'Отказы и повторные попытки платёжного провайдера',
+    JSONExtractString(issue, 'service') = 'aurora-gateway', 'Кратковременные отказы внешних зависимостей',
+    JSONExtractString(issue, 'service') = 'lumen-notifications', 'Отказы и повторы внешнего провайдера уведомлений',
+    JSONExtractString(issue, 'service') = 'orion-checkout', 'Конфликты состояния и проверки заказа',
+    'Зафиксированный симптом'
+  ) AS "Симптом",
+  multiIf(
+    lower(JSONExtractString(issue, 'severity')) = 'critical', 'Критическая',
+    lower(JSONExtractString(issue, 'severity')) = 'high', 'Высокая',
+    lower(JSONExtractString(issue, 'severity')) = 'medium', 'Средняя',
+    'Низкая'
+  ) AS "Серьёзность",
+  sum({issue_count}) AS "События"
+FROM analytics.llm_map_results FINAL
+ARRAY JOIN JSONExtractArrayRaw(map_summary_json, 'errors_and_degradations') AS issue
+WHERE investigation_id = {inv}
+  AND JSONExtractString(issue, 'service') != ''
+GROUP BY "Сервис", "Симптом", "Серьёзность"
+ORDER BY indexOf(['Критическая', 'Высокая', 'Средняя', 'Низкая'], "Серьёзность"), "События" DESC
+LIMIT 30
 """
 
     return {
@@ -237,13 +422,42 @@ ORDER BY status
         "id": None,
         "links": [],
         "panels": [
-            _panel(1, "Mapped logs", "stat", mapped_logs_sql, 0, 0, 8, 5),
-            _panel(2, "Reduce confidence", "stat", confidence_sql, 8, 0, 8, 5),
-            _panel(3, "Queue status", "table", queue_sql, 16, 0, 8, 5),
-            _panel(4, "Problem events by service", "timeseries", service_events_sql, 0, 5, 24, 9),
-            _panel(5, "Top service problems", "table", top_problems_sql, 0, 14, 12, 8),
-            _panel(6, "Reduce findings and recommendations", "table", reduce_summary_sql, 12, 14, 12, 8),
+            _stat_panel(
+                1,
+                "Охват логов",
+                mapped_logs_sql,
+                0,
+                0,
+                12,
+                4,
+                {"color": {"mode": "fixed", "fixedColor": "green"}, "decimals": 0},
+            ),
+            _stat_panel(
+                2,
+                "Завершение Map",
+                completion_sql,
+                12,
+                0,
+                12,
+                4,
+                {
+                    "unit": "percentunit",
+                    "decimals": 0,
+                    "color": {"mode": "thresholds"},
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [{"color": "red", "value": None}, {"color": "orange", "value": 0.7}, {"color": "green", "value": 0.99}],
+                    },
+                },
+            ),
+            _text_panel(4, "", overview_markdown, 0, 4, 24, 6),
+            _business_chart_panel(5, "Затронутые сервисы", service_impact_sql, SERVICE_IMPACT_OPTION, 0, 10, 16, 10),
+            _business_chart_panel(6, "Распределение по серьёзности", severity_mix_sql, SEVERITY_OPTION, 16, 10, 8, 10),
+            _panel(7, "Динамика инцидентов", "timeseries", timeline_sql, 0, 20, 24, 9),
+            _text_panel(8, "", actions_markdown, 0, 29, 8, 10),
+            _panel(9, "Симптомы и факты", "table", issue_details_sql, 8, 29, 16, 10),
         ],
+        "description": "Операционный дашборд расследования логов ADS-2.",
         "refresh": "",
         "schemaVersion": 40,
         "tags": tags,
@@ -261,7 +475,7 @@ ORDER BY status
 @mcp.tool()
 def create_grafana_dashboard_from_analysis(
     investigation_id: str = "",
-    title: str = "ADS-2 Log Analysis",
+    title: str = "ADS-2 Анализ логов",
     request: str = "",
 ) -> str:
     """Create or update the ADS-2 Grafana dashboard for an ADS log analysis and return its public URL."""

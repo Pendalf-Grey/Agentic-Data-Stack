@@ -92,6 +92,21 @@ ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(event_time_from)
 ORDER BY (investigation_id, batch_no, batch_id);
 
+CREATE TABLE IF NOT EXISTS analytics.llm_map_inputs
+(
+  investigation_id String,
+  batch_id String,
+  batch_no UInt64,
+  event_time_from DateTime64(3, 'UTC'),
+  event_time_to DateTime64(3, 'UTC'),
+  rows_read UInt64,
+  map_input_json String,
+  created_at DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(created_at)
+PARTITION BY toYYYYMM(event_time_from)
+ORDER BY (investigation_id, batch_no, batch_id);
+
 CREATE TABLE IF NOT EXISTS analytics.llm_reduce_results
 (
   investigation_id String,

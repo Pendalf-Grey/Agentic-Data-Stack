@@ -22,6 +22,51 @@ function hasTenantMismatch(job, user) {
   return job.metadata?.tenantId != null && job.metadata.tenantId !== user.tenantId;
 }
 
+async function cancelActiveAdsWorkflows({ userId, conversationId }) {
+  const activeWorkflows = globalThis.__adsActiveWorkflowRegistry;
+  if (!(activeWorkflows instanceof Map)) {
+    return;
+  }
+
+  const userWorkflows = [...activeWorkflows.values()].filter(
+    (workflow) => workflow?.userId === userId && workflow?.investigationId,
+  );
+  const matchingWorkflows = userWorkflows.filter(
+    (workflow) => workflow.conversationId && workflow.conversationId === conversationId,
+  );
+  const workflowsToCancel =
+    matchingWorkflows.length > 0 ? matchingWorkflows : userWorkflows.length === 1 ? userWorkflows : [];
+  const controlToken = process.env.ADS_WORKFLOW_CONTROL_TOKEN;
+
+  if (!controlToken || workflowsToCancel.length === 0) {
+    return;
+  }
+
+  await Promise.allSettled(
+    workflowsToCancel.map(async (workflow) => {
+      const response = await fetch('http://mcp-log-workflow:8000/internal/ads/workflow/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-ADS-Workflow-Control-Token': controlToken,
+        },
+        body: JSON.stringify({ investigation_id: workflow.investigationId }),
+      });
+
+      if (!response.ok) {
+        throw new Error('ADS workflow cancellation failed with status ' + response.status);
+      }
+
+      logger.info(
+        '[AgentStream] Cancelled ADS workflow ' +
+          workflow.investigationId +
+          ' for conversation ' +
+          conversationId,
+      );
+    }),
+  );
+}
+
 const router = express.Router();
 
 /**
@@ -254,6 +299,7 @@ router.post('/chat/abort', async (req, res) => {
     }
 
     logger.debug(`[AgentStream] Job found, aborting: ${jobStreamId}`);
+    await cancelActiveAdsWorkflows({ userId, conversationId: jobStreamId });
     const abortResult = await GenerationJobManager.abortJob(jobStreamId);
     logger.debug(`[AgentStream] Job aborted successfully: ${jobStreamId}`, {
       abortResultSuccess: abortResult.success,

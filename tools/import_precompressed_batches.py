@@ -288,8 +288,14 @@ def main() -> int:
     parser.add_argument("--table", default="analytics.es_log_compressed_batches")
     parser.add_argument("--user", default=os.getenv("CLICKHOUSE_USER", "analytics"))
     parser.add_argument("--password", default=os.getenv("CLICKHOUSE_PASSWORD", "analytics_password"))
-    parser.add_argument("--source-name", default=os.getenv("LOGS_SOURCE_NAME", "elasticsearch-synthetic"))
-    parser.add_argument("--index-name", default=os.getenv("LOGS_INDEX_NAME", "synthetic-logs"))
+    parser.add_argument(
+        "--source-name",
+        default=os.getenv("LOGS_SOURCE_NAME", os.getenv("ADS_LLM_LOG_SOURCE_NAME", "elasticsearch-synthetic")),
+    )
+    parser.add_argument(
+        "--index-name",
+        default=os.getenv("LOGS_INDEX_NAME", "synthetic-logs"),
+    )
     parser.add_argument("--max-runs-per-batch", type=int, default=int(os.getenv("PRECOMPRESSED_MAX_RUNS_PER_BATCH", "1000")))
     parser.add_argument("--max-compressed-chars", type=int, default=int(os.getenv("PRECOMPRESSED_MAX_COMPRESSED_CHARS", "250000")))
     parser.add_argument("--insert-batches", type=int, default=25)

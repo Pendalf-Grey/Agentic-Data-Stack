@@ -59,6 +59,7 @@ Return valid JSON only, no Markdown.
 The response must be complete and parseable as JSON. Do not stop mid-string.
 Be detailed enough for a reduce model to make an investigation-level conclusion without rereading the batch.
 Use concise natural language inside fields, but do not over-compress the meaning.
+Write every human-readable string value in Russian (Cyrillic). Preserve JSON keys, service identifiers, host names, metric names, timestamps, error codes, and field names unchanged.
 
 Use these top-level keys:
 {
